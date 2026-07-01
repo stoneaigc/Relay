@@ -1,0 +1,60 @@
+# RunAPI 默认配置。可被环境变量覆盖,前缀 RUNAPI_(双下划线分隔层级)。
+# 示例:RUNAPI_SERVER__BIND=0.0.0.0:9000
+
+[server]
+bind = "0.0.0.0:8080"
+
+[database]
+# type: sqlite(默认) | postgres
+type = "postgres"
+
+# --- SQLite:用 url(切回 sqlite 时取消注释)---
+# url = "sqlite://runapi.db"
+
+# --- Postgres:分项配置,密码含 @ ! / # 等特殊字符无需转义 ---
+host = "127.0.0.1"
+port = 5432
+user = "postgres"
+password = "your-postgres-password"
+dbname = "run-api"
+
+[cache]
+# type: memory(默认,进程内)| redis(多实例共享)
+type = "redis"
+# --- Redis:分项配置(type=redis 时),密码特殊字符无需转义 ---
+host = "127.0.0.1"
+port = 6379
+password = "your-redis-password"
+db = 0
+# 或直接给完整 url:
+# url = "redis://:password@127.0.0.1:6379/0"
+
+[auth]
+# 生产务必通过环境变量 RUNAPI_AUTH__JWT_SECRET 覆盖
+jwt_secret = "dev-secret-change-me"
+session_ttl_secs = 604800
+
+[admin]
+username = "admin"
+password = "QQYMDLWbzglzds@!!"
+
+# 邮箱验证码 SMTP。smtp_host 为空=开发模式(验证码打日志并在响应里返回)。
+# 端口:465=隐式 TLS(SSL),587/25=STARTTLS,代码按端口自动选择。
+# password 填「客户端授权码」而非登录密码;from 留空则自动用 username。
+# 例(网易):RUNAPI_EMAIL__SMTP_HOST=smtp.163.com RUNAPI_EMAIL__SMTP_PORT=465 RUNAPI_EMAIL__USERNAME=xxx@163.com RUNAPI_EMAIL__PASSWORD=授权码
+# 例(QQ):  RUNAPI_EMAIL__SMTP_HOST=smtp.qq.com  RUNAPI_EMAIL__SMTP_PORT=465 RUNAPI_EMAIL__USERNAME=xxx@qq.com  RUNAPI_EMAIL__PASSWORD=授权码
+[email]
+smtp_host = "smtp.163.com"
+smtp_port = 465
+username = "your-email-username"
+password = "your-email-password"
+from = ""
+
+# 全局默认限额(用户未单独设置时生效)
+[defaults]
+concurrency_limit = 16
+signup_grant_tokens = 10_000_000   # 新用户赠送 1000 万 token
+
+# 注:奖励任务(star / issue / 提建议 等)以及 供应商 / 模型 / 模型组 / 路由,
+# 全部由管理后台维护并持久化到数据库,不在此配置;首次启动会自动播种 3 个示例奖励任务。
+# 这里只放全局默认、鉴权、邮箱、缓存等。

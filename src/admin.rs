@@ -1,0 +1,849 @@
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
+use axum::{
+    extract::{Path, State},
+    http::HeaderMap,
+    Json,
+};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+use crate::config::ProviderKind;
+use crate::error::ApiError;
+use crate::state::{AppState, UserState};
+use crate::{jwt, storage};
+
+/// 任何模型/组/路由改动后,从 DB 重建内存路由图。
+async fn rebuild_routing(state: &AppState) -> Result<(), ApiError> {
+    let r = storage::load_routing(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    state.routing.store(Arc::new(r));
+    Ok(())
+}
+
+fn admin_guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let cfg = state.config();
+    jwt::from_headers(&cfg.auth.jwt_secret, headers, "admin").map(|_| ())
+}
+
+#[derive(Deserialize)]
+pub struct AdminLogin {
+    pub username: String,
+    pub password: String,
+}
+
+/// POST /admin/auth/login
+pub async fn login(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AdminLogin>,
+) -> Result<Json<Value>, ApiError> {
+    let (ok, secret, ttl) = {
+        let cfg = state.config();
+        (
+            body.username == cfg.admin.username && body.password == cfg.admin.password,
+            cfg.auth.jwt_secret.clone(),
+            cfg.auth.session_ttl_secs,
+        )
+    };
+    if !ok {
+        return Err(ApiError::Unauthorized);
+    }
+    let token = jwt::issue(&secret, &body.username, "admin", ttl)?;
+    Ok(Json(json!({ "token": token })))
+}
+
+/// GET /admin/overview —— 概览统计(累计)。
+pub async fn overview(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let data = storage::overview(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(data))
+}
+
+#[derive(Deserialize)]
+pub struct SeriesQuery {
+    #[serde(default)]
+    pub granularity: Option<String>,
+}
+
+/// GET /admin/overview/series?granularity=day|week|month —— 全站消耗趋势。
+pub async fn overview_series(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<SeriesQuery>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let tz = state.config().defaults.tz_offset_hours;
+    let gran = q.granularity.as_deref().unwrap_or("day");
+    // 默认窗口:日 30、周 12、月 12。
+    let periods = match gran {
+        "week" | "month" => 12,
+        _ => 30,
+    };
+    let data = storage::global_series(&state.db, gran, periods, tz)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "granularity": gran, "data": data })))
+}
+
+/// GET /admin/users —— 所有用户(余额取内存实时值)。
+pub async fn list_users(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let rows = storage::list_users(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let tz = state.config().defaults.tz_offset_hours;
+    let used_map = storage::usage_by_user(&state.db, None).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    let today_map = storage::usage_by_user(&state.db, Some(storage::today_start(tz))).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let data: Vec<Value> = rows
+        .iter()
+        .map(|u| {
+            let live = state.user(&u.id);
+            let balance = live.as_ref().map(|x| x.balance()).unwrap_or(u.token_balance);
+            let uid = u.id.to_string();
+            let used = used_map.get(&uid).copied().unwrap_or(0);
+            let today = today_map.get(&uid).copied().unwrap_or(0);
+            json!({
+                "id": u.id,
+                "username": u.username,
+                "email": u.email,
+                "phone": u.phone,
+                "status": u.status,
+                "balance": balance,
+                "used": used,
+                "today": today,
+                "granted": used + balance,
+                "concurrency_limit": live.as_ref().map(|x| x.concurrency_limit.load(Ordering::Relaxed) as i64).or(u.concurrency_limit),
+                "group_id": live.as_ref().map(|x| x.group()).unwrap_or(u.group_id.unwrap_or(0)),
+                "source": u.source,
+                "created_at": u.created_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "data": data })))
+}
+
+#[derive(Deserialize)]
+pub struct CreateUser {
+    pub username: String,
+    pub password: String,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub group_id: Option<i64>,
+    pub grant_tokens: Option<i64>,
+    pub concurrency_limit: Option<i64>,
+}
+
+/// POST /admin/users
+pub async fn create_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CreateUser>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if body.username.trim().is_empty() || body.password.is_empty() {
+        return Err(ApiError::BadRequest("username and password required".into()));
+    }
+    let (grant, default_limit) = {
+        let cfg = state.config();
+        (
+            body.grant_tokens.unwrap_or(cfg.defaults.signup_grant_tokens),
+            cfg.defaults.concurrency_limit,
+        )
+    };
+    let limit = body.concurrency_limit.map(|v| v as u32).unwrap_or(default_limit);
+    let gid = body.group_id.filter(|g| *g > 0);
+    let pwhash = storage::hash_password(&body.password);
+    let email = body.email.as_deref().filter(|s| !s.is_empty());
+    let phone = body.phone.as_deref().filter(|s| !s.is_empty());
+
+    let id = storage::admin_create_user(&state.db, body.username.trim(), &pwhash, email, phone, grant, gid, "admin")
+        .await
+        .map_err(|_| ApiError::BadRequest("用户名或手机号已存在".into()))?;
+    if let Some(cl) = body.concurrency_limit {
+        storage::update_user(&state.db, id, Some(cl), None, None).await.ok();
+    }
+    state.users.insert(
+        id,
+        Arc::new(UserState::new(id, grant, limit, 0, 1.0, gid.unwrap_or(0))),
+    );
+    Ok(Json(json!({ "id": id })))
+}
+
+/// GET /admin/users/:id
+pub async fn get_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let u = storage::get_user(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or_else(|| ApiError::BadRequest("user not found".into()))?;
+    let balance = state.user(&id).map(|x| x.balance()).unwrap_or(u.token_balance);
+    Ok(Json(json!({
+        "id": u.id,
+        "phone": u.phone,
+        "status": u.status,
+        "balance": balance,
+        "used_total": u.token_used_total,
+        "concurrency_limit": u.concurrency_limit,
+        "multiplier": u.bill_multiplier,
+        "created_at": u.created_at,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct PatchUser {
+    pub concurrency_limit: Option<i64>,
+    pub status: Option<i64>,
+    pub add_tokens: Option<i64>,
+    pub bill_multiplier: Option<f64>,
+    pub group_id: Option<i64>, // 绑定模型组(0 = 解绑)
+    pub username: Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub password: Option<String>, // 留空不改
+}
+
+/// PATCH /admin/users/:id —— 设并发/状态/增减额度(同步内存 + DB)。
+pub async fn patch_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PatchUser>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+
+    storage::update_user(&state.db, id, body.concurrency_limit, body.status, body.bill_multiplier)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if let Some(delta) = body.add_tokens {
+        storage::add_tokens(&state.db, id, delta)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
+
+    if let Some(u) = state.user(&id) {
+        if let Some(cl) = body.concurrency_limit {
+            u.concurrency_limit.store(cl as u32, Ordering::Relaxed);
+        }
+        if let Some(st) = body.status {
+            u.status.store(st as u8, Ordering::Relaxed);
+        }
+        if let Some(delta) = body.add_tokens {
+            u.token_balance.fetch_add(delta, Ordering::Relaxed);
+        }
+        if let Some(m) = body.bill_multiplier {
+            u.set_bill_multiplier(m);
+        }
+    }
+
+    if let Some(gid) = body.group_id {
+        let g = if gid > 0 { Some(gid) } else { None };
+        storage::set_user_group(&state.db, id, g)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        if let Some(u) = state.user(&id) {
+            u.group_id.store(gid.max(0), Ordering::Relaxed);
+        }
+    }
+
+    // 资料字段(用户名/邮箱/手机/密码,提供了才改)。
+    let pwhash = body.password.as_deref().filter(|p| !p.is_empty()).map(storage::hash_password);
+    if body.username.is_some() || body.email.is_some() || body.phone.is_some() || pwhash.is_some() {
+        storage::update_user_fields(
+            &state.db,
+            id,
+            body.username.as_deref().map(|s| s.trim()),
+            body.email.as_deref(),
+            body.phone.as_deref(),
+            pwhash.as_deref(),
+        )
+        .await
+        .map_err(|_| ApiError::BadRequest("用户名或手机号已被占用".into()))?;
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// DELETE /admin/users/:id —— 删除用户(连同其 Key)。
+pub async fn delete_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let hashes = storage::delete_user(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    for h in hashes {
+        state.keys.remove(&h);
+    }
+    state.users.remove(&id);
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// GET /admin/users/:id/series —— 该用户最近 N 天每日消耗(默认 30 天)。
+pub async fn user_series(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let tz = state.config().defaults.tz_offset_hours;
+    let data = storage::user_daily_series(&state.db, id, 30, tz)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "data": data })))
+}
+
+/// GET /admin/users/:id/usage
+pub async fn user_usage(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let rows = storage::usage_rows(&state.db, Some(id), 200)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "data": rows })))
+}
+
+/// GET /admin/usage —— 全局用量
+pub async fn global_usage(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let rows = storage::usage_rows(&state.db, None, 200)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "data": rows })))
+}
+
+// ---- 奖励任务(后台配置)----
+
+/// GET /admin/reward-tasks —— 奖励任务列表(含未启用)。
+pub async fn list_reward_tasks(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let data = storage::list_reward_tasks(&state.db, false)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "data": data })))
+}
+
+#[derive(Deserialize)]
+pub struct RewardTaskBody {
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub evidence_type: String, // screenshot | link | text | none
+    #[serde(default)]
+    pub variable: bool,
+    #[serde(default)]
+    pub reward_tokens: i64,
+    #[serde(default)]
+    pub reward_min: i64,
+    #[serde(default)]
+    pub reward_max: i64,
+    #[serde(default)]
+    pub link_url: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub sort: i64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// 校验并规整任务字段。
+fn validate_reward_task(b: &RewardTaskBody) -> Result<(), ApiError> {
+    if b.title.trim().is_empty() {
+        return Err(ApiError::BadRequest("标题不能为空".into()));
+    }
+    if !matches!(b.evidence_type.as_str(), "screenshot" | "link" | "text" | "none") {
+        return Err(ApiError::BadRequest("evidence_type 必须为 screenshot|link|text|none".into()));
+    }
+    if b.variable {
+        if b.reward_min < 0 || b.reward_max < b.reward_min {
+            return Err(ApiError::BadRequest("区间额度需满足 0 <= 下限 <= 上限".into()));
+        }
+    } else if b.reward_tokens <= 0 {
+        return Err(ApiError::BadRequest("固定额度需大于 0".into()));
+    }
+    Ok(())
+}
+
+fn opt_trim(s: &Option<String>) -> Option<&str> {
+    s.as_deref().map(str::trim).filter(|v| !v.is_empty())
+}
+
+/// POST /admin/reward-tasks —— 新建奖励任务。
+pub async fn create_reward_task(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<RewardTaskBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    validate_reward_task(&body)?;
+    let id = storage::create_reward_task(
+        &state.db,
+        body.title.trim(),
+        opt_trim(&body.description),
+        &body.evidence_type,
+        body.variable,
+        body.reward_tokens,
+        body.reward_min,
+        body.reward_max,
+        opt_trim(&body.link_url),
+        body.enabled,
+        body.sort,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "id": id })))
+}
+
+/// PATCH /admin/reward-tasks/:id —— 更新奖励任务。
+pub async fn update_reward_task(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<RewardTaskBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    validate_reward_task(&body)?;
+    storage::update_reward_task(
+        &state.db,
+        id,
+        body.title.trim(),
+        opt_trim(&body.description),
+        &body.evidence_type,
+        body.variable,
+        body.reward_tokens,
+        body.reward_min,
+        body.reward_max,
+        opt_trim(&body.link_url),
+        body.enabled,
+        body.sort,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// DELETE /admin/reward-tasks/:id —— 删除奖励任务(不影响历史申领记录)。
+pub async fn delete_reward_task(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    storage::delete_reward_task(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---- 奖励申领审核 ----
+
+#[derive(Deserialize)]
+pub struct RewardQuery {
+    #[serde(default)]
+    pub status: Option<String>, // pending | approved | rejected | all(默认全部)
+}
+
+/// GET /admin/rewards?status=pending|approved|rejected —— 奖励申领列表。
+pub async fn list_rewards(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<RewardQuery>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let status = match q.status.as_deref() {
+        Some("pending") => Some(0),
+        Some("approved") => Some(1),
+        Some("rejected") => Some(2),
+        _ => None,
+    };
+    let data = storage::list_reward_claims(&state.db, status)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "data": data })))
+}
+
+#[derive(Deserialize)]
+pub struct ReviewReward {
+    pub approve: bool,
+    #[serde(default)]
+    pub note: Option<String>,
+    /// 区间类任务通过时由管理员评定的入账额度(固定额度任务忽略此字段)。
+    #[serde(default)]
+    pub reward_tokens: Option<i64>,
+}
+
+/// POST /admin/rewards/:id/review —— 通过 / 驳回;通过则把奖励 token 入账(同步内存 + DB)。
+pub async fn review_reward(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ReviewReward>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+
+    let claim = storage::get_reward_claim(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or_else(|| ApiError::BadRequest("申领不存在".into()))?;
+    if claim.status != 0 {
+        return Err(ApiError::BadRequest("该申领已审核,不能重复操作".into()));
+    }
+
+    // 计算通过时入账/记录的额度:区间类任务由管理员在 [min,max] 内评定;固定类用申领时记录的额度。
+    let (credit, store_tokens) = if body.approve {
+        if claim.variable {
+            let (lo, hi) = (claim.reward_min, claim.reward_max);
+            let amt = body.reward_tokens.ok_or_else(|| ApiError::BadRequest("请填写入账额度".into()))?;
+            if amt < lo || amt > hi {
+                return Err(ApiError::BadRequest(format!("入账额度需在 {lo} ~ {hi} 之间")));
+            }
+            (amt, Some(amt))
+        } else {
+            (claim.reward_tokens, None)
+        }
+    } else {
+        (0, None)
+    };
+
+    let new_status = if body.approve { 1 } else { 2 };
+    let note = body.note.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let changed = storage::review_reward_claim(&state.db, id, new_status, note, store_tokens)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // 并发下若已被他人审核,changed=0:不重复入账。
+    if changed == 0 {
+        return Err(ApiError::BadRequest("该申领已审核,不能重复操作".into()));
+    }
+
+    // 仅通过时入账。先写 DB,再同步内存余额。
+    if body.approve {
+        storage::add_tokens(&state.db, claim.user_id, credit)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        if let Some(u) = state.user(&claim.user_id) {
+            u.token_balance.fetch_add(credit, Ordering::Relaxed);
+        }
+    }
+    Ok(Json(json!({ "ok": true, "approved": body.approve, "reward_tokens": credit })))
+}
+
+/// GET /admin/config —— 供应商与路由(供管理端展示)。
+// ---- 模型(三方模型,自带上游连接)----
+
+/// GET /admin/models
+pub async fn list_models(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let data = storage::list_models(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "data": data })))
+}
+
+#[derive(Deserialize)]
+pub struct AddModel {
+    pub label: Option<String>,  // 备注/显示名
+    pub kind: String,           // openai | anthropic
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub upstream_model: String, // 供应商上的真实模型名
+}
+
+/// POST /admin/models —— 添加三方模型(自动建好它的上游连接)。
+pub async fn add_model(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<AddModel>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if !matches!(body.kind.as_str(), "openai" | "anthropic") {
+        return Err(ApiError::BadRequest("kind must be openai|anthropic".into()));
+    }
+    if body.base_url.trim().is_empty() || body.upstream_model.trim().is_empty() {
+        return Err(ApiError::BadRequest("base_url and upstream_model required".into()));
+    }
+    let provider = format!("prov-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    storage::upsert_provider(&state.db, &provider, &body.kind, &body.base_url, body.api_key.as_deref())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let id = storage::add_model(&state.db, &provider, &body.upstream_model, body.label.as_deref())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true, "id": id })))
+}
+
+/// POST /admin/models/:id/test —— 向上游发最小请求校验连通性/密钥/模型名。
+pub async fn test_model(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let (kind, base_url, api_key, upstream) = {
+        let routing = state.routing.load();
+        let m = routing.models.get(&id).ok_or_else(|| ApiError::BadRequest("model not found".into()))?;
+        let p = routing.providers.get(&m.provider).ok_or_else(|| ApiError::BadRequest("provider missing".into()))?;
+        (p.kind, p.base_url.clone(), p.api_key.clone(), m.upstream_model.clone())
+    };
+    let key = api_key.filter(|k| !k.is_empty());
+    let body = json!({ "model": upstream, "max_tokens": 1, "messages": [{ "role": "user", "content": "ping" }] });
+    let started = std::time::Instant::now();
+    let mut req = match kind {
+        ProviderKind::Openai => {
+            let mut rb = state.http.post(format!("{}/chat/completions", base_url.trim_end_matches('/')));
+            if let Some(k) = &key { rb = rb.bearer_auth(k); }
+            rb
+        }
+        ProviderKind::Anthropic => {
+            let mut rb = state
+                .http
+                .post(format!("{}/messages", base_url.trim_end_matches('/')))
+                .header("anthropic-version", "2023-06-01");
+            if let Some(k) = &key { rb = rb.header("x-api-key", k); }
+            rb
+        }
+    };
+    req = req.json(&body);
+
+    let resp = req
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await;
+    let latency = started.elapsed().as_millis() as u64;
+
+    match resp {
+        Ok(r) if r.status().is_success() => Ok(Json(json!({ "ok": true, "latency_ms": latency }))),
+        Ok(r) => {
+            let code = r.status().as_u16();
+            let body = r.text().await.unwrap_or_default();
+            let snippet: String = body.chars().take(200).collect();
+            Ok(Json(json!({ "ok": false, "error": format!("HTTP {code}: {snippet}") })))
+        }
+        Err(e) => Ok(Json(json!({ "ok": false, "error": e.to_string() }))),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UpdateModel {
+    pub kind: String,
+    pub base_url: String,
+    pub api_key: Option<String>, // 留空=保持原密钥
+    pub upstream_model: String,
+    pub label: Option<String>,
+}
+
+/// PATCH /admin/models/:id —— 编辑模型。
+pub async fn update_model(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<UpdateModel>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if !matches!(body.kind.as_str(), "openai" | "anthropic") {
+        return Err(ApiError::BadRequest("kind must be openai|anthropic".into()));
+    }
+    if body.base_url.trim().is_empty() || body.upstream_model.trim().is_empty() {
+        return Err(ApiError::BadRequest("base_url and upstream_model required".into()));
+    }
+    storage::update_model(&state.db, id, &body.kind, &body.base_url, body.api_key.as_deref(), &body.upstream_model, body.label.as_deref())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// DELETE /admin/models/:id
+pub async fn delete_model(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    storage::delete_model_cascade(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---- 模型组 ----
+
+/// GET /admin/groups
+pub async fn list_groups(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let data = storage::list_groups(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "data": data })))
+}
+
+#[derive(Deserialize)]
+pub struct AddGroup {
+    pub name: String,
+}
+
+/// POST /admin/groups
+pub async fn add_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<AddGroup>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if body.name.trim().is_empty() {
+        return Err(ApiError::BadRequest("name required".into()));
+    }
+    let id = storage::add_group(&state.db, body.name.trim())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true, "id": id })))
+}
+
+/// POST /admin/groups/:id/activate —— 设为激活(默认)组,新用户注册默认绑定。
+pub async fn activate_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    storage::set_active_group(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// DELETE /admin/groups/:id
+pub async fn delete_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    storage::delete_group(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---- 组内路由(对外模型名 -> 模型)----
+
+/// GET /admin/groups/:id/routes
+pub async fn list_routes(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let data = storage::list_routes(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "data": data })))
+}
+
+#[derive(Deserialize)]
+pub struct AddRoute {
+    pub public_name: String,
+    pub model_id: i64,
+    pub weight: Option<i64>,
+    pub multiplier: Option<f64>,
+}
+
+/// POST /admin/groups/:id/routes —— 对外模型名 -> 指定模型。
+pub async fn add_route(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(group_id): Path<i64>,
+    Json(body): Json<AddRoute>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if body.public_name.trim().is_empty() {
+        return Err(ApiError::BadRequest("public_name required".into()));
+    }
+    let id = storage::add_route(
+        &state.db,
+        group_id,
+        body.public_name.trim(),
+        body.model_id,
+        body.weight.unwrap_or(100),
+        body.multiplier.unwrap_or(1.0),
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true, "id": id })))
+}
+
+/// PATCH /admin/routes/:id —— 编辑组内路由。
+pub async fn update_route(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<AddRoute>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if body.public_name.trim().is_empty() {
+        return Err(ApiError::BadRequest("public_name required".into()));
+    }
+    storage::update_route(
+        &state.db,
+        id,
+        body.public_name.trim(),
+        body.model_id,
+        body.weight.unwrap_or(100),
+        body.multiplier.unwrap_or(1.0),
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// DELETE /admin/routes/:id
+pub async fn delete_route(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    storage::delete_route(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true })))
+}

@@ -1,0 +1,44 @@
+@import "tailwindcss";
+
+/* 简约浅色设计令牌 */
+@theme {
+  --color-background: #f7f7f8;
+  --color-foreground: #1f2228;
+  --color-card: #ffffff;
+  --color-card-foreground: #1f2228;
+  --color-popover: #ffffff;
+  --color-popover-foreground: #1f2228;
+  --color-primary: #1f2937;
+  --color-primary-foreground: #ffffff;
+  --color-secondary: #f1f2f4;
+  --color-secondary-foreground: #1f2228;
+  --color-muted: #f1f2f4;
+  --color-muted-foreground: #6b7280;
+  --color-accent: #f1f2f4;
+  --color-accent-foreground: #1f2228;
+  --color-destructive: #dc2626;
+  --color-destructive-foreground: #ffffff;
+  --color-success: #16a34a;
+  --color-border: #e7e8ec;
+  --color-input: #e1e3e8;
+  --color-ring: #c7cad1;
+}
+
+* {
+  border-color: var(--color-border);
+}
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.mono {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}

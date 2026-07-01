@@ -1,0 +1,18 @@
+# Rust
+/target
+
+# 前端
+node_modules/
+frontend/*/dist/
+
+# 运行时状态:SQLite 数据库
+*.db
+*.db-shm
+*.db-wal
+
+# 打包产物
+/dist
+*.tar.gz
+
+# 本地敏感配置(如把密钥写进了 default.toml,改用环境变量或本地覆盖文件)
+config/local.toml

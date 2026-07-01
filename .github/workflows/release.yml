@@ -1,0 +1,73 @@
+name: Release
+
+# 打 tag(v 开头)时自动构建并发布;也可在 Actions 页手动触发。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # 发布 Release 需要
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- 前端:admin / portal ----
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build admin frontend
+        working-directory: frontend/admin
+        run: npm ci && npm run build
+
+      - name: Build portal frontend
+        working-directory: frontend/portal
+        run: npm ci && npm run build
+
+      # ---- 后端:Rust release 二进制 ----
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build backend
+        run: cargo build --release --locked
+
+      # ---- 组装产物 ----
+      # 运行时路径(均相对工作目录):
+      #   ./runapi  ./config/default.toml  ./frontend/{admin,portal}/dist
+      - name: Assemble package
+        run: |
+          VERSION="${GITHUB_REF_NAME:-dev}"
+          PKG="runapi-${VERSION}-linux-x86_64"
+          mkdir -p "dist/${PKG}/config" \
+                   "dist/${PKG}/frontend/admin" \
+                   "dist/${PKG}/frontend/portal"
+          cp target/release/runapi          "dist/${PKG}/"
+          cp config/default.toml            "dist/${PKG}/config/"
+          cp -r frontend/admin/dist         "dist/${PKG}/frontend/admin/dist"
+          cp -r frontend/portal/dist        "dist/${PKG}/frontend/portal/dist"
+          # 部署脚本 + systemd 模板放到包根目录
+          install -m 0755 deploy/install.sh "dist/${PKG}/install.sh"
+          cp deploy/runapi.service          "dist/${PKG}/runapi.service"
+          tar -C dist -czf "${PKG}.tar.gz" "${PKG}"
+          echo "PKG=${PKG}" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG }}
+          path: ${{ env.PKG }}.tar.gz
+
+      # 仅在打 tag 时发布 Release
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.PKG }}.tar.gz
