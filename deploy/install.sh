@@ -15,11 +15,16 @@ fi
 echo "==> 安装目录:$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 
-# 二进制 + 前端:每次都更新
-echo "==> 更新二进制与前端资源"
-install -m 0755 "$SRC/runapi" "$INSTALL_DIR/runapi"
-rm -rf "$INSTALL_DIR/frontend"
-cp -r "$SRC/frontend" "$INSTALL_DIR/frontend"
+# 若在安装目录里(源=目标)执行,文件已就位,跳过自我拷贝,直接走 systemd。
+if [ "$SRC" = "$(cd "$INSTALL_DIR" && pwd)" ]; then
+  echo "==> 检测到在安装目录内运行,文件已就位,跳过拷贝"
+else
+  # 二进制 + 前端:每次都更新
+  echo "==> 更新二进制与前端资源"
+  install -m 0755 "$SRC/runapi" "$INSTALL_DIR/runapi"
+  rm -rf "$INSTALL_DIR/frontend"
+  cp -r "$SRC/frontend" "$INSTALL_DIR/frontend"
+fi
 
 # 配置:仅首次安装时写入,避免覆盖线上已改过的配置
 mkdir -p "$INSTALL_DIR/config"
