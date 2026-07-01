@@ -250,8 +250,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                     </CardContent>
                   </Card>
                   <div className="grid gap-5 md:grid-cols-2">
-                    <InterfaceCard kind="openai" label="OpenAI 接口" baseUrl="http://localhost:8080/v1" keys={keys} onReveal={setReveal} onChanged={refresh} />
-                    <InterfaceCard kind="anthropic" label="Anthropic 接口" baseUrl="http://localhost:8080/v1" keys={keys} onReveal={setReveal} onChanged={refresh} />
+                    <InterfaceCard kind="openai" label="OpenAI 接口" baseUrl={`${window.location.origin}/v1`} keys={keys} onReveal={setReveal} onChanged={refresh} />
+                    <InterfaceCard kind="anthropic" label="Anthropic 接口" baseUrl={`${window.location.origin}/v1`} keys={keys} onReveal={setReveal} onChanged={refresh} />
                   </div>
                   <Card>
                     <CardHeader>
