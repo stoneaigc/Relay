@@ -51,9 +51,6 @@ async fn main() -> anyhow::Result<()> {
         routing.groups.len()
     );
 
-    if let Some(key) = storage::seed_if_empty(&db, &cfg).await? {
-        tracing::warn!("seeded demo user. Test API key (shown once): {}", key);
-    }
     // 首次启动播种默认奖励任务(star / issue / 提建议)。
     storage::seed_reward_tasks_if_empty(&db).await?;
 

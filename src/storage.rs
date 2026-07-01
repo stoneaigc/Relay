@@ -209,42 +209,6 @@ pub fn hash_password(pw: &str) -> String {
     hash_key(pw)
 }
 
-/// 若库内无用户,创建一个演示用户与一把 OpenAI Key,返回明文以便测试。
-pub async fn seed_if_empty(pool: &Db, cfg: &Config) -> anyhow::Result<Option<String>> {
-    let count: i64 = q!("SELECT COUNT(*) AS c FROM users")
-        .fetch_one(pool)
-        .await?
-        .get("c");
-    if count > 0 {
-        return Ok(None);
-    }
-
-    let user_id = Uuid::new_v4();
-    q!(
-        "INSERT INTO users (id, status, token_balance, created_at) VALUES (?, 0, ?, ?)",
-    )
-    .bind(user_id.to_string())
-    .bind(cfg.defaults.signup_grant_tokens)
-    .bind(now_iso())
-    .execute(pool)
-    .await?;
-
-    let (plaintext, hash, prefix) = generate_key();
-    q!(
-        "INSERT INTO api_keys (id, user_id, interface_kind, key_hash, key_prefix, created_at)
-         VALUES (?, ?, 'openai', ?, ?, ?)",
-    )
-    .bind(Uuid::new_v4().to_string())
-    .bind(user_id.to_string())
-    .bind(&hash)
-    .bind(&prefix)
-    .bind(now_iso())
-    .execute(pool)
-    .await?;
-
-    Ok(Some(plaintext))
-}
-
 /// 冷启动:把 users 与未吊销的 api_keys 全量加载进内存 Map。
 pub async fn load_into_memory(
     pool: &Db,
