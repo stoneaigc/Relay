@@ -6,26 +6,26 @@ bind = "0.0.0.0:8080"
 
 [database]
 # type: sqlite(默认) | postgres
-type = "postgres"
+type = "sqlite"
 
 # --- SQLite:用 url(切回 sqlite 时取消注释)---
-# url = "sqlite://runapi.db"
+url = "sqlite://runapi.db"
 
 # --- Postgres:分项配置,密码含 @ ! / # 等特殊字符无需转义 ---
-host = "127.0.0.1"
-port = 5432
-user = "postgres"
-password = "your-postgres-password"
-dbname = "run-api"
+# host = "127.0.0.1"
+# port = 5432
+# user = "postgres"
+# password = "your-postgres-password"
+# dbname = "run-api"
 
 [cache]
 # type: memory(默认,进程内)| redis(多实例共享)
-type = "redis"
+type = "memory"
 # --- Redis:分项配置(type=redis 时),密码特殊字符无需转义 ---
-host = "127.0.0.1"
-port = 6379
-password = "your-redis-password"
-db = 0
+# host = "127.0.0.1"
+# port = 6379
+# password = "your-redis-password"
+# db = 0
 # 或直接给完整 url:
 # url = "redis://:password@127.0.0.1:6379/0"
 
@@ -36,7 +36,7 @@ session_ttl_secs = 604800
 
 [admin]
 username = "admin"
-password = "QQYMDLWbzglzds@!!"
+password = "RunAPI@1"
 
 # 邮箱验证码 SMTP。smtp_host 为空=开发模式(验证码打日志并在响应里返回)。
 # 端口:465=隐式 TLS(SSL),587/25=STARTTLS,代码按端口自动选择。
