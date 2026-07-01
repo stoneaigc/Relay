@@ -12,10 +12,18 @@ permissions:
 jobs:
   package:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
     steps:
       - uses: actions/checkout@v4
 
-      # ---- 前端:admin / portal ----
+      # ---- 前端:admin / portal(与架构无关,每个 target 各构建一次)----
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -29,15 +37,26 @@ jobs:
         working-directory: frontend/portal
         run: npm ci && npm run build
 
-      # ---- 后端:Rust release 二进制 ----
+      # ---- 后端:Rust release 二进制(musl 静态链接,兼容老 glibc 系统)----
+      # 用 cross(docker)编译:x86_64 与 aarch64 的 musl 工具链 + C 交叉编译(bundled sqlite)全自动处理。
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
 
       - name: Build backend
-        run: cargo build --release --locked
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      - name: Verify static binary
+        run: file "target/${{ matrix.target }}/release/runapi"
 
       # ---- 组装产物 ----
       # 运行时路径(均相对工作目录):
@@ -45,11 +64,11 @@ jobs:
       - name: Assemble package
         run: |
           VERSION="${GITHUB_REF_NAME:-dev}"
-          PKG="runapi-${VERSION}-linux-x86_64"
+          PKG="runapi-${VERSION}-linux-${{ matrix.arch }}"
           mkdir -p "dist/${PKG}/config" \
                    "dist/${PKG}/frontend/admin" \
                    "dist/${PKG}/frontend/portal"
-          cp target/release/runapi          "dist/${PKG}/"
+          cp "target/${{ matrix.target }}/release/runapi"  "dist/${PKG}/"
           cp config/default.toml            "dist/${PKG}/config/"
           cp -r frontend/admin/dist         "dist/${PKG}/frontend/admin/dist"
           cp -r frontend/portal/dist        "dist/${PKG}/frontend/portal/dist"
