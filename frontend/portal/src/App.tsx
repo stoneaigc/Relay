@@ -18,6 +18,46 @@ const GRANT = 10_000_000;
 
 const fmtDay = (ts: number) => { const d = new Date(ts * 1000); return `${d.getMonth() + 1}/${d.getDate()}`; };
 
+/** 复制到剪贴板,并给出 ~1.4s 的“已复制”反馈状态。 */
+function useCopy(): [boolean, (t: string) => void] {
+  const [copied, setCopied] = useState(false);
+  const copy = (t: string) => {
+    navigator.clipboard?.writeText(t);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1400);
+  };
+  return [copied, copy];
+}
+
+/** 值旁边的复制图标按钮:点击后短暂变成绿色对勾。 */
+function CopyButton({ value, label = "复制" }: { value: string; label?: string }) {
+  const [copied, copy] = useCopy();
+  return (
+    <button type="button" onClick={() => copy(value)} title={label} aria-label={label}
+      className="shrink-0 rounded-md border border-border bg-background p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+      {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+    </button>
+  );
+}
+
+/** 可用模型名的可复制小标签:点击即复制,即时显示“已复制”。 */
+function ModelChip({ name }: { name: string }) {
+  const [copied, copy] = useCopy();
+  return (
+    <button type="button" onClick={() => copy(name)}
+      className={cn(
+        "mono inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs transition-colors",
+        copied
+          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-600"
+          : "border-border bg-muted text-foreground hover:bg-accent"
+      )}>
+      {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3 opacity-40" />}
+      {name}
+      {copied && <span>已复制</span>}
+    </button>
+  );
+}
+
 function LineChart({ points }: { points: { ts: number; tokens: number }[] }) {
   const W = 600, H = 150, pad = 10;
   const n = points.length;
@@ -257,6 +297,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                     <CardHeader>
                       <CardTitle className="flex items-center gap-2 text-base">
                         <Boxes className="h-4 w-4" />可用模型{models.length > 0 && <span className="text-muted-foreground">· {models.length}</span>}
+                        {models.length > 0 && <span className="ml-auto text-xs font-normal text-muted-foreground">点击复制模型名</span>}
                       </CardTitle>
                     </CardHeader>
                     <CardContent>
@@ -264,13 +305,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                         <p className="text-sm text-muted-foreground">暂无可用模型,请联系管理员为你分配模型组。</p>
                       ) : (
                         <div className="flex flex-wrap gap-2">
-                          {models.map((m) => (
-                            <button key={m} title="点击复制模型名"
-                              onClick={() => navigator.clipboard?.writeText(m)}
-                              className="mono rounded-md border border-border bg-muted px-2.5 py-1 text-xs text-foreground transition-colors hover:bg-accent">
-                              {m}
-                            </button>
-                          ))}
+                          {models.map((m) => <ModelChip key={m} name={m} />)}
                         </div>
                       )}
                     </CardContent>
@@ -665,15 +700,15 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
   const active = keys.find((k) => k.interface_kind === kind && !k.revoked);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const create = async () => {
     setBusy(true); setErr("");
     try { const r = await api.createKey(kind); onReveal({ kind, key: r.key }); onChanged(); }
     catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
-  const rotate = async () => {
-    if (!confirm("刷新将使当前 Key 立即失效,使用旧 Key 的应用会中断。确定继续?")) return;
+  const doRotate = async () => {
     setBusy(true); setErr("");
-    try { const r = await api.rotateKey(kind); onReveal({ kind, key: r.key }); onChanged(); }
+    try { const r = await api.rotateKey(kind); setConfirmOpen(false); onReveal({ kind, key: r.key }); onChanged(); }
     catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
   return (
@@ -687,17 +722,38 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
       <CardContent className="space-y-3">
         <div>
           <div className="mb-1 text-xs text-muted-foreground">Base URL</div>
-          <div className="mono rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{baseUrl}</div>
+          <div className="flex items-center gap-2">
+            <div className="mono flex-1 rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{baseUrl}</div>
+            <CopyButton value={baseUrl} label="复制 Base URL" />
+          </div>
         </div>
         <div>
           <div className="mb-1 text-xs text-muted-foreground">API Key</div>
           <div className="mono rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active ? active.key_prefix : "—"}</div>
         </div>
         {active
-          ? <Button variant="outline" disabled={busy} onClick={rotate}><RefreshCw className="h-4 w-4" />刷新 Key</Button>
+          ? <Button variant="outline" disabled={busy} onClick={() => setConfirmOpen(true)}><RefreshCw className="h-4 w-4" />刷新 Key</Button>
           : <Button disabled={busy} onClick={create}><Plus className="h-4 w-4" />创建 Key</Button>}
         {err && <p className="text-sm text-destructive">{err}</p>}
       </CardContent>
+
+      <Dialog open={confirmOpen} onOpenChange={(o) => !busy && setConfirmOpen(o)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>刷新 {label} 的 Key?</DialogTitle>
+            <DialogDescription className="text-destructive">
+              ⚠️ 刷新会立即吊销当前 Key,正在使用旧 Key 的应用将中断。此操作不可撤销。
+            </DialogDescription>
+          </DialogHeader>
+          {err && <p className="text-sm text-destructive">{err}</p>}
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" disabled={busy} onClick={() => setConfirmOpen(false)}>取消</Button>
+            <Button variant="destructive" disabled={busy} onClick={doRotate}>
+              <RefreshCw className="h-4 w-4" />确认刷新
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }
