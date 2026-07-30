@@ -28,6 +28,9 @@ jsonwebtoken = "9"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls"] }
 tower-http = { version = "0.5", features = ["fs"] }
 redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
+base64 = "0.22"
 
 [profile.release]
 lto = "thin"

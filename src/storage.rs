@@ -1347,3 +1347,44 @@ pub async fn user_daily_series(
     }
     Ok(out)
 }
+
+// ---- 系统配置(settings KV 表)----
+
+/// 读取某命名空间下所有配置(prefix 如 "email.",匹配 key 前缀)。返回 key(去前缀) -> value。
+pub async fn load_settings(pool: &Db, prefix: &str) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let like = format!("{prefix}%");
+    let rows = q!("SELECT key, value FROM settings WHERE key LIKE ?")
+        .bind(&like)
+        .fetch_all(pool)
+        .await?;
+    let mut out = std::collections::HashMap::new();
+    for r in rows {
+        let k: String = r.get("key");
+        let v: String = r.get("value");
+        // 存完整 key(含前缀),由调用方按需裁剪。
+        out.insert(k, v);
+    }
+    Ok(out)
+}
+
+/// upsert 单个配置项。
+pub async fn set_setting(pool: &Db, key: &str, value: &str) -> anyhow::Result<()> {
+    q!(
+        "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    )
+    .bind(key)
+    .bind(value)
+    .bind(now_iso())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 批量 upsert(逐条;SQLite/Postgres 均支持上述 ON CONFLICT 语法)。
+pub async fn set_settings(pool: &Db, items: &[(String, String)]) -> anyhow::Result<()> {
+    for (k, v) in items {
+        set_setting(pool, k, v).await?;
+    }
+    Ok(())
+}

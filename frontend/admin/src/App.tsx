@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
-import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink } from "lucide-react";
-import { api, getToken, setToken, clearToken, UserRow, ModelRow, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType } from "./api";
+import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send } from "lucide-react";
+import { api, getToken, setToken, clearToken, UserRow, ModelRow, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -52,6 +52,7 @@ const NAV: { path: string; label: string; icon: any }[] = [
   { path: "/rewards", label: "奖励审核", icon: Gift },
   { path: "/reward-tasks", label: "奖励设置", icon: Star },
   { path: "/usage", label: "全局用量", icon: BarChart3 },
+  { path: "/settings", label: "设置", icon: Settings },
 ];
 
 function Console({ onLogout }: { onLogout: () => void }) {
@@ -112,6 +113,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
                 <Route path="/rewards" element={<RewardsPanel />} />
                 <Route path="/reward-tasks" element={<RewardTasksPanel />} />
                 <Route path="/usage" element={<UsagePanel />} />
+                <Route path="/settings" element={<SettingsPanel />} />
               </Routes>
             </div>
           </div>
@@ -1255,5 +1257,124 @@ function UsagePanel() {
         )}
       </CardContent>
     </Card>
+  );
+}
+
+const PORT_OPTIONS = [
+  { port: 465, label: "465 (SSL / 隐式 TLS)" },
+  { port: 587, label: "587 (STARTTLS)" },
+  { port: 25, label: "25 (STARTTLS)" },
+];
+
+function SettingsPanel() {
+  const [host, setHost] = useState("");
+  const [port, setPort] = useState(465);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [from, setFrom] = useState("");
+  const [hasPassword, setHasPassword] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [testTo, setTestTo] = useState("");
+  const [testing, setTesting] = useState<null | "loading" | { ok: boolean; msg: string }>(null);
+  const [err, setErr] = useState("");
+  const [note, setNote] = useState("");
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const r = await api.emailSettings();
+      setHost(r.smtp_host ?? ""); setPort(r.smtp_port || 465);
+      setUsername(r.username ?? ""); setFrom(r.from ?? "");
+      setHasPassword(r.has_password); setPassword(""); setErr(""); setNote("");
+    } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const enabled = host.trim().length > 0;
+  const sel = "h-9 w-full rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
+
+  const save = async () => {
+    setErr(""); setNote(""); setSaving(true);
+    try {
+      const body: any = {
+        smtp_host: host.trim(), smtp_port: port,
+        username: username.trim(), from: from.trim(),
+      };
+      if (password) body.password = password;
+      await api.saveEmailSettings(body);
+      setHasPassword(!!password || hasPassword);
+      setPassword("");
+      setNote("已保存,即时生效。");
+    } catch (e: any) { setErr(e.message); } finally { setSaving(false); }
+  };
+
+  const runTest = async () => {
+    setErr(""); setNote(""); setTesting("loading");
+    try {
+      const body: any = {
+        smtp_host: host.trim(), smtp_port: port,
+        username: username.trim(), from: from.trim(), test_to: testTo.trim(),
+      };
+      if (password) body.password = password;
+      const r = await api.testEmail(body);
+      setTesting(r.ok ? { ok: true, msg: "发送成功,请到收件箱(及垃圾箱)确认。" } : { ok: false, msg: r.error || "失败" });
+    } catch (e: any) {
+      setTesting({ ok: false, msg: e.message });
+    }
+  };
+
+  return (
+    <div className="space-y-5">
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-base">邮箱配置</CardTitle>
+            <Badge variant={enabled ? "success" : "muted"}>{enabled ? "✓ 已配置" : "⚠ 未配置"}</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {loading ? <p className="text-sm text-muted-foreground">加载中…</p> : (
+            <>
+              <p className="text-xs text-muted-foreground">
+                注册验证码通过此 SMTP 发送。端口 465=SSL(隐式 TLS)、587/25=STARTTLS;授权码填「客户端授权码」而非登录密码。
+                {enabled ? "" : "未配置时注册走开发模式(验证码在接口响应 dev_code 返回并打日志)。"}
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div><label className="mb-1 block text-xs text-muted-foreground">SMTP 主机</label>
+                  <Input placeholder="如 smtp.163.com" value={host} onChange={(e) => setHost(e.target.value)} /></div>
+                <div><label className="mb-1 block text-xs text-muted-foreground">端口</label>
+                  <select value={port} onChange={(e) => setPort(Number(e.target.value))} className={sel}>
+                    {PORT_OPTIONS.map((p) => <option key={p.port} value={p.port}>{p.label}</option>)}
+                  </select></div>
+                <div><label className="mb-1 block text-xs text-muted-foreground">用户名</label>
+                  <Input placeholder="发信邮箱地址" value={username} onChange={(e) => setUsername(e.target.value)} /></div>
+                <div><label className="mb-1 block text-xs text-muted-foreground">授权码{hasPassword ? "(已设置,留空保持不变)" : "(客户端授权码)"}</label>
+                  <Input type="password" placeholder={hasPassword ? "留空保持不变" : "客户端授权码"} value={password} onChange={(e) => setPassword(e.target.value)} /></div>
+                <div className="sm:col-span-2"><label className="mb-1 block text-xs text-muted-foreground">发件人(可选,留空用用户名)</label>
+                  <Input placeholder="留空则用用户名" value={from} onChange={(e) => setFrom(e.target.value)} /></div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+                <Button onClick={save} disabled={saving}>{saving ? "保存中…" : "保存配置"}</Button>
+                <div className="flex items-center gap-2">
+                  <Input className="w-56" placeholder="测试收件邮箱" value={testTo} onChange={(e) => setTestTo(e.target.value)} />
+                  <Button variant="outline" onClick={runTest} disabled={testing === "loading" || !host.trim() || !testTo.trim()}>
+                    <Send className="h-4 w-4" />{testing === "loading" ? "发送中…" : "发送测试邮件"}
+                  </Button>
+                </div>
+                {testing && testing !== "loading" && (
+                  <span className={cn("text-xs", testing.ok ? "text-success" : "text-destructive")} title={testing.msg}>
+                    {testing.ok ? "✓ " : "✗ "}{testing.msg}
+                  </span>
+                )}
+                {note && <span className="text-xs text-success">{note}</span>}
+                {err && <span className="text-xs text-destructive">{err}</span>}
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   );
 }

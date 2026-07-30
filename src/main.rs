@@ -9,6 +9,7 @@ mod jwt;
 mod portal;
 mod providers;
 mod routing;
+mod settings;
 mod state;
 mod storage;
 mod translate;
@@ -37,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cfg = Config::load()?;
+    let mut cfg = Config::load()?;
 
     let db = storage::init_pool(&cfg.database).await?;
     storage::init_schema(&db).await?;
@@ -53,6 +54,18 @@ async fn main() -> anyhow::Result<()> {
 
     // 首次启动播种默认奖励任务(star / issue / 提建议)。
     storage::seed_reward_tasks_if_empty(&db).await?;
+
+    // 从 DB 加载系统配置(目前仅 email.*),覆盖到内存 Config(DB 优先于配置文件)。
+    {
+        let kv = storage::load_settings(&db, settings::EMAIL_PREFIX)
+            .await
+            .map_err(|e| anyhow::anyhow!("load settings: {e}"))?;
+        if !kv.is_empty() {
+            let secret = cfg.auth.jwt_secret.clone();
+            settings::apply_email_settings(&mut cfg, &kv, &secret);
+            tracing::info!("loaded {} email settings from DB", kv.len());
+        }
+    }
 
     // 冷启动:全量加载用户与 Key 到内存。
     let keys = DashMap::new();
@@ -134,7 +147,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/groups/:id", axum::routing::delete(admin::delete_group))
         .route("/groups/:id/activate", post(admin::activate_group))
         .route("/groups/:id/routes", get(admin::list_routes).post(admin::add_route))
-        .route("/routes/:id", axum::routing::delete(admin::delete_route).patch(admin::update_route));
+        .route("/routes/:id", axum::routing::delete(admin::delete_route).patch(admin::update_route))
+        .route("/settings/email", get(admin::get_email_settings).post(admin::save_email_settings))
+        .route("/settings/email/test", post(admin::test_email_settings));
 
     // SPA 静态资源(未命中的子路径回退到 index.html,交给前端路由)。
     let spa = |dir: &str| {

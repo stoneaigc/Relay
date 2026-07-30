@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::config::ProviderKind;
+use crate::config::{EmailConfig, ProviderKind};
 use crate::error::ApiError;
 use crate::state::{AppState, UserState};
 use crate::{jwt, storage};
@@ -846,4 +846,152 @@ pub async fn delete_route(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+// ---- 系统配置:邮箱 ----
+
+/// GET /admin/settings/email -- 回显邮箱配置(授权码不回显,仅返回 has_password)。
+pub async fn get_email_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let kv = storage::load_settings(&state.db, crate::settings::EMAIL_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let cfg = state.config();
+    // DB 有则取 DB,否则取配置文件值(回显当前生效配置)。
+    let host = kv.get(crate::settings::K_HOST).cloned().unwrap_or(cfg.email.smtp_host.clone());
+    let port = kv
+        .get(crate::settings::K_PORT)
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(cfg.email.smtp_port);
+    let username = kv.get(crate::settings::K_USER).cloned().unwrap_or(cfg.email.username.clone());
+    let from = kv.get(crate::settings::K_FROM).cloned().unwrap_or(cfg.email.from.clone());
+    let has_password = crate::settings::has_email_password(&kv);
+    Ok(Json(json!({
+        "smtp_host": host,
+        "smtp_port": port,
+        "username": username,
+        "from": from,
+        "has_password": has_password,
+        "enabled": !host.is_empty(),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct EmailSettingsBody {
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    #[serde(default)]
+    pub username: String,
+    /// 授权码;留空=保持不变。
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub from: String,
+}
+
+/// 校验端口合法。
+fn validate_email(b: &EmailSettingsBody) -> Result<(), ApiError> {
+    if b.smtp_port == 0 {
+        return Err(ApiError::BadRequest("smtp_port 不能为 0".into()));
+    }
+    // host 允许为空(=关闭 SMTP,走 dev 模式);非空时不额外校验格式。
+    Ok(())
+}
+
+/// POST /admin/settings/email -- 保存邮箱配置(授权码加密入库),刷新内存 Config。
+pub async fn save_email_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<EmailSettingsBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    validate_email(&body)?;
+
+    let secret = state.config().auth.jwt_secret.clone();
+    let mut items: Vec<(String, String)> = vec![
+        (crate::settings::K_HOST.to_string(), body.smtp_host.clone()),
+        (crate::settings::K_PORT.to_string(), body.smtp_port.to_string()),
+        (crate::settings::K_USER.to_string(), body.username.clone()),
+        (crate::settings::K_FROM.to_string(), body.from.clone()),
+    ];
+    // 密码非空才写(加密);留空=保持原值。
+    if let Some(pw) = body.password.as_deref().filter(|s| !s.is_empty()) {
+        let enc = crate::settings::encrypt(&secret, pw)
+            .map_err(|e| ApiError::Internal(format!("加密失败: {e}")))?;
+        items.push((crate::settings::K_PASS_ENC.to_string(), enc));
+    }
+
+    storage::set_settings(&state.db, &items)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // 重建内存 Config:从 DB 重读 email.* 覆盖当前快照,store() 刷新。
+    let kv = storage::load_settings(&state.db, crate::settings::EMAIL_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut new_cfg = (**state.config()).clone();
+    crate::settings::apply_email_settings(&mut new_cfg, &kv, &secret);
+    state.config.store(Arc::new(new_cfg));
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct TestEmailBody {
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    #[serde(default)]
+    pub username: String,
+    /// 授权码;留空时若库里有则用库里的(支持「不改密码只测当前配置」)。
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub from: String,
+    pub test_to: String,
+}
+
+/// POST /admin/settings/email/test -- 用表单配置发一封测试邮件,不落库。
+pub async fn test_email_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TestEmailBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if body.test_to.trim().is_empty() || !body.test_to.contains('@') {
+        return Err(ApiError::BadRequest("test_to 邮箱格式不正确".into()));
+    }
+    if body.smtp_host.trim().is_empty() {
+        return Err(ApiError::BadRequest("smtp_host 不能为空".into()));
+    }
+
+    let secret = state.config().auth.jwt_secret.clone();
+    let kv = storage::load_settings(&state.db, crate::settings::EMAIL_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let base = state.config().email.clone();
+    let email_cfg = crate::settings::email_config_from_kv(
+        &base,
+        &kv,
+        &secret,
+        body.password.as_deref(),
+    );
+    // 表单字段覆盖(测试用请求体里的最新值,而非库里)。
+    let email_cfg = EmailConfig {
+        smtp_host: body.smtp_host.clone(),
+        smtp_port: body.smtp_port,
+        username: body.username.clone(),
+        from: body.from.clone(),
+        password: email_cfg.password,
+    };
+
+    let code: String = {
+        use rand::Rng;
+        format!("{:06}", rand::thread_rng().gen_range(0..1_000_000))
+    };
+    match crate::email::send_code(&email_cfg, body.test_to.trim(), &code).await {
+        Ok(()) => Ok(Json(json!({ "ok": true }))),
+        Err(e) => Ok(Json(json!({ "ok": false, "error": e.to_string() }))),
+    }
 }

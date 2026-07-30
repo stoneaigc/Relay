@@ -109,3 +109,10 @@ CREATE TABLE IF NOT EXISTS reward_claims (
   created_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_reward_user ON reward_claims(user_id);
+
+-- 系统配置(KV)。点分命名空间,如 email.smtp_host。value 统一 TEXT(标量直存,复杂值 JSON)。
+CREATE TABLE IF NOT EXISTS settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);

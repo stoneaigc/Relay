@@ -106,6 +106,12 @@ export const api = {
   updateRewardTask: (id: number, body: RewardTaskBody) =>
     req(`/admin/api/reward-tasks/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteRewardTask: (id: number) => req(`/admin/api/reward-tasks/${id}`, { method: "DELETE" }),
+
+  emailSettings: (): Promise<EmailSettingsResp> => req("/admin/api/settings/email"),
+  saveEmailSettings: (body: EmailSettingsBody) =>
+    req("/admin/api/settings/email", { method: "POST", body: JSON.stringify(body) }),
+  testEmail: (body: EmailSettingsBody & { test_to: string }): Promise<{ ok: boolean; error?: string }> =>
+    req("/admin/api/settings/email/test", { method: "POST", body: JSON.stringify(body) }),
 };
 
 export type EvidenceType = "screenshot" | "link" | "text" | "none";
@@ -157,4 +163,17 @@ export interface RewardClaimRow {
 
 export interface RewardListResp {
   data: RewardClaimRow[];
+}
+
+export interface EmailSettingsBody {
+  smtp_host: string;
+  smtp_port: number;
+  username: string;
+  password?: string; // 留空=保持不变
+  from: string;
+}
+
+export interface EmailSettingsResp extends EmailSettingsBody {
+  has_password: boolean;
+  enabled: boolean;
 }

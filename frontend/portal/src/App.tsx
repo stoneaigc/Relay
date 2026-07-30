@@ -150,7 +150,7 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
             onChange={(e) => setAccount(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
           {needCode && (
             <div className="flex gap-2">
-              <Input placeholder="邮箱验证码" value={code} onChange={(e) => setCode(e.target.value)} />
+              <Input placeholder="邮箱验证码" value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))} maxLength={6} />
               <Button variant="outline" className="shrink-0" disabled={!account.trim() || cooldown > 0} onClick={sendCode}>
                 {cooldown > 0 ? `${cooldown}s` : "发送验证码"}
               </Button>
