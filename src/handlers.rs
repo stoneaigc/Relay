@@ -9,11 +9,94 @@ use axum::{
 };
 use futures::StreamExt;
 use serde_json::{json, Value};
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::auth::authenticate;
+use crate::config::ProviderKind;
 use crate::error::ApiError;
-use crate::state::{AppState, UsageEvent};
+use crate::state::{AppState, UpstreamKey, UsageEvent};
 use crate::providers;
+use crate::reqlog::{self, RequestAttempt};
+
+/// 一次请求的链路追踪上下文;贯穿 run_chat/run_messages 及各响应函数,
+/// 用于在拿到 tokens 后统一写 request_logs。
+pub struct RunTrace {
+    pub request_id: String,
+    pub user_id: String,
+    pub path: &'static str,
+    pub requested_model: String,
+    pub stream: bool,
+    /// resolve_all 的候选顺序(含权重)。
+    pub candidates: Vec<RequestAttempt>,
+    /// 每个候选的实际尝试结果(含 failover 链)。
+    pub attempts: Vec<RequestAttempt>,
+    pub final_kind: Option<String>,
+    pub final_upstream_model: Option<String>,
+    pub final_status: i32,
+    pub latency_ms: u32,
+}
+
+impl RunTrace {
+    /// 成功结算:补 tokens 后写日志。
+    pub async fn emit_success(
+        &self,
+        state: &AppState,
+        input: u32,
+        output: u32,
+        charged: i64,
+    ) {
+        let log = reqlog::RequestLog {
+            request_id: self.request_id.clone(),
+            user_id: self.user_id.clone(),
+            path: self.path.to_string(),
+            requested_model: self.requested_model.clone(),
+            stream: self.stream,
+            candidates: self.candidates.clone(),
+            attempts: self.attempts.clone(),
+            final_kind: self.final_kind.clone(),
+            final_upstream_model: self.final_upstream_model.clone(),
+            final_status: self.final_status,
+            latency_ms: self.latency_ms,
+            input_tokens: input,
+            output_tokens: output,
+            charged_tokens: charged,
+            ts: crate::storage::now_secs(),
+        };
+        let _ = state.request_log_tx.send(log).await;
+    }
+
+    /// 失败结算(无 tokens)。
+    pub async fn emit_error(&self, state: &AppState, final_status: i32) {
+        let log = reqlog::RequestLog {
+            request_id: self.request_id.clone(),
+            user_id: self.user_id.clone(),
+            path: self.path.to_string(),
+            requested_model: self.requested_model.clone(),
+            stream: self.stream,
+            candidates: self.candidates.clone(),
+            attempts: self.attempts.clone(),
+            final_kind: self.final_kind.clone(),
+            final_upstream_model: self.final_upstream_model.clone(),
+            final_status,
+            latency_ms: self.latency_ms,
+            input_tokens: 0,
+            output_tokens: 0,
+            charged_tokens: 0,
+            ts: crate::storage::now_secs(),
+        };
+        let _ = state.request_log_tx.send(log).await;
+    }
+}
+
+/// 构造候选初始列表(weight 填充,status 未定)。
+fn init_candidates(
+    candidates: &[crate::routing::Resolved],
+) -> Vec<RequestAttempt> {
+    candidates
+        .iter()
+        .map(|r| reqlog::candidate_attempt(r.kind, &r.base_url, &r.upstream_model, r.weight))
+        .collect()
+}
 
 pub async fn health() -> &'static str {
     "ok"
@@ -38,6 +121,18 @@ pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
+) -> Response {
+    let result = run_openai(state, headers, body).await;
+    match result {
+        Ok(r) => r,
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn run_openai(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Result<Response, ApiError> {
     let auth = authenticate(&state, &headers)?;
     let req: Value = serde_json::from_slice(&body)
@@ -52,8 +147,28 @@ pub async fn run_chat(
     user: Arc<crate::state::UserState>,
     req: Value,
 ) -> Result<Response, ApiError> {
+    // 全局计时器:用于 catch-all 失败路径写指标(成功率 / RPS / 延迟)
+    let req_start = std::time::Instant::now();
+
+    macro_rules! fail_global {
+        () => {
+            state
+                .record_metrics_request(
+                    None,
+                    400,
+                    req_start.elapsed(),
+                )
+                .await;
+        };
+    }
+
     if user.balance() <= 0 {
+        fail_global!();
         return Err(ApiError::InsufficientBalance);
+    }
+    if !user.try_rpm() || !user.tpm_ok() {
+        fail_global!();
+        return Err(ApiError::TooManyRequests);
     }
 
     let model = req
@@ -62,39 +177,286 @@ pub async fn run_chat(
         .ok_or_else(|| ApiError::BadRequest("missing `model`".into()))?
         .to_string();
     let stream = req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+    let request_id = format!("req_{}", &uuid::Uuid::new_v4().to_string()[..24]);
 
     // 占用并发名额(RAII,流结束/出错自动释放)。
-    let guard = user.try_acquire().ok_or(ApiError::TooManyRequests)?;
-
-    // 路由解析:按用户所在模型组,把对外模型名解析到具体上游。
-    let r = state.routing.load().resolve(user.group(), &model)?;
-    let kind = r.kind;
-    let (provider_name, base_url, api_key, upstream_model, multiplier) =
-        (r.provider, r.base_url, r.api_key, r.upstream_model, r.multiplier);
-
-    match kind {
-        crate::config::ProviderKind::Openai => {
-            let resp = providers::openai::chat_completions(
-                &state, &base_url, api_key.as_deref(), &upstream_model, req, stream,
-            )
-            .await?;
-            if stream {
-                Ok(stream_response(state, resp, guard, model, provider_name, upstream_model, multiplier, user))
-            } else {
-                non_stream_response(&state, resp, model, provider_name, upstream_model, multiplier, user).await
-            }
+    let guard = match user.try_acquire() {
+        Some(g) => g,
+        None => {
+            fail_global!();
+            return Err(ApiError::TooManyRequests);
         }
-        crate::config::ProviderKind::Anthropic => {
-            // OpenAI 入站 → Anthropic 上游:翻译请求 + 翻译响应。
-            let abody = crate::translate::openai_to_anthropic(&req, &upstream_model, stream);
-            let resp = providers::anthropic::messages(&state, &base_url, api_key.as_deref(), abody).await?;
-            if stream {
-                Ok(anthropic_stream_response(state, resp, guard, model, provider_name, upstream_model, multiplier, user))
-            } else {
-                anthropic_nonstream_response(&state, resp, model, provider_name, upstream_model, multiplier, user).await
+    };
+
+    // 路由解析:按用户所在模型组,把对外模型名解析到全部候选上游。
+    // failover:依次尝试每个候选;仅可重试错误(Unavailable)才切换到下一目标。
+    let candidates = match state.routing.load().resolve_all(user.group(), &model) {
+        Ok(c) => c,
+        Err(e) => {
+            fail_global!();
+            return Err(e);
+        }
+    };
+    let cand_init = init_candidates(&candidates);
+    let mut attempts: Vec<RequestAttempt> = Vec::new();
+    let run_start = std::time::Instant::now();
+    let run_path: &'static str = "chat";
+    let user_id_str = user.id.to_string();
+    let mut final_kind: Option<String> = None;
+    let mut final_upstream: Option<String> = None;
+    let mut final_status: i32 = 0;
+    for r in &candidates {
+        let kind = r.kind;
+        let (provider_name, base_url, api_key, upstream_model, multiplier) =
+            (&r.provider, &r.base_url, r.api_key.as_deref(), &r.upstream_model, r.multiplier);
+
+        // ---- P2:熔断检查 ----
+        let ukey = UpstreamKey::new(kind, base_url, api_key);
+        if state.breaker_should_skip(&ukey).await {
+            attempts.push(RequestAttempt {
+                kind: match kind { ProviderKind::Openai => "openai".to_string(), ProviderKind::Anthropic => "anthropic".to_string() },
+                base_url: base_url.clone(),
+                upstream_model: upstream_model.clone(),
+                weight: r.weight,
+                status: -1,
+                latency_ms: 0,
+                error: "breaker open, skip".into(),
+            });
+            continue;
+        }
+        // ---- P1:占用上游并发槽(排队直到拿到;permit 持有到请求结束自动释放) ----
+        let slot = state.acquire_upstream(ukey.clone(), provider_name).await;
+        // ---- 指标计时器:用于请求成功率 / RPS / 延迟 ----
+        let up_start = std::time::Instant::now();
+
+        match kind {
+            crate::config::ProviderKind::Openai => {
+                let resp = providers::openai::chat_completions(
+                    &state, base_url, api_key, upstream_model, req.clone(), stream,
+                )
+                .await;
+                match resp {
+                    Ok(resp) if stream => {
+                        state.breaker_success(&ukey).await;
+                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
+                        final_kind = Some(match kind { ProviderKind::Openai => "openai".into(), ProviderKind::Anthropic => "anthropic".into() });
+                        final_upstream = Some(upstream_model.clone());
+                        final_status = 200;
+                        attempts.push(RequestAttempt {
+                            kind: "openai".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: 200,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: String::new(),
+                        });
+                        let trace = RunTrace {
+                            request_id: request_id.clone(),
+                            user_id: user_id_str.clone(),
+                            path: run_path,
+                            requested_model: model.clone(),
+                            stream,
+                            candidates: cand_init.clone(),
+                            attempts: attempts.clone(),
+                            final_kind: final_kind.clone(),
+                            final_upstream_model: final_upstream.clone(),
+                            final_status,
+                            latency_ms: run_start.elapsed().as_millis() as u32,
+                        };
+                        return Ok(stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace));
+                    }
+                    Ok(resp) => {
+                        state.breaker_success(&ukey).await;
+                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
+                        final_kind = Some("openai".into());
+                        final_upstream = Some(upstream_model.clone());
+                        final_status = 200;
+                        attempts.push(RequestAttempt {
+                            kind: "openai".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: 200,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: String::new(),
+                        });
+                        let trace = RunTrace {
+                            request_id: request_id.clone(),
+                            user_id: user_id_str.clone(),
+                            path: run_path,
+                            requested_model: model.clone(),
+                            stream,
+                            candidates: cand_init.clone(),
+                            attempts: attempts.clone(),
+                            final_kind: final_kind.clone(),
+                            final_upstream_model: final_upstream.clone(),
+                            final_status,
+                            latency_ms: run_start.elapsed().as_millis() as u32,
+                        };
+                        return non_stream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, kind, base_url, api_key, trace).await;
+                    }
+                    Err(ApiError::Unavailable(e)) => {
+                        let fail_cnt = state.breaker_unavailable(&ukey).await;
+                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_UNAVAILABLE, up_start.elapsed()).await;
+                        state
+                            .record_failure(&ukey, &model, "chat", &e.to_string(), fail_cnt)
+                            .await;
+                        attempts.push(RequestAttempt {
+                            kind: "openai".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: crate::state::METRIC_STATUS_UNAVAILABLE as i32,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: e,
+                        });
+                        continue;
+                    }
+                    Err(e) => {
+                        // 非重试错误(4xx / 解析错 / 权限不足 ...):记 per-upstream + 全局 fail_other 后直接返回
+                        state.record_metrics_request(Some(&ukey), 400, up_start.elapsed()).await;
+                        final_status = 400;
+                        attempts.push(RequestAttempt {
+                            kind: "openai".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: 400,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: e.to_string(),
+                        });
+                        let trace = RunTrace {
+                            request_id, user_id: user_id_str, path: run_path,
+                            requested_model: model, stream,
+                            candidates: cand_init, attempts,
+                            final_kind, final_upstream_model: final_upstream,
+                            final_status: 400, latency_ms: run_start.elapsed().as_millis() as u32,
+                        };
+                        trace.emit_error(&state, 400).await;
+                        return Err(e);
+                    }
+                }
+            }
+            crate::config::ProviderKind::Anthropic => {
+                // OpenAI 入站 → Anthropic 上游:翻译请求 + 翻译响应。
+                let abody = crate::translate::openai_to_anthropic(&req, upstream_model, stream);
+                let resp = providers::anthropic::messages(&state, base_url, api_key, abody).await;
+                match resp {
+                    Ok(resp) if stream => {
+                        state.breaker_success(&ukey).await;
+                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
+                        final_kind = Some("anthropic".into());
+                        final_upstream = Some(upstream_model.clone());
+                        final_status = 200;
+                        attempts.push(RequestAttempt {
+                            kind: "anthropic".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: 200,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: String::new(),
+                        });
+                        let trace = RunTrace {
+                            request_id: request_id.clone(),
+                            user_id: user_id_str.clone(),
+                            path: run_path,
+                            requested_model: model.clone(),
+                            stream,
+                            candidates: cand_init.clone(),
+                            attempts: attempts.clone(),
+                            final_kind: final_kind.clone(),
+                            final_upstream_model: final_upstream.clone(),
+                            final_status,
+                            latency_ms: run_start.elapsed().as_millis() as u32,
+                        };
+                        return Ok(anthropic_stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace));
+                    }
+                    Ok(resp) => {
+                        state.breaker_success(&ukey).await;
+                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
+                        final_kind = Some("anthropic".into());
+                        final_upstream = Some(upstream_model.clone());
+                        final_status = 200;
+                        attempts.push(RequestAttempt {
+                            kind: "anthropic".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: 200,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: String::new(),
+                        });
+                        let trace = RunTrace {
+                            request_id: request_id.clone(),
+                            user_id: user_id_str.clone(),
+                            path: run_path,
+                            requested_model: model.clone(),
+                            stream,
+                            candidates: cand_init.clone(),
+                            attempts: attempts.clone(),
+                            final_kind: final_kind.clone(),
+                            final_upstream_model: final_upstream.clone(),
+                            final_status,
+                            latency_ms: run_start.elapsed().as_millis() as u32,
+                        };
+                        return anthropic_nonstream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, base_url, api_key, trace).await;
+                    }
+                    Err(ApiError::Unavailable(e)) => {
+                        let fail_cnt = state.breaker_unavailable(&ukey).await;
+                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_UNAVAILABLE, up_start.elapsed()).await;
+                        state
+                            .record_failure(&ukey, &model, "chat", &e.to_string(), fail_cnt)
+                            .await;
+                        attempts.push(RequestAttempt {
+                            kind: "anthropic".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: crate::state::METRIC_STATUS_UNAVAILABLE as i32,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: e,
+                        });
+                        continue;
+                    }
+                    Err(e) => {
+                        state.record_metrics_request(Some(&ukey), 400, up_start.elapsed()).await;
+                        attempts.push(RequestAttempt {
+                            kind: "anthropic".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: 400,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: e.to_string(),
+                        });
+                        let trace = RunTrace {
+                            request_id, user_id: user_id_str, path: run_path,
+                            requested_model: model, stream,
+                            candidates: cand_init, attempts,
+                            final_kind, final_upstream_model: final_upstream,
+                            final_status: 400, latency_ms: run_start.elapsed().as_millis() as u32,
+                        };
+                        trace.emit_error(&state, 400).await;
+                        return Err(e);
+                    }
+                }
             }
         }
     }
+    // 走完全部候选都没命中(空数组 / 全被熔断 / 全部 Unavailable 转移完 / 没写路由模型):
+    fail_global!();
+    let trace = RunTrace {
+        request_id, user_id: user_id_str, path: run_path,
+        requested_model: model.clone(), stream,
+        candidates: cand_init, attempts,
+        final_kind, final_upstream_model: final_upstream,
+        final_status: crate::state::METRIC_STATUS_UNAVAILABLE as i32,
+        latency_ms: run_start.elapsed().as_millis() as u32,
+    };
+    trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
+    Err(ApiError::NoTarget(model.clone()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -106,18 +468,28 @@ async fn anthropic_nonstream_response(
     upstream_model: String,
     multiplier: f64,
     user: Arc<crate::state::UserState>,
+    _slot: Option<OwnedSemaphorePermit>,
+    base_url: &str,
+    api_key: Option<&str>,
+    trace: RunTrace,
 ) -> Result<Response, ApiError> {
     let aresp: Value = resp.json().await.map_err(|e| ApiError::Upstream(e.to_string()))?;
     let input = aresp.pointer("/usage/input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let output = aresp.pointer("/usage/output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let charged = ((input as f64 + output as f64) * multiplier * user.bill_multiplier()).round() as i64;
     user.deduct(charged);
+    user.record_tokens(input.saturating_add(output));
 
     let payload = crate::translate::anthropic_to_openai(&aresp, &model);
     let _ = state.usage_tx.send(UsageEvent {
-        user_id: user.id, model, provider: provider_name, upstream_model,
+        user_id: user.id, model: model.clone(), provider: provider_name, upstream_model,
         input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200,
+        request_id: Some(trace.request_id.clone()),
     }).await;
+    // 补记指标 tokens(Anthropic → OpenAI)
+    let k = UpstreamKey::new(ProviderKind::Anthropic, base_url, api_key);
+    state.record_metrics_tokens(Some(&k), input as u64, output as u64).await;
+    trace.emit_success(state, input, output, charged).await;
     Ok(Json(payload).into_response())
 }
 
@@ -126,15 +498,20 @@ fn anthropic_stream_response(
     state: Arc<AppState>,
     resp: reqwest::Response,
     guard: crate::state::ConcurrencyGuard,
+    slot: Option<OwnedSemaphorePermit>,
     model: String,
     provider_name: String,
     upstream_model: String,
     multiplier: f64,
     user: Arc<crate::state::UserState>,
+    base_url: String,
+    api_key: Option<String>,
+    trace: RunTrace,
 ) -> Response {
     let user_id = user.id;
     let s = async_stream::stream! {
         let _guard = guard;
+        let _slot = slot; // 持有上游并发槽直到流结束
         let mut upstream = resp.bytes_stream();
         let mut buf: Vec<u8> = Vec::new();
         let mut input = 0u32;
@@ -178,11 +555,14 @@ fn anthropic_stream_response(
                             Some("content_block_delta") => {
                                 match ev.pointer("/delta/type").and_then(|t| t.as_str()) {
                                     Some("text_delta") => {
+                                        if let Some(text) = ev.pointer("/delta/thinking").and_then(|v| v.as_str()) {
+                                            yield Ok(Bytes::from(oai_chunk(&id, &model, json!({"reasoning_content": text}), None)));
+                                        }
                                         if let Some(text) = ev.pointer("/delta/text").and_then(|v| v.as_str()) {
                                             yield Ok(Bytes::from(oai_chunk(&id, &model, json!({"content": text}), None)));
                                         }
                                     }
-                                    // Anthropic 扩展思考 → OpenAI reasoning_content(前端按主流字段渲染)。
+                                    // Anthropic 扩展思考 → OpenAI reasoning_content。
                                     Some("thinking_delta") => {
                                         if let Some(t) = ev.pointer("/delta/thinking").and_then(|v| v.as_str()) {
                                             yield Ok(Bytes::from(oai_chunk(&id, &model, json!({"reasoning_content": t}), None)));
@@ -223,10 +603,16 @@ fn anthropic_stream_response(
 
         let charged = ((input as f64 + output as f64) * multiplier * user.bill_multiplier()).round() as i64;
         user.deduct(charged);
+        user.record_tokens(input.saturating_add(output));
         let _ = state.usage_tx.send(UsageEvent {
             user_id, model, provider: provider_name, upstream_model,
             input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200,
+            request_id: Some(trace.request_id.clone()),
         }).await;
+        // 补记指标 tokens(Anthropic stream → OpenAI SSE)
+        let k = UpstreamKey::new(ProviderKind::Anthropic, &base_url, api_key.as_deref());
+        state.record_metrics_tokens(Some(&k), input as u64, output as u64).await;
+        trace.emit_success(&state, input, output, charged).await;
     };
 
     Response::builder()
@@ -243,6 +629,18 @@ pub async fn messages(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
+) -> Response {
+    let result = run_anthropic(state, headers, body).await;
+    match result {
+        Ok(r) => r,
+        Err(e) => e.into_anthropic_response(),
+    }
+}
+
+async fn run_anthropic(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Result<Response, ApiError> {
     let auth = authenticate(&state, &headers)?;
     let req: Value = serde_json::from_slice(&body)
@@ -256,8 +654,26 @@ pub async fn run_messages(
     user: Arc<crate::state::UserState>,
     req: Value,
 ) -> Result<Response, ApiError> {
+    let req_start = std::time::Instant::now();
+    macro_rules! fail_global {
+        () => {
+            state
+                .record_metrics_request(
+                    None,
+                    400,
+                    req_start.elapsed(),
+                )
+                .await;
+        };
+    }
+
     if user.balance() <= 0 {
+        fail_global!();
         return Err(ApiError::InsufficientBalance);
+    }
+    if !user.try_rpm() || !user.tpm_ok() {
+        fail_global!();
+        return Err(ApiError::TooManyRequests);
     }
     let model = req
         .get("model")
@@ -265,64 +681,307 @@ pub async fn run_messages(
         .ok_or_else(|| ApiError::BadRequest("missing `model`".into()))?
         .to_string();
     let stream = req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
-    let guard = user.try_acquire().ok_or(ApiError::TooManyRequests)?;
+    let guard = match user.try_acquire() {
+        Some(g) => g,
+        None => { fail_global!(); return Err(ApiError::TooManyRequests); }
+    };
 
-    let r = state.routing.load().resolve(user.group(), &model)?;
-    let kind = r.kind;
-    let (provider_name, base_url, api_key, upstream_model, multiplier) =
-        (r.provider, r.base_url, r.api_key, r.upstream_model, r.multiplier);
+    let candidates = match state.routing.load().resolve_all(user.group(), &model) {
+        Ok(c) => c,
+        Err(e) => { fail_global!(); return Err(e); }
+    };
+    let request_id = format!("req_{}", &uuid::Uuid::new_v4().to_string()[..24]);
+    let cand_init = init_candidates(&candidates);
+    let mut attempts: Vec<RequestAttempt> = Vec::new();
+    let run_start = std::time::Instant::now();
+    let run_path: &'static str = "messages";
+    let user_id_str = user.id.to_string();
+    let mut final_kind: Option<String> = None;
+    let mut final_upstream: Option<String> = None;
+    let mut final_status: i32 = 0;
+    for r in &candidates {
+        let kind = r.kind;
+        let (provider_name, base_url, api_key, upstream_model, multiplier) =
+            (&r.provider, &r.base_url, r.api_key.as_deref(), &r.upstream_model, r.multiplier);
 
-    match kind {
-        crate::config::ProviderKind::Anthropic => {
-            let mut areq = req;
-            areq["model"] = json!(upstream_model);
-            let resp = providers::anthropic::messages(&state, &base_url, api_key.as_deref(), areq).await?;
-            if stream {
-                Ok(anthropic_passthrough_stream(state, resp, guard, model, provider_name, upstream_model, multiplier, user))
-            } else {
-                anthropic_passthrough_nonstream(&state, resp, model, provider_name, upstream_model, multiplier, user).await
-            }
+        // ---- P2:熔断检查 ----
+        let ukey = UpstreamKey::new(kind, base_url, api_key);
+        if state.breaker_should_skip(&ukey).await {
+            attempts.push(RequestAttempt {
+                kind: match kind { ProviderKind::Openai => "openai".to_string(), ProviderKind::Anthropic => "anthropic".to_string() },
+                base_url: base_url.clone(),
+                upstream_model: upstream_model.clone(),
+                weight: r.weight,
+                status: -1,
+                latency_ms: 0,
+                error: "breaker open, skip".into(),
+            });
+            continue;
         }
-        crate::config::ProviderKind::Openai => {
-            let obody = crate::translate::anthropic_to_openai_request(&req, &upstream_model, stream);
-            let resp = providers::openai::chat_completions(&state, &base_url, api_key.as_deref(), &upstream_model, obody, stream).await?;
-            if stream {
-                Ok(messages_openai_stream(state, resp, guard, model, provider_name, upstream_model, multiplier, user))
-            } else {
-                messages_openai_nonstream(&state, resp, model, provider_name, upstream_model, multiplier, user).await
+        // ---- P1:上游并发槽(RAII,请求/流结束自动归还) ----
+        let slot = state.acquire_upstream(ukey.clone(), provider_name).await;
+        // ---- 指标计时器 ----
+        let up_start = std::time::Instant::now();
+
+        match kind {
+            crate::config::ProviderKind::Anthropic => {
+                let mut areq = req.clone();
+                areq["model"] = json!(upstream_model);
+                let resp = providers::anthropic::messages(&state, base_url, api_key, areq).await;
+                match resp {
+                    Ok(resp) if stream => {
+                        state.breaker_success(&ukey).await;
+                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
+                        final_kind = Some("anthropic".into());
+                        final_upstream = Some(upstream_model.clone());
+                        final_status = 200;
+                        attempts.push(RequestAttempt {
+                            kind: "anthropic".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: 200,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: String::new(),
+                        });
+                        let trace = RunTrace {
+                            request_id: request_id.clone(), user_id: user_id_str.clone(), path: run_path,
+                            requested_model: model.clone(), stream,
+                            candidates: cand_init.clone(), attempts: attempts.clone(),
+                            final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
+                            final_status, latency_ms: run_start.elapsed().as_millis() as u32,
+                        };
+                        return Ok(anthropic_passthrough_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace));
+                    }
+                    Ok(resp) => {
+                        state.breaker_success(&ukey).await;
+                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
+                        final_kind = Some("anthropic".into());
+                        final_upstream = Some(upstream_model.clone());
+                        final_status = 200;
+                        attempts.push(RequestAttempt {
+                            kind: "anthropic".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: 200,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: String::new(),
+                        });
+                        let trace = RunTrace {
+                            request_id: request_id.clone(), user_id: user_id_str.clone(), path: run_path,
+                            requested_model: model.clone(), stream,
+                            candidates: cand_init.clone(), attempts: attempts.clone(),
+                            final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
+                            final_status, latency_ms: run_start.elapsed().as_millis() as u32,
+                        };
+                        return anthropic_passthrough_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, base_url, api_key, trace).await;
+                    }
+                    Err(ApiError::Unavailable(e)) => {
+                        let fail_cnt = state.breaker_unavailable(&ukey).await;
+                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_UNAVAILABLE, up_start.elapsed()).await;
+                        state
+                            .record_failure(&ukey, &model, "messages", &e.to_string(), fail_cnt)
+                            .await;
+                        attempts.push(RequestAttempt {
+                            kind: "anthropic".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: crate::state::METRIC_STATUS_UNAVAILABLE as i32,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: e,
+                        });
+                        continue;
+                    }
+                    Err(e) => {
+                        state.record_metrics_request(Some(&ukey), 400, up_start.elapsed()).await;
+                        attempts.push(RequestAttempt {
+                            kind: "anthropic".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: 400,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: e.to_string(),
+                        });
+                        let trace = RunTrace {
+                            request_id, user_id: user_id_str, path: run_path,
+                            requested_model: model, stream,
+                            candidates: cand_init, attempts,
+                            final_kind, final_upstream_model: final_upstream,
+                            final_status: 400, latency_ms: run_start.elapsed().as_millis() as u32,
+                        };
+                        trace.emit_error(&state, 400).await;
+                        return Err(e);
+                    }
+                }
+            }
+            crate::config::ProviderKind::Openai => {
+                let obody = crate::translate::anthropic_to_openai_request(&req, upstream_model, stream);
+                let resp = providers::openai::chat_completions(&state, base_url, api_key, upstream_model, obody, stream).await;
+                match resp {
+                    Ok(resp) if stream => {
+                        state.breaker_success(&ukey).await;
+                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
+                        final_kind = Some("openai".into());
+                        final_upstream = Some(upstream_model.clone());
+                        final_status = 200;
+                        attempts.push(RequestAttempt {
+                            kind: "openai".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: 200,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: String::new(),
+                        });
+                        let trace = RunTrace {
+                            request_id: request_id.clone(), user_id: user_id_str.clone(), path: run_path,
+                            requested_model: model.clone(), stream,
+                            candidates: cand_init.clone(), attempts: attempts.clone(),
+                            final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
+                            final_status, latency_ms: run_start.elapsed().as_millis() as u32,
+                        };
+                        return Ok(messages_openai_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), kind, base_url.to_string(), api_key.map(|s| s.to_string()), trace));
+                    }
+                    Ok(resp) => {
+                        state.breaker_success(&ukey).await;
+                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
+                        final_kind = Some("openai".into());
+                        final_upstream = Some(upstream_model.clone());
+                        final_status = 200;
+                        attempts.push(RequestAttempt {
+                            kind: "openai".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: 200,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: String::new(),
+                        });
+                        let trace = RunTrace {
+                            request_id: request_id.clone(), user_id: user_id_str.clone(), path: run_path,
+                            requested_model: model.clone(), stream,
+                            candidates: cand_init.clone(), attempts: attempts.clone(),
+                            final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
+                            final_status, latency_ms: run_start.elapsed().as_millis() as u32,
+                        };
+                        return messages_openai_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, kind, base_url, api_key, trace).await;
+                    }
+                    Err(ApiError::Unavailable(e)) => {
+                        let fail_cnt = state.breaker_unavailable(&ukey).await;
+                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_UNAVAILABLE, up_start.elapsed()).await;
+                        state
+                            .record_failure(&ukey, &model, "messages", &e.to_string(), fail_cnt)
+                            .await;
+                        attempts.push(RequestAttempt {
+                            kind: "openai".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: crate::state::METRIC_STATUS_UNAVAILABLE as i32,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: e,
+                        });
+                        continue;
+                    }
+                    Err(e) => {
+                        state.record_metrics_request(Some(&ukey), 400, up_start.elapsed()).await;
+                        attempts.push(RequestAttempt {
+                            kind: "openai".into(),
+                            base_url: base_url.clone(),
+                            upstream_model: upstream_model.clone(),
+                            weight: r.weight,
+                            status: 400,
+                            latency_ms: up_start.elapsed().as_millis() as u32,
+                            error: e.to_string(),
+                        });
+                        let trace = RunTrace {
+                            request_id, user_id: user_id_str, path: run_path,
+                            requested_model: model, stream,
+                            candidates: cand_init, attempts,
+                            final_kind, final_upstream_model: final_upstream,
+                            final_status: 400, latency_ms: run_start.elapsed().as_millis() as u32,
+                        };
+                        trace.emit_error(&state, 400).await;
+                        return Err(e);
+                    }
+                }
             }
         }
     }
+    fail_global!();
+    let trace = RunTrace {
+        request_id, user_id: user_id_str, path: run_path,
+        requested_model: model.clone(), stream,
+        candidates: cand_init, attempts,
+        final_kind, final_upstream_model: final_upstream,
+        final_status: crate::state::METRIC_STATUS_UNAVAILABLE as i32,
+        latency_ms: run_start.elapsed().as_millis() as u32,
+    };
+    trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
+    Err(ApiError::NoTarget(model.clone()))
 }
 
-fn anth_charge(state: &AppState, user: &Arc<crate::state::UserState>, input: u32, output: u32, multiplier: f64, model: String, provider: String, upstream: String) {
+/// 计费 + 用量事件 + 补记指标 tokens(不增加 req 计数 / 不影响成功率与延迟)。
+#[allow(clippy::too_many_arguments)]
+async fn anth_charge(
+    state: &AppState,
+    user: &Arc<crate::state::UserState>,
+    input: u32,
+    output: u32,
+    multiplier: f64,
+    model: String,
+    provider: String,
+    upstream: String,
+    kind: ProviderKind,
+    base_url: &str,
+    api_key: Option<&str>,
+    request_id: Option<String>,
+    trace: RunTrace,
+) {
     let charged = ((input as f64 + output as f64) * multiplier * user.bill_multiplier()).round() as i64;
     user.deduct(charged);
+    user.record_tokens(input.saturating_add(output));
     let tx = state.usage_tx.clone();
-    let ev = UsageEvent { user_id: user.id, model, provider, upstream_model: upstream, input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200 };
+    let ev = UsageEvent { user_id: user.id, model, provider, upstream_model: upstream, input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200, request_id };
     tokio::spawn(async move { let _ = tx.send(ev).await; });
+    // 补记 token 指标:上游分桶 + 全局
+    let k = UpstreamKey::new(kind, base_url, api_key);
+    state.record_metrics_tokens(Some(&k), input as u64, output as u64).await;
+    trace.emit_success(state, input, output, charged).await;
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn anthropic_passthrough_nonstream(
     state: &AppState, resp: reqwest::Response, model: String, provider_name: String,
     upstream_model: String, multiplier: f64, user: Arc<crate::state::UserState>,
+    _slot: Option<OwnedSemaphorePermit>,
+    base_url: &str,
+    api_key: Option<&str>,
+    trace: RunTrace,
 ) -> Result<Response, ApiError> {
     let mut payload: Value = resp.json().await.map_err(|e| ApiError::Upstream(e.to_string()))?;
     let input = payload.pointer("/usage/input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let output = payload.pointer("/usage/output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     payload["model"] = json!(model);
-    anth_charge(state, &user, input, output, multiplier, model, provider_name, upstream_model);
+    anth_charge(state, &user, input, output, multiplier, model, provider_name, upstream_model, ProviderKind::Anthropic, base_url, api_key, Some(trace.request_id.clone()), trace).await;
     Ok(Json(payload).into_response())
 }
 
 #[allow(clippy::too_many_arguments)]
 fn anthropic_passthrough_stream(
     state: Arc<AppState>, resp: reqwest::Response, guard: crate::state::ConcurrencyGuard,
+    slot: Option<OwnedSemaphorePermit>,
     model: String, provider_name: String, upstream_model: String, multiplier: f64, user: Arc<crate::state::UserState>,
+    base_url: String,
+    api_key: Option<String>,
+    trace: RunTrace,
 ) -> Response {
     let s = async_stream::stream! {
         let _guard = guard;
+        let _slot = slot;
         let mut upstream = resp.bytes_stream();
         let mut buf: Vec<u8> = Vec::new();
         let mut input = 0u32;
@@ -347,7 +1006,7 @@ fn anthropic_passthrough_stream(
                 Err(e) => { yield Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())); break; }
             }
         }
-        anth_charge(&state, &user, input, output, multiplier, model, provider_name, upstream_model);
+        anth_charge(&state, &user, input, output, multiplier, model, provider_name, upstream_model, ProviderKind::Anthropic, &base_url, api_key.as_deref(), Some(trace.request_id.clone()), trace).await;
     };
     sse_response(s)
 }
@@ -356,12 +1015,17 @@ fn anthropic_passthrough_stream(
 async fn messages_openai_nonstream(
     state: &AppState, resp: reqwest::Response, model: String, provider_name: String,
     upstream_model: String, multiplier: f64, user: Arc<crate::state::UserState>,
+    _slot: Option<OwnedSemaphorePermit>,
+    kind: ProviderKind,
+    base_url: &str,
+    api_key: Option<&str>,
+    trace: RunTrace,
 ) -> Result<Response, ApiError> {
     let oai: Value = resp.json().await.map_err(|e| ApiError::Upstream(e.to_string()))?;
     let input = oai.pointer("/usage/prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let output = oai.pointer("/usage/completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let payload = crate::translate::openai_to_anthropic_response(&oai, &model);
-    anth_charge(state, &user, input, output, multiplier, model, provider_name, upstream_model);
+    anth_charge(state, &user, input, output, multiplier, model, provider_name, upstream_model, kind, base_url, api_key, Some(trace.request_id.clone()), trace).await;
     Ok(Json(payload).into_response())
 }
 
@@ -369,10 +1033,16 @@ async fn messages_openai_nonstream(
 #[allow(clippy::too_many_arguments)]
 fn messages_openai_stream(
     state: Arc<AppState>, resp: reqwest::Response, guard: crate::state::ConcurrencyGuard,
+    slot: Option<OwnedSemaphorePermit>,
     model: String, provider_name: String, upstream_model: String, multiplier: f64, user: Arc<crate::state::UserState>,
+    kind: ProviderKind,
+    base_url: String,
+    api_key: Option<String>,
+    trace: RunTrace,
 ) -> Response {
     let s = async_stream::stream! {
         let _guard = guard;
+        let _slot = slot;
         let mut upstream = resp.bytes_stream();
         let mut buf: Vec<u8> = Vec::new();
         let mut started = false;
@@ -449,7 +1119,7 @@ fn messages_openai_stream(
             yield Ok(a_event("message_delta", json!({"type":"message_delta","delta":{"stop_reason":stop,"stop_sequence":Value::Null},"usage":{"output_tokens":output}})));
             yield Ok(a_event("message_stop", json!({"type":"message_stop"})));
         }
-        anth_charge(&state, &user, input, output, multiplier, model, provider_name, upstream_model);
+        anth_charge(&state, &user, input, output, multiplier, model, provider_name, upstream_model, kind, &base_url, api_key.as_deref(), Some(trace.request_id.clone()), trace).await;
     };
     sse_response(s)
 }
@@ -485,16 +1155,21 @@ fn stream_response(
     state: Arc<AppState>,
     resp: reqwest::Response,
     guard: crate::state::ConcurrencyGuard,
+    slot: Option<OwnedSemaphorePermit>,
     model: String,
     provider_name: String,
     upstream_model: String,
     multiplier: f64,
     user: Arc<crate::state::UserState>,
+    base_url: String,
+    api_key: Option<String>,
+    trace: RunTrace,
 ) -> Response {
     let user_id = user.id;
     let s = async_stream::stream! {
         // guard 在 stream 生命周期内持有,流结束(或客户端断开导致 drop)才释放并发名额。
         let _guard = guard;
+        let _slot = slot;
         let mut upstream = resp.bytes_stream();
         let mut buf: Vec<u8> = Vec::new();
         let mut input = 0u32;
@@ -518,6 +1193,7 @@ fn stream_response(
         let charged =
         ((input as f64 + output as f64) * multiplier * user.bill_multiplier()).round() as i64;
         user.deduct(charged);
+        user.record_tokens(input.saturating_add(output));
         let _ = state
             .usage_tx
             .send(UsageEvent {
@@ -529,8 +1205,13 @@ fn stream_response(
                 output_tokens: output,
                 charged_tokens: charged,
                 status: 200,
+                request_id: Some(trace.request_id.clone()),
             })
             .await;
+        // 补记指标 tokens(OpenAI stream)
+        let k = UpstreamKey::new(ProviderKind::Openai, &base_url, api_key.as_deref());
+        state.record_metrics_tokens(Some(&k), input as u64, output as u64).await;
+        trace.emit_success(&state, input, output, charged).await;
     };
 
     Response::builder()
@@ -549,6 +1230,11 @@ async fn non_stream_response(
     upstream_model: String,
     multiplier: f64,
     user: Arc<crate::state::UserState>,
+    _slot: Option<OwnedSemaphorePermit>,
+    kind: ProviderKind,
+    base_url: &str,
+    api_key: Option<&str>,
+    trace: RunTrace,
 ) -> Result<Response, ApiError> {
     let mut payload: Value = resp
         .json()
@@ -567,6 +1253,7 @@ async fn non_stream_response(
     let charged =
         ((input as f64 + output as f64) * multiplier * user.bill_multiplier()).round() as i64;
     user.deduct(charged);
+    user.record_tokens(input.saturating_add(output));
 
     // 把上游真名换回客户端请求的逻辑名。
     payload["model"] = json!(model);
@@ -582,8 +1269,13 @@ async fn non_stream_response(
             output_tokens: output,
             charged_tokens: charged,
             status: 200,
+            request_id: Some(trace.request_id.clone()),
         })
         .await;
+    // 补记指标 tokens(OpenAI nonstream)
+    let k = UpstreamKey::new(kind, base_url, api_key);
+    state.record_metrics_tokens(Some(&k), input as u64, output as u64).await;
+    trace.emit_success(state, input, output, charged).await;
 
     Ok(Json(payload).into_response())
 }

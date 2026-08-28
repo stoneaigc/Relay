@@ -143,6 +143,8 @@ pub struct CreateUser {
     pub group_id: Option<i64>,
     pub grant_tokens: Option<i64>,
     pub concurrency_limit: Option<i64>,
+    pub rpm_limit: Option<i64>,
+    pub tpm_limit: Option<i64>,
 }
 
 /// POST /admin/users
@@ -155,11 +157,13 @@ pub async fn create_user(
     if body.username.trim().is_empty() || body.password.is_empty() {
         return Err(ApiError::BadRequest("username and password required".into()));
     }
-    let (grant, default_limit) = {
+    let (grant, default_limit, default_rpm, default_tpm) = {
         let cfg = state.config();
         (
             body.grant_tokens.unwrap_or(cfg.defaults.signup_grant_tokens),
             cfg.defaults.concurrency_limit,
+            cfg.defaults.rpm_limit,
+            cfg.defaults.tpm_limit,
         )
     };
     let limit = body.concurrency_limit.map(|v| v as u32).unwrap_or(default_limit);
@@ -171,13 +175,15 @@ pub async fn create_user(
     let id = storage::admin_create_user(&state.db, body.username.trim(), &pwhash, email, phone, grant, gid, "admin")
         .await
         .map_err(|_| ApiError::BadRequest("用户名或手机号已存在".into()))?;
-    if let Some(cl) = body.concurrency_limit {
-        storage::update_user(&state.db, id, Some(cl), None, None).await.ok();
+    if body.concurrency_limit.is_some() || body.rpm_limit.is_some() || body.tpm_limit.is_some() {
+        storage::update_user(&state.db, id, body.concurrency_limit, None, None, body.rpm_limit, body.tpm_limit).await.ok();
     }
-    state.users.insert(
-        id,
-        Arc::new(UserState::new(id, grant, limit, 0, 1.0, gid.unwrap_or(0))),
+    let us = Arc::new(UserState::new(id, grant, limit, 0, 1.0, gid.unwrap_or(0)));
+    us.set_limits(
+        body.rpm_limit.map(|v| v.max(0) as u32).unwrap_or(default_rpm),
+        body.tpm_limit.map(|v| v.max(0) as u32).unwrap_or(default_tpm),
     );
+    state.users.insert(id, us);
     Ok(Json(json!({ "id": id })))
 }
 
@@ -201,6 +207,8 @@ pub async fn get_user(
         "used_total": u.token_used_total,
         "concurrency_limit": u.concurrency_limit,
         "multiplier": u.bill_multiplier,
+        "rpm_limit": u.rpm_limit,
+        "tpm_limit": u.tpm_limit,
         "created_at": u.created_at,
     })))
 }
@@ -212,6 +220,8 @@ pub struct PatchUser {
     pub add_tokens: Option<i64>,
     pub bill_multiplier: Option<f64>,
     pub group_id: Option<i64>, // 绑定模型组(0 = 解绑)
+    pub rpm_limit: Option<i64>,
+    pub tpm_limit: Option<i64>,
     pub username: Option<String>,
     pub email: Option<String>,
     pub phone: Option<String>,
@@ -227,7 +237,7 @@ pub async fn patch_user(
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
 
-    storage::update_user(&state.db, id, body.concurrency_limit, body.status, body.bill_multiplier)
+    storage::update_user(&state.db, id, body.concurrency_limit, body.status, body.bill_multiplier, body.rpm_limit, body.tpm_limit)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     if let Some(delta) = body.add_tokens {
@@ -248,6 +258,11 @@ pub async fn patch_user(
         }
         if let Some(m) = body.bill_multiplier {
             u.set_bill_multiplier(m);
+        }
+        if body.rpm_limit.is_some() || body.tpm_limit.is_some() {
+            let rpm = body.rpm_limit.map(|v| v.max(0) as u32).unwrap_or_else(|| u.rpm_limit.load(Ordering::Relaxed));
+            let tpm = body.tpm_limit.map(|v| v.max(0) as u32).unwrap_or_else(|| u.tpm_limit.load(Ordering::Relaxed));
+            u.set_limits(rpm, tpm);
         }
     }
 
@@ -994,4 +1009,160 @@ pub async fn test_email_settings(
         Ok(()) => Ok(Json(json!({ "ok": true }))),
         Err(e) => Ok(Json(json!({ "ok": false, "error": e.to_string() }))),
     }
+}
+
+// ============================================================
+// 上游治理仪表盘(熔断器状态 + 并发槽占用)
+// ============================================================
+
+/// GET /admin/upstreams —— 上游运行时状态(熔断器 + 并发槽占用率)。
+/// 熔断中的上游会排在最前,方便管理后台一眼看出故障点。
+pub async fn list_upstreams(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    Ok(Json(state.list_upstream_status().await))
+}
+
+/// POST /admin/upstreams/reset —— 手动清除 **所有** 上游的熔断器状态。
+/// 场景:人工修复了上游故障后,不想等 30s 自动恢复。
+pub async fn reset_all_breakers(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let mut cleared = 0u64;
+    // 遍历所有已有熔断器,清零
+    let keys: Vec<crate::state::UpstreamKey> = state
+        .upstream_breakers
+        .iter()
+        .map(|e| e.key().clone())
+        .collect();
+    for k in &keys {
+        if let Some(br) = state.upstream_breakers.get(k) {
+            br.value().lock().await.record_success();
+            cleared += 1;
+        }
+    }
+    Ok(Json(json!({ "ok": true, "cleared": cleared })))
+}
+
+/// POST /admin/upstreams/reset/:id —— 手动清除 **单个** 上游的熔断器状态。
+/// `:id` = 「kind|base_url|key_fingerprint」三段竖线分隔,其中 key_fingerprint 可以为空。
+/// 之所以不直接用索引,是因为管理后台可以直接用前端拿到的 items[i] 拼这个 id。
+pub async fn reset_one_breaker(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    // id 格式: kind|base_url|fp  (fp 可以为空)
+    let parts: Vec<&str> = id.splitn(3, '|').collect();
+    let (Some(kind_s), Some(base_url), fp) = (parts.get(0), parts.get(1), parts.get(2)) else {
+        return Err(ApiError::BadRequest("id 格式: kind|base_url|key_fingerprint".into()));
+    };
+    let kind = match kind_s.to_lowercase().as_str() {
+        "openai" => ProviderKind::Openai,
+        "anthropic" => ProviderKind::Anthropic,
+        _ => return Err(ApiError::BadRequest(format!("未知 kind:{}", kind_s))),
+    };
+    let fp = fp.copied().unwrap_or("");
+    let key = crate::state::UpstreamKey::from_fingerprint(kind, base_url.to_string(), fp);
+    let matched = match state.upstream_breakers.get(&key) {
+        Some(br) => {
+            br.value().lock().await.record_success();
+            true
+        }
+        None => false,
+    };
+    Ok(Json(json!({ "ok": true, "matched": matched })))
+}
+
+#[derive(Deserialize)]
+pub struct AuditQuery {
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// GET /admin/api/audit/failures?limit=50 —— 最近的路由失败审计(ring buffer,倒序输出)。
+/// 默认 50 条,最大 200 条(后端强制 clamp)。
+pub async fn list_failure_audit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<AuditQuery>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    Ok(Json(state.list_failures(q.limit).await))
+}
+
+#[derive(Deserialize)]
+pub struct RequestLogsQuery {
+    /// 检索关键字(request_id / 模型名)。空 = 最近全部。
+    #[serde(default)]
+    pub q: Option<String>,
+    /// 返回条数,默认 50,最大 200。
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// GET /admin/api/request-logs?q=&limit=50 —— 最近请求链路日志(倒序)。
+/// 记录每次请求的候选顺序、权重、实际选中、failover 链与 tokens。
+pub async fn list_request_logs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<RequestLogsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let logs = state
+        .request_log
+        .recent(q.q.as_deref().unwrap_or(""), q.limit.unwrap_or(50))
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "data": logs })))
+}
+
+// ======================== 接口指标仪表盘 ========================
+
+#[derive(Deserialize)]
+pub struct MetricsQuery {
+    /// 时间窗口秒数:0 = 全量(最多 48h 分钟桶)。默认 3600 = 最近 1 小时。
+    /// 可选值:300 / 900 / 1800 / 3600 / 14400 / 43200 / 86400 / 0
+    #[serde(default)]
+    pub range_secs: Option<u64>,
+    /// 上游排行榜 TopN,默认 20。
+    #[serde(default)]
+    pub top_n: Option<usize>,
+}
+
+/// GET /admin/api/metrics?range_secs=3600&top_n=20 —— 接口指标汇总(大盘 + TopN 上游 + 时序)。
+/// 一次请求返回所有 dashboard 数据,减少前端往返。
+pub async fn metrics_dashboard(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<MetricsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    Ok(Json(
+        state
+            .query_metrics(q.range_secs, q.top_n)
+            .await,
+    ))
+}
+
+/// GET /admin/api/metrics/overview?range_secs=3600 —— 只取汇总(KPI + top upstream 简要)。
+pub async fn metrics_overview(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<MetricsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let full = state.query_metrics(q.range_secs, q.top_n).await;
+    // 去掉 series,前端首次刷盘时用
+    let mut out = full;
+    if let Some(obj) = out.as_object_mut() {
+        obj.remove("series");
+        obj.remove("upstream_series");
+    }
+    Ok(Json(out))
 }

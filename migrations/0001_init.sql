@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS users (
   concurrency_limit INTEGER,                       -- NULL=用全局默认
   bill_multiplier   REAL NOT NULL DEFAULT 1.0,     -- 用户级计费倍率(与模型倍率相乘)
   group_id          INTEGER,                       -- 绑定的模型组
+  rpm_limit         INTEGER,                       -- 每分钟请求上限(NULL=用全局默认)
+  tpm_limit         INTEGER,                       -- 每分钟 token 上限(NULL=用全局默认)
   source            TEXT,                          -- 注册来源:admin|phone|wechat|alipay
   created_at        TEXT NOT NULL
 );
@@ -39,9 +41,32 @@ CREATE TABLE IF NOT EXISTS usage_logs (
   charged_tokens INTEGER,
   status         INTEGER,
   ts             INTEGER NOT NULL DEFAULT 0,   -- unix 秒,便于按时间聚合
-  created_at     TEXT NOT NULL
+  created_at     TEXT NOT NULL,
+  request_id     TEXT                          -- 关联 request_logs 的请求链路 ID
 );
 CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_logs(user_id, ts);
+
+-- 请求链路追踪:记录每次请求(成功+失败)的路由候选顺序、权重、实际选中、failover 链。
+CREATE TABLE IF NOT EXISTS request_logs (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id         TEXT NOT NULL,            -- 本次请求唯一 ID(UUID)
+  user_id            TEXT NOT NULL,
+  path               TEXT,                     -- chat | messages
+  requested_model    TEXT,                     -- 用户请求的对外模型名
+  stream             INTEGER NOT NULL DEFAULT 0,
+  candidates         TEXT,                     -- JSON:[{kind,base_url,model,weight}] 候选顺序(加权命中+failover)
+  attempts           TEXT,                     -- JSON:[{kind,base_url,model,status,latency_ms,error,skipped}]
+  final_kind         TEXT,                     -- 最终命中/失败的上游 kind
+  final_upstream_model TEXT,                   -- 最终命中/失败的上游模型名
+  final_status       INTEGER,                  -- 200=成功;非 200=失败原因
+  latency_ms         INTEGER NOT NULL DEFAULT 0,
+  input_tokens       INTEGER NOT NULL DEFAULT 0,
+  output_tokens      INTEGER NOT NULL DEFAULT 0,
+  charged_tokens     INTEGER NOT NULL DEFAULT 0,
+  created_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reqlog_user ON request_logs(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_reqlog_reqid ON request_logs(request_id);
 
 CREATE TABLE IF NOT EXISTS providers (
   name        TEXT PRIMARY KEY,

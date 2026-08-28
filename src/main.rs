@@ -8,12 +8,14 @@ mod handlers;
 mod jwt;
 mod portal;
 mod providers;
+mod reqlog;
 mod routing;
 mod settings;
 mod state;
 mod storage;
 mod translate;
 
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,10 +26,10 @@ use axum::{
     Router,
 };
 use dashmap::DashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
 use crate::config::Config;
-use crate::state::{AppState, UsageEvent};
+use crate::state::{AppState, AUDIT_FAILURE_CAP, UsageEvent};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -78,6 +80,17 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     let (usage_tx, usage_rx) = mpsc::channel::<UsageEvent>(4096);
+    // 请求链路日志:按配置选择存储后端(默认 SQLite;ES 预留)。
+    let (request_log_tx, request_log_rx) = mpsc::channel::<reqlog::RequestLog>(4096);
+    let log_store: Arc<dyn reqlog::RequestLogStore> = {
+        let store_kind = cfg.logging.store.clone();
+        let es_url = cfg.logging.elasticsearch_url.clone();
+        match store_kind.as_str() {
+            "elasticsearch" => Arc::new(reqlog::EsRequestLogStore::new(es_url)),
+            _ => Arc::new(reqlog::SqliteRequestLogStore::new(db.clone())),
+        }
+    };
+    tracing::info!("request-log store backend: {}", cfg.logging.store);
 
     let cache = cache::Cache::init(&cfg.cache).await?;
     tracing::info!("cache backend: {}", cfg.cache.kind);
@@ -92,10 +105,16 @@ async fn main() -> anyhow::Result<()> {
         db,
         usage_tx,
         cache,
+        upstream_slots: DashMap::new(),
+        upstream_breakers: DashMap::new(),
+        audit_failures: AsyncMutex::new(VecDeque::with_capacity(AUDIT_FAILURE_CAP)),
+        metrics: crate::state::MetricsStore::default(),
+        request_log: log_store,
+        request_log_tx,
     });
 
-    // 后台:用量落盘 + 周期性余额回写。
-    tokio::spawn(background_task(Arc::clone(&state), usage_rx));
+    // 后台:用量落盘 + 请求链路落库 + 周期性余额回写。
+    tokio::spawn(background_task(Arc::clone(&state), usage_rx, request_log_rx));
 
     // ---- 门户 API(挂到 /portal/api)----
     let portal_api = Router::new()
@@ -149,7 +168,17 @@ async fn main() -> anyhow::Result<()> {
         .route("/groups/:id/routes", get(admin::list_routes).post(admin::add_route))
         .route("/routes/:id", axum::routing::delete(admin::delete_route).patch(admin::update_route))
         .route("/settings/email", get(admin::get_email_settings).post(admin::save_email_settings))
-        .route("/settings/email/test", post(admin::test_email_settings));
+        .route("/settings/email/test", post(admin::test_email_settings))
+        // ---- 上游治理仪表盘 ----
+        .route("/upstreams", get(admin::list_upstreams))
+        .route("/upstreams/reset", post(admin::reset_all_breakers))
+        .route("/upstreams/reset/:id", post(admin::reset_one_breaker))
+        .route("/audit/failures", get(admin::list_failure_audit))
+        // 接口指标仪表盘
+        .route("/metrics", get(admin::metrics_dashboard))
+        .route("/metrics/overview", get(admin::metrics_overview))
+        // 请求链路追踪
+        .route("/request-logs", get(admin::list_request_logs));
 
     // SPA 静态资源(未命中的子路径回退到 index.html,交给前端路由)。
     let spa = |dir: &str| {
@@ -186,7 +215,11 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn background_task(state: Arc<AppState>, mut rx: mpsc::Receiver<UsageEvent>) {
+async fn background_task(
+    state: Arc<AppState>,
+    mut rx: mpsc::Receiver<UsageEvent>,
+    mut req_rx: mpsc::Receiver<reqlog::RequestLog>,
+) {
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     loop {
         tokio::select! {
@@ -195,6 +228,16 @@ async fn background_task(state: Arc<AppState>, mut rx: mpsc::Receiver<UsageEvent
                     Some(ev) => {
                         if let Err(e) = storage::insert_usage(&state.db, &ev).await {
                             tracing::error!("insert usage failed: {e}");
+                        }
+                    }
+                    None => break,
+                }
+            }
+            log = req_rx.recv() => {
+                match log {
+                    Some(l) => {
+                        if let Err(e) = state.request_log.write(&l).await {
+                            tracing::error!("write request_log failed: {e}");
                         }
                     }
                     None => break,

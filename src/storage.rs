@@ -177,6 +177,12 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE model_groups ADD COLUMN IF NOT EXISTS is_active BIGINT NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
+        let _ = q!("ALTER TABLE users ADD COLUMN IF NOT EXISTS rpm_limit BIGINT")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE users ADD COLUMN IF NOT EXISTS tpm_limit BIGINT")
+            .execute(pool)
+            .await;
         // 奖励申领接入任务:补 task_id,并放开旧 kind 的 NOT NULL。
         let _ = q!("ALTER TABLE reward_claims ADD COLUMN IF NOT EXISTS task_id BIGINT")
             .execute(pool)
@@ -194,10 +200,16 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE users ADD COLUMN password_hash TEXT").execute(pool).await;
         let _ = q!("ALTER TABLE users ADD COLUMN email TEXT").execute(pool).await;
         let _ = q!("ALTER TABLE users ADD COLUMN source TEXT").execute(pool).await;
+        let _ = q!("ALTER TABLE users ADD COLUMN rpm_limit INTEGER").execute(pool).await;
+        let _ = q!("ALTER TABLE users ADD COLUMN tpm_limit INTEGER").execute(pool).await;
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN ts INTEGER NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
         let _ = q!("ALTER TABLE model_groups ADD COLUMN is_active INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
+        // 请求链路:旧库补 request_id 列(已存在则忽略错误)。
+        let _ = q!("ALTER TABLE usage_logs ADD COLUMN request_id TEXT")
             .execute(pool)
             .await;
     }
@@ -217,7 +229,7 @@ pub async fn load_into_memory(
     keys: &DashMap<String, KeyEntry>,
 ) -> anyhow::Result<()> {
     let rows = q!(
-        "SELECT id, status, token_balance, concurrency_limit, bill_multiplier, group_id FROM users",
+        "SELECT id, status, token_balance, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit FROM users",
     )
     .fetch_all(pool)
     .await?;
@@ -229,10 +241,11 @@ pub async fn load_into_memory(
         let mult: f64 = r.try_get("bill_multiplier").unwrap_or(1.0);
         let group_id: i64 = r.try_get::<Option<i64>, _>("group_id").ok().flatten().unwrap_or(0);
         let limit = cl.map(|v| v as u32).unwrap_or(cfg.defaults.concurrency_limit);
-        users.insert(
-            id,
-            Arc::new(UserState::new(id, balance, limit, status as u8, mult, group_id)),
-        );
+        let rpm = r.try_get::<Option<i64>, _>("rpm_limit").ok().flatten().unwrap_or(cfg.defaults.rpm_limit as i64).max(0) as u32;
+        let tpm = r.try_get::<Option<i64>, _>("tpm_limit").ok().flatten().unwrap_or(cfg.defaults.tpm_limit as i64).max(0) as u32;
+        let us = Arc::new(UserState::new(id, balance, limit, status as u8, mult, group_id));
+        us.set_limits(rpm, tpm);
+        users.insert(id, us);
     }
 
     let rows = q!("SELECT user_id, key_hash FROM api_keys WHERE revoked = 0")
@@ -411,7 +424,7 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
             _ => ProviderKind::Openai,
         };
         routing.providers.insert(r.get::<String, _>("name"), ProviderConn {
-            kind, base_url: r.get("base_url"), api_key: r.get("api_key"),
+            kind, base_url: r.get("base_url"), api_key: r.get("api_key"), concurrency: None,
         });
     }
     for r in q!("SELECT id, provider, upstream_model FROM models").fetch_all(pool).await? {
@@ -461,6 +474,8 @@ pub struct UserRow {
     pub concurrency_limit: Option<i64>,
     pub bill_multiplier: f64,
     pub group_id: Option<i64>,
+    pub rpm_limit: Option<i64>,
+    pub tpm_limit: Option<i64>,
     pub source: Option<String>,
     pub created_at: String,
 }
@@ -558,7 +573,7 @@ pub async fn find_user_by_username(pool: &Db, username: &str) -> anyhow::Result<
 
 pub async fn get_user(pool: &Db, id: Uuid) -> anyhow::Result<Option<UserRow>> {
     let row = q!(
-        "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, source, created_at
+        "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, source, created_at
          FROM users WHERE id = ?",
     )
     .bind(id.to_string())
@@ -569,7 +584,7 @@ pub async fn get_user(pool: &Db, id: Uuid) -> anyhow::Result<Option<UserRow>> {
 
 pub async fn list_users(pool: &Db) -> anyhow::Result<Vec<UserRow>> {
     let rows = q!(
-        "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, source, created_at
+        "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, source, created_at
          FROM users ORDER BY created_at DESC",
     )
     .fetch_all(pool)
@@ -589,6 +604,8 @@ fn row_to_user(r: &sqlx::any::AnyRow) -> anyhow::Result<UserRow> {
         concurrency_limit: r.get("concurrency_limit"),
         bill_multiplier: r.try_get("bill_multiplier").unwrap_or(1.0),
         group_id: r.try_get::<Option<i64>, _>("group_id").unwrap_or(None),
+        rpm_limit: r.try_get::<Option<i64>, _>("rpm_limit").unwrap_or(None),
+        tpm_limit: r.try_get::<Option<i64>, _>("tpm_limit").unwrap_or(None),
         source: r.try_get("source").unwrap_or(None),
         created_at: r.get("created_at"),
     })
@@ -600,6 +617,8 @@ pub async fn update_user(
     concurrency_limit: Option<i64>,
     status: Option<i64>,
     bill_multiplier: Option<f64>,
+    rpm_limit: Option<i64>,
+    tpm_limit: Option<i64>,
 ) -> anyhow::Result<()> {
     if let Some(cl) = concurrency_limit {
         q!("UPDATE users SET concurrency_limit = ? WHERE id = ?")
@@ -618,6 +637,20 @@ pub async fn update_user(
     if let Some(m) = bill_multiplier {
         q!("UPDATE users SET bill_multiplier = ? WHERE id = ?")
             .bind(m)
+            .bind(id.to_string())
+            .execute(pool)
+            .await?;
+    }
+    if let Some(rpm) = rpm_limit {
+        q!("UPDATE users SET rpm_limit = ? WHERE id = ?")
+            .bind(rpm)
+            .bind(id.to_string())
+            .execute(pool)
+            .await?;
+    }
+    if let Some(tpm) = tpm_limit {
+        q!("UPDATE users SET tpm_limit = ? WHERE id = ?")
+            .bind(tpm)
             .bind(id.to_string())
             .execute(pool)
             .await?;
@@ -1169,8 +1202,8 @@ pub async fn insert_usage(
 ) -> anyhow::Result<()> {
     q!(
         "INSERT INTO usage_logs
-         (user_id, model, provider, upstream_model, input_tokens, output_tokens, charged_tokens, status, ts, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         (user_id, model, provider, upstream_model, input_tokens, output_tokens, charged_tokens, status, ts, created_at, request_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(ev.user_id.to_string())
     .bind(&ev.model)
@@ -1182,6 +1215,7 @@ pub async fn insert_usage(
     .bind(ev.status as i64)
     .bind(now_secs())
     .bind(now_iso())
+    .bind(ev.request_id.as_deref())
     .execute(pool)
     .await?;
     Ok(())

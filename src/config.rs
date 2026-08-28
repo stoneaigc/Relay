@@ -18,6 +18,32 @@ pub struct Config {
     pub email: EmailConfig,
     #[serde(default)]
     pub cache: CacheConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
+}
+
+/// 请求日志存储后端。
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoggingConfig {
+    /// 请求链路日志存储:"sqlite"(默认,写 request_logs 表)| "elasticsearch"(预留)。
+    #[serde(default = "default_log_store")]
+    pub store: String,
+    /// 预留:ES 连接地址(store=elasticsearch 时用,暂未实现)。
+    #[serde(default)]
+    pub elasticsearch_url: String,
+}
+
+fn default_log_store() -> String {
+    "sqlite".to_string()
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            store: default_log_store(),
+            elasticsearch_url: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -175,7 +201,18 @@ pub struct Defaults {
     pub signup_grant_tokens: i64,
     #[serde(default = "default_tz")]
     pub tz_offset_hours: i64,
+    /// 用户级默认限流(0 = 不限):每分钟最大请求数。
+    #[serde(default = "default_rpm")]
+    pub rpm_limit: u32,
+    /// 用户级默认限流(0 = 不限):每分钟最大 token 消耗。
+    #[serde(default = "default_tpm")]
+    pub tpm_limit: u32,
+    /// 单个上游连接(一个 key)的默认最大在途并发。0 表示不限。
+    #[serde(default = "default_upstream_concurrency")]
+    pub upstream_concurrency: u32,
 }
+
+fn default_upstream_concurrency() -> u32 { 32 }
 
 impl Default for Defaults {
     fn default() -> Self {
@@ -183,8 +220,18 @@ impl Default for Defaults {
             concurrency_limit: default_concurrency(),
             signup_grant_tokens: default_grant(),
             tz_offset_hours: default_tz(),
+            rpm_limit: default_rpm(),
+            tpm_limit: default_tpm(),
+            upstream_concurrency: default_upstream_concurrency(),
         }
     }
+}
+
+fn default_rpm() -> u32 {
+    0
+}
+fn default_tpm() -> u32 {
+    0
 }
 
 fn default_tz() -> i64 {
@@ -199,7 +246,7 @@ fn default_grant() -> i64 {
 }
 
 /// 上游供应商的协议类型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     Openai,

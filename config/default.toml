@@ -55,6 +55,13 @@ from = ""
 concurrency_limit = 16
 signup_grant_tokens = 10_000_000   # 新用户赠送 1000 万 token
 
+# 请求链路日志存储后端。
+# store: sqlite(默认,写 request_logs 表)| elasticsearch(预留,暂未实现)。
+[logging]
+store = "sqlite"
+# 预留:ES 连接地址(store=elasticsearch 时用,暂未实现)。
+# elasticsearch_url = "http://127.0.0.1:9200"
+
 # 注:奖励任务(star / issue / 提建议 等)以及 供应商 / 模型 / 模型组 / 路由,
 # 全部由管理后台维护并持久化到数据库,不在此配置;首次启动会自动播种 3 个示例奖励任务。
 # 这里只放全局默认、鉴权、邮箱、缓存等。
