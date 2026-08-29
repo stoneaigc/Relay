@@ -112,6 +112,40 @@ export const api = {
     req("/admin/api/settings/email", { method: "POST", body: JSON.stringify(body) }),
   testEmail: (body: EmailSettingsBody & { test_to: string }): Promise<{ ok: boolean; error?: string }> =>
     req("/admin/api/settings/email/test", { method: "POST", body: JSON.stringify(body) }),
+
+  // ---- 上游治理(熔断器 + 并发槽仪表盘) ----
+  listUpstreams: (): Promise<UpstreamsResp> => req("/admin/api/upstreams"),
+  resetAllBreakers: (): Promise<{ ok: true; cleared: number }> => req("/admin/api/upstreams/reset", { method: "POST" }),
+  resetOneBreaker: (id: string): Promise<{ ok: true; matched: boolean }> => req(`/admin/api/upstreams/reset/${encodeURIComponent(id)}`, { method: "POST" }),
+
+  // ---- 路由失败审计 ----
+  listFailures: (limit?: number): Promise<AuditFailuresResp> =>
+    req(`/admin/api/audit/failures${typeof limit === "number" ? `?limit=${limit}` : ""}`),
+
+  // ---- 接口指标仪表盘 ----
+  metricsDashboard: (range_secs?: number, top_n?: number): Promise<MetricsDashboardResp> => {
+    const qs = new URLSearchParams();
+    if (typeof range_secs === "number") qs.set("range_secs", String(range_secs));
+    if (typeof top_n === "number") qs.set("top_n", String(top_n));
+    const q = qs.toString();
+    return req(`/admin/api/metrics${q ? "?" + q : ""}`);
+  },
+  metricsOverview: (range_secs?: number, top_n?: number): Promise<MetricsDashboardResp> => {
+    const qs = new URLSearchParams();
+    if (typeof range_secs === "number") qs.set("range_secs", String(range_secs));
+    if (typeof top_n === "number") qs.set("top_n", String(top_n));
+    const q = qs.toString();
+    return req(`/admin/api/metrics/overview${q ? "?" + q : ""}`);
+  },
+
+  // ---- 请求链路追踪 ----
+  requestLogs: (q?: string, limit?: number): Promise<{ data: RequestLogRow[] }> => {
+    const qs = new URLSearchParams();
+    if (q) qs.set("q", q);
+    if (typeof limit === "number") qs.set("limit", String(limit));
+    const s = qs.toString();
+    return req(`/admin/api/request-logs${s ? "?" + s : ""}`);
+  },
 };
 
 export type EvidenceType = "screenshot" | "link" | "text" | "none";
@@ -176,4 +210,173 @@ export interface EmailSettingsBody {
 export interface EmailSettingsResp extends EmailSettingsBody {
   has_password: boolean;
   enabled: boolean;
+}
+
+// ============================================================
+// 上游治理仪表盘
+// ============================================================
+
+export interface BreakerStatus {
+  fail_count: number;
+  threshold: number;
+  is_broken: boolean;
+  /** 还剩多少毫秒进入自动恢复,0 = 不在熔断 */
+  recover_remaining_ms: number;
+  window_secs: number;
+}
+
+export interface ConcurrencyStatus {
+  limit: number;
+  in_flight: number;
+  utilization_pct: number;
+}
+
+export interface UpstreamRow {
+  kind: "openai" | "anthropic" | string;
+  base_url: string;
+  has_key: boolean;
+  /** 16 hex 字符串, "" = 无 key */
+  key_fingerprint: string;
+  breaker: BreakerStatus;
+  concurrency: ConcurrencyStatus;
+}
+
+export interface UpstreamsResp {
+  total: number;
+  broken_count: number;
+  items: UpstreamRow[];
+}
+
+export interface FailureRow {
+  ts_ms: number;
+  kind: "openai" | "anthropic" | string;
+  base_url: string;
+  key_fingerprint: string;
+  /** `kind|base_url|key_fingerprint`,与「清零单个」的 ID 格式一致 */
+  upstream_id: string;
+  requested_model: string;
+  path: "chat" | "messages" | string;
+  error_summary: string;
+  fail_count_after: number;
+  threshold: number;
+  /** 这一条是否刚好触发了熔断(前端红色高亮) */
+  triggered_break: boolean;
+}
+
+export interface AuditFailuresResp {
+  /** 实际存储中的总条数(ring buffer 容量 ≤ capacity) */
+  stored: number;
+  /** 环形 buffer 总容量 */
+  capacity: number;
+  items: FailureRow[];
+}
+
+// ================== 接口指标仪表盘 ==================
+
+/** 时间桶(秒或分钟)聚合结果 */
+export interface MetricsSeriesPoint {
+  /** 桶起点 unix 秒 */
+  ts: number;
+  /** 桶内总请求数 */
+  requests: number;
+  /** 桶内成功数 */
+  success: number;
+  /** 桶内不可用失败数 */
+  fail_unavailable: number;
+  /** 桶内 4xx 业务失败数 */
+  fail_other: number;
+  /** 桶内输入 tokens */
+  input_tokens: number;
+  /** 桶内输出 tokens */
+  output_tokens: number;
+  /** 延迟分位(毫秒):只有当 samples 非空时才有值 */
+  avg_ms: number;
+  p50_ms: number;
+  p95_ms: number;
+  p99_ms: number;
+}
+
+/** KPI 汇总 */
+export interface MetricsSummary {
+  /** 采样窗口长度(秒) */
+  range_secs: number;
+  /** 采样时间 */
+  sampled_at: number;
+  requests: number;
+  success_rate: number;
+  /** 请求速率(RPS) */
+  rps: number;
+  /** 吞吐量(TPM = (input+output) / range_secs * 60) */
+  tpm: number;
+  input_tokens: number;
+  output_tokens: number;
+  fail_unavailable: number;
+  fail_other: number;
+  avg_ms: number;
+  p50_ms: number;
+  p95_ms: number;
+  p99_ms: number;
+}
+
+/** 单个上游排行条目 */
+export interface MetricsUpstreamRow {
+  /** 上游 key 展示 */
+  kind: string;
+  base_url: string;
+  key_fingerprint: string;
+  upstream_id: string;
+  /** 核心指标 */
+  requests: number;
+  success_rate: number;
+  tpm: number;
+  avg_ms: number;
+  p99_ms: number;
+  fail_unavailable: number;
+}
+
+export interface MetricsDashboardResp {
+  range_secs: number;
+  sampled_at: number;
+  summary: MetricsSummary;
+  /** 全局时序(前端柱状图/折线图用) */
+  series: MetricsSeriesPoint[];
+  /** Top N 上游排行榜 */
+  upstreams: MetricsUpstreamRow[];
+  /** 每个 Top 上游对应的时序(可选,前端画多线对比) */
+  upstream_series?: {
+    upstream_id: string;
+    series: MetricsSeriesPoint[];
+  }[];
+}
+
+// ================== 请求链路追踪 ==================
+
+export interface RequestAttempt {
+  kind: string;
+  base_url: string;
+  upstream_model: string;
+  weight: number;
+  /** 200=成功; 503=不可用; -1=熔断跳过; 400/500=其它错误; 0=初始状态(候选列表) */
+  status: number;
+  latency_ms: number;
+  error: string;
+}
+
+export interface RequestLogRow {
+  request_id: string;
+  user_id: string;
+  path: string;
+  requested_model: string;
+  stream: boolean;
+  candidates: RequestAttempt[];
+  attempts: RequestAttempt[];
+  final_kind: string | null;
+  final_upstream_model: string | null;
+  final_status: number;
+  latency_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+  charged_tokens: number;
+  /** unix 秒 */
+  ts: number;
 }

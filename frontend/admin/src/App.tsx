@@ -1,10 +1,10 @@
-import { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
-import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send } from "lucide-react";
-import { api, getToken, setToken, clearToken, UserRow, ModelRow, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp } from "./api";
+import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch } from "lucide-react";
+import { api, getToken, setToken, clearToken, UserRow, ModelRow, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -48,6 +48,9 @@ const NAV: { path: string; label: string; icon: any }[] = [
   { path: "/overview", label: "概览", icon: LayoutDashboard },
   { path: "/users", label: "用户管理", icon: UsersIcon },
   { path: "/models", label: "模型", icon: Boxes },
+  { path: "/upstreams", label: "上游治理", icon: Zap },
+  { path: "/metrics", label: "接口指标", icon: Activity },
+  { path: "/request-logs", label: "请求链路", icon: GitBranch },
   { path: "/groups", label: "模型组", icon: Layers },
   { path: "/rewards", label: "奖励审核", icon: Gift },
   { path: "/reward-tasks", label: "奖励设置", icon: Star },
@@ -110,6 +113,9 @@ function Console({ onLogout }: { onLogout: () => void }) {
                 <Route path="/overview" element={<OverviewPanel />} />
                 <Route path="/users" element={<UsersPanel onAuthErr={onLogout} />} />
                 <Route path="/models" element={<ModelsPanel />} />
+                <Route path="/upstreams" element={<UpstreamsPanel />} />
+                <Route path="/metrics" element={<MetricsPanel />} />
+                <Route path="/request-logs" element={<RequestLogPanel />} />
                 <Route path="/rewards" element={<RewardsPanel />} />
                 <Route path="/reward-tasks" element={<RewardTasksPanel />} />
                 <Route path="/usage" element={<UsagePanel />} />
@@ -1378,3 +1384,1581 @@ function SettingsPanel() {
     </div>
   );
 }
+
+// ============================================================
+// 上游治理仪表盘(熔断器状态 + 并发槽占用率)
+// ============================================================
+
+type BreakerTone = "healthy" | "warn" | "broken";
+function breakerTone(fc: number, threshold: number, broken: boolean): BreakerTone {
+  if (broken) return "broken";
+  if (fc === 0) return "healthy";
+  if (fc >= threshold - 1) return "warn";
+  return "warn";
+}
+const TONE_CLS: Record<BreakerTone, string> = {
+  healthy: "from-emerald-400/90 via-emerald-500 to-teal-600",
+  warn:    "from-amber-300/90 via-amber-500 to-orange-600",
+  broken:  "from-rose-400/95 via-rose-600 to-red-700",
+};
+const TONE_BADGE: Record<BreakerTone, { label: string; cls: string }> = {
+  healthy: { label: "健康",       cls: "bg-emerald-500/10 text-emerald-600 ring-1 ring-emerald-500/20" },
+  warn:    { label: "告警",       cls: "bg-amber-500/10 text-amber-700 ring-1 ring-amber-500/20" },
+  broken:  { label: "熔断中", cls: "bg-rose-500/15 text-rose-700 ring-1 ring-rose-500/30" },
+};
+
+/** 恢复倒计时环:把剩余 ms 画成 SVG 圆环进度 */
+function CountdownRing({ remaining_ms, window_secs }: { remaining_ms: number; window_secs: number }) {
+  const total = window_secs * 1000;
+  const pct = total <= 0 ? 0 : Math.max(0, Math.min(1, remaining_ms / total));
+  const R = 18, C = 2 * Math.PI * R;
+  const dash = C * pct;
+  const secs = Math.ceil(remaining_ms / 1000);
+  return (
+    <div className="relative inline-flex h-12 w-12 shrink-0 items-center justify-center">
+      <svg viewBox="0 0 44 44" className="h-12 w-12 -rotate-90">
+        <circle cx="22" cy="22" r={R} stroke="currentColor" strokeOpacity=".12" strokeWidth="3.5" fill="none" />
+        <circle cx="22" cy="22" r={R} stroke="currentColor" strokeWidth="3.5" fill="none"
+          strokeLinecap="round"
+          strokeDasharray={`${dash.toFixed(2)} ${C.toFixed(2)}`}
+          className="text-rose-500 transition-all duration-300 ease-linear" />
+      </svg>
+      <span className="absolute inset-0 flex items-center justify-center text-[11px] font-semibold tabular-nums text-rose-600">
+        {secs > 0 ? `${secs}s` : "✓"}
+      </span>
+    </div>
+  );
+}
+
+/** 并发槽横向进度条 + 数字 */
+function ConcurrencyBar({ s }: { s: UpstreamRow["concurrency"] }) {
+  const used = Math.min(100, s.utilization_pct);
+  const tone = used >= 95 ? "from-rose-500 to-red-600"
+              : used >= 80 ? "from-amber-500 to-orange-600"
+              : used >= 40 ? "from-sky-500 to-indigo-600"
+              : "from-emerald-500 to-teal-600";
+  const unlimited = s.limit === 0;
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between text-[11px] text-muted-foreground">
+        <span className="inline-flex items-center gap-1"><Cpu className="h-3 w-3" />并发槽</span>
+        <span className="tabular-nums">
+          {unlimited ? "不限" : (
+            <>
+              <span className="text-foreground font-medium">{s.in_flight}</span>
+              <span className="mx-0.5 opacity-60">/</span>
+              <span>{s.limit}</span>
+            </>
+          )}
+        </span>
+      </div>
+      <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+        {!unlimited && (
+          <div
+            className={`h-full rounded-full bg-gradient-to-r ${tone} transition-[width] duration-300`}
+            style={{ width: `${used}%` }}
+          />
+        )}
+        {unlimited && <div className="h-full w-full rounded-full bg-gradient-to-r from-emerald-500/40 to-teal-500/40" />}
+      </div>
+      {!unlimited && <div className="mt-0.5 text-right text-[10px] text-muted-foreground tabular-nums">{used}%</div>}
+    </div>
+  );
+}
+
+function UpstreamCard({ row, onReset, tickMs }: {
+  row: UpstreamRow;
+  onReset: (id: string) => Promise<void>;
+  /** 每 tickMs 会本地刷新一次(用于熔断倒计时) */
+  tickMs: number;
+}) {
+  // 基于后端 recover_remaining_ms 的本地倒计时,避免高频刷新 API
+  const [localRemaining, setLocalRemaining] = useState(row.breaker.recover_remaining_ms);
+  const [resetting, setResetting] = useState(false);
+  useEffect(() => { setLocalRemaining(row.breaker.recover_remaining_ms); }, [row.breaker.recover_remaining_ms]);
+  useEffect(() => {
+    if (localRemaining <= 0) return;
+    const t = setTimeout(() => {
+      setLocalRemaining((v) => Math.max(0, v - tickMs));
+    }, tickMs);
+    return () => clearTimeout(t);
+  }, [localRemaining, tickMs]);
+
+  const tone = breakerTone(row.breaker.fail_count, row.breaker.threshold, row.breaker.is_broken && localRemaining > 0);
+  const cls = TONE_CLS[tone];
+  const badge = TONE_BADGE[tone];
+  const id = `${row.kind}|${row.base_url}|${row.key_fingerprint}`;
+
+  const reset = async () => {
+    setResetting(true);
+    try { await onReset(id); } finally { setResetting(false); }
+  };
+
+  return (
+    <Card className={cn(
+      "group relative overflow-hidden transition-all duration-200",
+      tone === "broken" && "ring-2 ring-rose-500/30 shadow-[0_0_0_1px_theme(colors.rose.500/10%),0_8px_30px_-12px_theme(colors.rose.500/50%)]",
+      tone === "warn"   && "ring-1 ring-amber-500/20",
+      "hover:shadow-md"
+    )}>
+      {/* 左色条:状态可视化 */}
+      <div className={cn(
+        "pointer-events-none absolute left-0 top-0 h-full w-1.5 bg-gradient-to-b",
+        cls,
+        tone === "broken" && "animate-pulse"
+      )} />
+      <CardContent className="p-4 pl-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            {/* 头部:协议 + Base URL + 状态徽标 */}
+            <div className="mb-1.5 flex items-center gap-2">
+              <Badge variant="muted" className="shrink-0 text-[10px] uppercase tracking-wider">{row.kind}</Badge>
+              <span className={cn("rounded-md px-1.5 py-0.5 text-[10px] font-medium", badge.cls)}>
+                {tone === "broken" && <ShieldAlert className="mr-1 inline h-3 w-3 -translate-y-[1px]" />}
+                {tone === "healthy" && <ShieldCheck className="mr-1 inline h-3 w-3 -translate-y-[1px]" />}
+                {badge.label}
+              </span>
+              {row.has_key ? (
+                <span className="rounded-md bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 ring-1 ring-sky-500/20"
+                  title={`Key 指纹: ${row.key_fingerprint}`}>
+                  Key · {row.key_fingerprint.slice(0, 8)}
+                </span>
+              ) : (
+                <span className="rounded-md bg-slate-500/10 px-1.5 py-0.5 text-[10px] text-slate-500 ring-1 ring-slate-500/20">
+                  无 Key
+                </span>
+              )}
+            </div>
+            <div className="mono mb-3 truncate text-xs text-muted-foreground" title={row.base_url}>{row.base_url}</div>
+
+            <div className="space-y-3">
+              {/* 熔断器状态 */}
+              <div className="flex items-start gap-3 rounded-xl bg-muted/40 p-3">
+                {tone === "broken"
+                  ? <CountdownRing remaining_ms={localRemaining} window_secs={row.breaker.window_secs} />
+                  : (
+                    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl">
+                      {tone === "healthy"
+                        ? <ShieldCheck className="h-6 w-6 text-emerald-500" />
+                        : <Clock className="h-6 w-6 text-amber-500" />}
+                    </div>
+                  )}
+                <div className="min-w-0 flex-1">
+                  <div className="mb-1 flex items-center justify-between text-xs">
+                    <span className="font-medium text-foreground">熔断器</span>
+                    <span className="tabular-nums text-muted-foreground">
+                      {row.breaker.fail_count}<span className="opacity-50">/</span>{row.breaker.threshold}
+                    </span>
+                  </div>
+                  {/* 失败计数条:阈值 3,三段式 */}
+                  <div className="flex h-1.5 gap-1">
+                    {Array.from({ length: row.breaker.threshold }).map((_, i) => (
+                      <div key={i} className={cn(
+                        "h-full flex-1 rounded-full transition-all duration-300",
+                        i < row.breaker.fail_count
+                          ? (tone === "broken" ? "bg-rose-500" : "bg-amber-500")
+                          : "bg-muted-foreground/15"
+                      )} />
+                    ))}
+                  </div>
+                  <div className="mt-1.5 text-[10px] text-muted-foreground">
+                    {tone === "healthy" && "连续 0 次失败"}
+                    {tone === "warn" && !row.breaker.is_broken && `已 ${row.breaker.fail_count} 次失败,再失败 ${Math.max(0, row.breaker.threshold - row.breaker.fail_count)} 次即熔断`}
+                    {tone === "broken" && `熔断窗 ${row.breaker.window_secs}s,过半开 1 次探活恢复`}
+                  </div>
+                </div>
+              </div>
+
+              {/* 并发槽状态 */}
+              <ConcurrencyBar s={row.concurrency} />
+            </div>
+          </div>
+        </div>
+
+        {/* 底部操作条 */}
+        <div className="mt-3 flex items-center justify-between border-t pt-3">
+          <div className="text-[10px] text-muted-foreground tabular-nums">
+            <span className="font-mono">{encodeURIComponent(id).length > 40 ? id.slice(0, 40) + "…" : id}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            {tone === "broken" && (
+              <span className="inline-flex items-center gap-1 text-[11px] text-rose-600">
+                <Clock className="h-3 w-3" />
+                {localRemaining > 0
+                  ? `约 ${Math.ceil(localRemaining / 1000)}s 后自动探活`
+                  : "恢复窗口已过,等待下一次请求探活"}
+              </span>
+            )}
+            <Button size="sm" variant="outline" disabled={resetting} onClick={reset}>
+              <RotateCcw className={cn("h-3.5 w-3.5", resetting && "animate-spin")} />
+              {resetting ? "处理中…" : "手动清零"}
+            </Button>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+type FilterTone = "all" | BreakerTone;
+const FILTERS: { k: FilterTone; label: string; icon?: any }[] = [
+  { k: "all",    label: "全部" },
+  { k: "broken", label: "熔断", icon: ShieldAlert },
+  { k: "warn",   label: "告警", icon: Clock },
+  { k: "healthy",label: "健康", icon: ShieldCheck },
+];
+
+/** 审计 ring buffer 容量兜底(与后端 state.rs 的 AUDIT_FAILURE_CAP 保持一致,前端只是展示 fallback) */
+const AUDIT_CAP_FALLBACK = 500;
+
+/** 相对时间:把 unix ms 时间戳变成「刚刚 / X 秒前 / X 分钟前 / X 小时前 / 昨天 / M-D HH:mm」 */
+function fmtRel(ts_ms: number): string {
+  const diff = Date.now() - ts_ms;
+  if (diff < 1000) return "刚刚";
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return `${sec} 秒前`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} 分钟前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前`;
+  const day = Math.floor(hr / 24);
+  if (day === 1) return "昨天";
+  if (day < 7) return `${day} 天前`;
+  const d = new Date(ts_ms);
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  return `${mm}-${dd} ${hh}:${mi}`;
+}
+
+function UpstreamsPanel() {
+  const [data, setData] = useState<UpstreamsResp | null>(null);
+  const [failures, setFailures] = useState<AuditFailuresResp | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+  const [auto, setAuto] = useState(true);
+  const [intervalSecs, setIntervalSecs] = useState(5);
+  const [tone, setTone] = useState<FilterTone>("all");
+  const [q, setQ] = useState("");
+  const [toast, setToast] = useState<{ type: "ok" | "err"; msg: string } | null>(null);
+  const [resetAllOpen, setResetAllOpen] = useState(false);
+  const [resetAllBusy, setResetAllBusy] = useState(false);
+  const [failuresLimit, setFailuresLimit] = useState<number>(50);
+
+  const load = async () => {
+    try {
+      setErr("");
+      const [u, f] = await Promise.all([
+        api.listUpstreams(),
+        api.listFailures(failuresLimit),
+      ]);
+      setData(u); setFailures(f);
+    } catch (e: any) { setErr(e.message || "加载失败"); }
+    finally { setLoading(false); }
+  };
+  // 首屏 + 手动刷新
+  useEffect(() => { load(); }, []);
+  // failuresLimit 改变再拉一次
+  useEffect(() => { load(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, [failuresLimit]);
+  // 自动轮询
+  useEffect(() => {
+    if (!auto) return;
+    const t = setInterval(load, intervalSecs * 1000);
+    return () => clearInterval(t);
+  }, [auto, intervalSecs, failuresLimit]);
+  // toast 3s 自动消失
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  const fmt = (n: number) => (n ?? 0).toLocaleString();
+  const healthy = (data?.total ?? 0) - (data?.broken_count ?? 0);
+  const totalInFlight = (data?.items ?? []).reduce((a, r) => a + r.concurrency.in_flight, 0);
+  const totalLimit = (data?.items ?? []).reduce((a, r) => a + r.concurrency.limit, 0);
+  const utilPct = totalLimit === 0 ? 0 : Math.round((totalInFlight * 100) / totalLimit);
+
+  const items = (data?.items ?? []).filter((r) => {
+    const t = breakerTone(r.breaker.fail_count, r.breaker.threshold, r.breaker.is_broken);
+    if (tone !== "all" && t !== tone) return false;
+    if (!q.trim()) return true;
+    const needle = q.trim().toLowerCase();
+    return r.base_url.toLowerCase().includes(needle)
+      || r.kind.toLowerCase().includes(needle)
+      || r.key_fingerprint.toLowerCase().includes(needle);
+  });
+
+  const resetOne = async (id: string) => {
+    try {
+      const r = await api.resetOneBreaker(id);
+      setToast({ type: r.matched ? "ok" : "err", msg: r.matched ? "已清零熔断器" : "未匹配到该上游" });
+    } catch (e: any) { setToast({ type: "err", msg: e.message || "清零失败" }); }
+    await load();
+  };
+
+  const resetAll = async () => {
+    setResetAllBusy(true);
+    try {
+      const r = await api.resetAllBreakers();
+      setToast({ type: "ok", msg: `已清零 ${r.cleared} 个上游的熔断器` });
+      setResetAllOpen(false);
+    } catch (e: any) { setToast({ type: "err", msg: e.message || "清零失败" }); }
+    finally { setResetAllBusy(false); await load(); }
+  };
+
+  return (
+    <div className="space-y-5">
+      {/* Toast */}
+      {toast && (
+        <div className={cn(
+          "fixed right-6 top-6 z-50 flex items-center gap-2 rounded-xl px-4 py-3 text-sm shadow-2xl backdrop-blur",
+          toast.type === "ok"
+            ? "bg-emerald-500/95 text-white ring-1 ring-emerald-400/60"
+            : "bg-rose-500/95 text-white ring-1 ring-rose-400/60"
+        )}>
+          {toast.type === "ok" ? <Check className="h-4 w-4" /> : <ShieldAlert className="h-4 w-4" />}
+          <span>{toast.msg}</span>
+        </div>
+      )}
+
+      {/* 顶部总览 */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard
+          label="上游总数"
+          value={fmt(data?.total ?? 0)}
+          sub={(data?.total ?? 0) === 0 ? "尚无访问过的上游" : "被访问过的连接数"}
+        />
+        <div className={cn(
+          "transition-all",
+          (data?.broken_count ?? 0) > 0 && "animate-[pulse_2s_ease-in-out_infinite]"
+        )}>
+          <Card className={cn((data?.broken_count ?? 0) > 0 && "ring-2 ring-rose-500/30 bg-rose-500/[0.02]")}>
+            <CardContent className="pt-5">
+              <div className="flex items-center justify-between">
+                <div className="text-xs text-muted-foreground">熔断中</div>
+                <ShieldAlert className={cn("h-4 w-4", (data?.broken_count ?? 0) > 0 ? "text-rose-500" : "text-slate-400")} />
+              </div>
+              <div className={cn("mono mt-1 text-2xl font-bold tracking-tight",
+                (data?.broken_count ?? 0) > 0 ? "text-rose-600" : "text-slate-400")}>
+                {fmt(data?.broken_count ?? 0)}
+              </div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                {(data?.broken_count ?? 0) > 0 ? "请立即查看红色卡片" : "全部正常 🎉"}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+        <StatCard
+          label="健康数"
+          value={fmt(healthy)}
+          sub={healthy > 0 ? "可承接请求的上游" : ""}
+        />
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center justify-between">
+              <div className="text-xs text-muted-foreground">全局并发占用</div>
+              <Cpu className={cn("h-4 w-4", utilPct >= 80 ? "text-rose-500" : "text-sky-500")} />
+            </div>
+            <div className="mono mt-1 text-2xl font-bold tracking-tight tabular-nums">
+              {totalLimit === 0 ? "∞" : (
+                <>
+                  {fmt(totalInFlight)}
+                  <span className="mx-1 text-base font-normal text-muted-foreground opacity-70">/</span>
+                  <span className="text-base font-normal text-muted-foreground">{fmt(totalLimit)}</span>
+                </>
+              )}
+            </div>
+            <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+              <div
+                className={cn(
+                  "h-full rounded-full bg-gradient-to-r transition-[width] duration-300",
+                  utilPct >= 80 ? "from-amber-500 to-rose-500" : "from-sky-500 to-indigo-500"
+                )}
+                style={{ width: `${totalLimit === 0 ? 100 : utilPct}%` }}
+              />
+            </div>
+            <div className="mt-0.5 text-xs text-muted-foreground tabular-nums">
+              {totalLimit === 0 ? "未配置并发上限" : `占用率 ${utilPct}%`}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* 操作条 */}
+      <Card>
+        <CardHeader className="flex-row items-center justify-between gap-3 space-y-0">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Zap className="h-4 w-4 text-primary" />
+            上游治理仪表盘
+          </CardTitle>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                className="w-56 pl-8"
+                placeholder="搜 base_url / 协议 / 指纹"
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+              />
+            </div>
+            <div className="flex items-center gap-0.5 rounded-lg bg-muted p-0.5">
+              {FILTERS.map((f) => (
+                <button key={f.k} onClick={() => setTone(f.k)}
+                  className={cn(
+                    "inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                    tone === f.k ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                  )}>
+                  {f.icon && <f.icon className="h-3 w-3" />}{f.label}
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-1 rounded-lg bg-muted p-0.5">
+              <button
+                onClick={() => setAuto((v) => !v)}
+                title={auto ? "暂停自动刷新" : "开启自动刷新"}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+                  auto ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                )}>
+                <RefreshCw className={cn("h-3 w-3", auto && "animate-spin [animation-duration:2s]")} />
+                {auto ? "自动" : "已暂停"}
+              </button>
+              <select
+                value={intervalSecs}
+                onChange={(e) => setIntervalSecs(Number(e.target.value))}
+                disabled={!auto}
+                className="rounded-md border-0 bg-transparent px-1.5 py-1 text-xs text-muted-foreground focus:outline-none focus:ring-0 disabled:opacity-50"
+              >
+                {[2, 5, 10, 30].map((s) => <option key={s} value={s}>{s}s</option>)}
+              </select>
+            </div>
+            <Button size="sm" variant="outline" onClick={load} disabled={loading}>
+              <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+              {loading ? "加载中" : "立即刷新"}
+            </Button>
+            <Button size="sm" variant="destructive" onClick={() => setResetAllOpen(true)}
+              disabled={!data || data.total === 0}>
+              <RotateCcw className="h-3.5 w-3.5" />
+              全部清零
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {loading && !data ? (
+            <p className="py-10 text-center text-sm text-muted-foreground">加载中…</p>
+          ) : err ? (
+            <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+              {err}
+            </div>
+          ) : items.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-16 text-center">
+              <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-muted">
+                <Zap className="h-7 w-7 text-muted-foreground/70" />
+              </div>
+              <div className="text-sm font-medium text-foreground">
+                {(data?.total ?? 0) === 0 ? "尚无访问记录" : "无匹配的上游"}
+              </div>
+              <div className="mt-1 max-w-sm text-xs text-muted-foreground">
+                {(data?.total ?? 0) === 0
+                  ? "上游治理在首次调用模型路由后才会记录连接,请先让用户发起一次请求再查看。"
+                  : "尝试调整筛选条件或搜索关键词。"}
+              </div>
+            </div>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+              {items.map((r, i) => (
+                <UpstreamCard key={`${r.kind}|${r.base_url}|${r.key_fingerprint}|${i}`} row={r} onReset={resetOne} tickMs={250} />
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ================== 失败审计(路由转移记录) ================== */}
+      <Card>
+        <CardHeader className="flex-row items-center justify-between gap-3 space-y-0">
+          <CardTitle className="text-base flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-amber-500" />
+            失败审计 · 路由转移记录
+            <Badge variant="muted" className="ml-1.5 text-[10px]">
+              {(failures?.stored ?? 0).toLocaleString()}
+              <span className="mx-1 opacity-50">/</span>
+              {failures?.capacity ?? AUDIT_CAP_FALLBACK}
+            </Badge>
+          </CardTitle>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">显示最近</span>
+            <select
+              value={failuresLimit}
+              onChange={(e) => setFailuresLimit(Number(e.target.value))}
+              className="h-8 rounded-md border bg-transparent px-2 text-xs focus:outline-none focus:ring-0"
+            >
+              {[10, 30, 50, 100, 200].map((n) => <option key={n} value={n}>{n} 条</option>)}
+            </select>
+            <Button size="sm" variant="outline" onClick={load} disabled={loading}>
+              <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+              刷新
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="p-0">
+          {!failures || failures.items.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-14 text-center">
+              <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-500/10 ring-1 ring-emerald-500/20">
+                <Check className="h-7 w-7 text-emerald-500" />
+              </div>
+              <div className="text-sm font-medium text-foreground">暂无失败记录 · 全绿中 ✨</div>
+              <div className="mt-1 max-w-md text-xs text-muted-foreground">
+                每次路由在某个上游遇到 429 / 5xx / 断链就会记一条,按时间倒序保留最多 {(failures?.capacity ?? AUDIT_CAP_FALLBACK).toLocaleString()} 条。
+              </div>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b bg-muted/30 text-left text-[11px] uppercase tracking-wider text-muted-foreground">
+                    <th className="px-4 py-2.5 font-medium">时间</th>
+                    <th className="px-3 py-2.5 font-medium">上游</th>
+                    <th className="px-3 py-2.5 font-medium">模型 · 链路</th>
+                    <th className="px-3 py-2.5 font-medium">失败计数</th>
+                    <th className="px-3 py-2.5 font-medium">错误摘要</th>
+                    <th className="px-4 py-2.5 text-right font-medium">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {failures.items.map((r, i) => (
+                    <tr key={`${r.ts_ms}-${r.upstream_id}-${i}`} className={cn(
+                      "border-b transition-colors hover:bg-muted/30",
+                      r.triggered_break && "bg-rose-500/[0.04] hover:bg-rose-500/[0.07]"
+                    )}>
+                      <td className="px-4 py-3 align-top tabular-nums">
+                        <div className="flex flex-col gap-0.5">
+                          <span className="text-xs font-medium text-foreground">{fmtRel(r.ts_ms)}</span>
+                          <span className="text-[10px] text-muted-foreground" title={new Date(r.ts_ms).toLocaleString()}>
+                            {new Date(r.ts_ms).toLocaleTimeString()}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-3 py-3 align-top">
+                        <div className="flex flex-col gap-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <Badge variant="muted" className="text-[10px] uppercase tracking-wider">{r.kind}</Badge>
+                            {r.key_fingerprint ? (
+                              <Badge variant="muted" className="text-[10px] bg-sky-500/10 text-sky-700 ring-1 ring-sky-500/20"
+                                title={`Key 指纹: ${r.key_fingerprint}`}>
+                                Key · {r.key_fingerprint.slice(0, 8)}
+                              </Badge>
+                            ) : (
+                              <Badge variant="muted" className="text-[10px] text-slate-500">无 Key</Badge>
+                            )}
+                            {r.triggered_break && (
+                              <span className="inline-flex items-center gap-1 rounded-md bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 ring-1 ring-rose-500/30">
+                                <ShieldAlert className="h-3 w-3" />
+                                触发熔断
+                              </span>
+                            )}
+                          </div>
+                          <span className="mono text-xs text-muted-foreground break-all" title={r.base_url}>{r.base_url}</span>
+                        </div>
+                      </td>
+                      <td className="px-3 py-3 align-top">
+                        <div className="flex flex-col gap-1">
+                          <div className="inline-flex w-max items-center gap-1 rounded-md bg-indigo-500/10 px-1.5 py-0.5 text-[11px] font-medium text-indigo-700 ring-1 ring-indigo-500/20"
+                            title="用户请求的对外模型名">
+                            {r.requested_model || "—"}
+                          </div>
+                          <span className="text-[11px] text-muted-foreground">
+                            {r.path === "chat" ? "聊天补全 /v1/chat/completions" :
+                             r.path === "messages" ? "Anthropic Messages /v1/messages" :
+                             r.path}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-3 py-3 align-top">
+                        <div className="inline-flex items-center gap-2">
+                          <div className="flex h-4 gap-0.5">
+                            {Array.from({ length: r.threshold }).map((_, idx) => (
+                              <div key={idx} className={cn(
+                                "h-full w-3 rounded-sm transition-colors",
+                                idx < r.fail_count_after
+                                  ? r.triggered_break ? "bg-rose-500" : "bg-amber-500"
+                                  : "bg-muted-foreground/15"
+                              )} />
+                            ))}
+                          </div>
+                          <span className="tabular-nums text-xs text-muted-foreground">
+                            {r.fail_count_after}<span className="opacity-50">/</span>{r.threshold}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="px-3 py-3 align-top max-w-md">
+                        <div className="group relative">
+                          <code className="block max-w-[28rem] truncate rounded-md bg-muted/60 px-2 py-1 text-[11px] text-rose-700 ring-1 ring-rose-500/10"
+                            title={r.error_summary}>
+                            {r.error_summary || "(无错误描述)"}
+                          </code>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-right align-top">
+                        <div className="flex justify-end gap-1.5">
+                          <Button size="sm" variant="outline"
+                            onClick={() => {
+                              // 定位:把搜索框设为「协议 + base_url」,筛选保持 all
+                              setTone("all");
+                              setQ(`${r.kind} ${r.base_url}`);
+                              // 滚到页面顶部(上游卡片)
+                              window.scrollTo({ top: 0, behavior: "smooth" });
+                            }}>
+                            <Link2 className="h-3.5 w-3.5" />
+                            定位上游
+                          </Button>
+                          <Button size="sm" variant="secondary" onClick={() => resetOne(r.upstream_id)}>
+                            <RotateCcw className="h-3.5 w-3.5" />
+                            清零熔断器
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* 全部清零确认对话框 */}
+      <Dialog open={resetAllOpen} onOpenChange={(o) => !o && setResetAllOpen(false)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="inline-flex items-center gap-2">
+              <RotateCcw className="h-4 w-4 text-rose-500" />
+              清零所有上游熔断器?
+            </DialogTitle>
+            <DialogDescription>
+              手动清除 {data?.total ?? 0} 个上游的连续失败计数。仅建议在你已修复上游故障后使用。
+              自动恢复会在 30s 熔断窗结束后由半开探活触发,无需手动干预。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setResetAllOpen(false)}>取消</Button>
+            <Button variant="destructive" disabled={resetAllBusy} onClick={resetAll}>
+              <RotateCcw className={cn("h-4 w-4", resetAllBusy && "animate-spin")} />
+              {resetAllBusy ? "处理中…" : "确认全部清零"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+// ==========================================================================
+// 接口指标仪表盘
+// ==========================================================================
+
+/** 可选时间窗口(秒):label */
+const RANGE_PRESETS: { label: string; secs: number }[] = [
+  { label: "最近 5 分钟", secs: 300 },
+  { label: "最近 15 分钟", secs: 900 },
+  { label: "最近 30 分钟", secs: 1800 },
+  { label: "最近 1 小时", secs: 3600 },
+  { label: "最近 4 小时", secs: 14400 },
+  { label: "最近 12 小时", secs: 43200 },
+  { label: "最近 24 小时", secs: 86400 },
+  { label: "全部(最多 48h)", secs: 0 },
+];
+
+const fmtInt = (n: number) => {
+  if (!isFinite(n)) return "0";
+  const v = Math.max(0, Math.round(n));
+  if (v >= 1_000_000) return (v / 1_000_000).toFixed(2) + "M";
+  if (v >= 1_000) return (v / 1_000).toFixed(1) + "K";
+  return String(v);
+};
+const fmtMs = (n: number) => (isFinite(n) ? (n < 1000 ? `${Math.round(n)} ms` : `${(n / 1000).toFixed(2)} s`) : "—");
+const fmtPct = (n: number) => (isFinite(n) ? `${(n * 100).toFixed(2)}%` : "—");
+const fmtBuckets = (n: number, label: string) => {
+  if (!isFinite(n)) return `0 ${label}`;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M ${label}`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K ${label}`;
+  return `${Math.round(n)} ${label}`;
+};
+
+function KpiCard({
+  label,
+  value,
+  sub,
+  tone = "default",
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  tone?: "default" | "good" | "warn" | "bad" | "info";
+}) {
+  const toneText: Record<string, string> = {
+    default: "text-slate-700",
+    good: "text-emerald-700",
+    warn: "text-amber-700",
+    bad: "text-rose-700",
+    info: "text-sky-700",
+  };
+  return (
+    <div className="rounded-xl border bg-gradient-to-br from-slate-50 to-white p-4 shadow-sm border-slate-200 dark:border-slate-800 dark:from-slate-900 dark:to-slate-900/40">
+      <div className="text-xs tracking-wide text-slate-500 dark:text-slate-400">{label}</div>
+      <div className={cn("mt-1 text-2xl font-semibold tabular-nums", toneText[tone], "dark:text-inherit")}>
+        {value}
+      </div>
+      {sub ? <div className="mt-1 text-xs text-slate-500 tabular-nums dark:text-slate-400">{sub}</div> : null}
+    </div>
+  );
+}
+
+/** 请求量(柱状) + P95 延迟(折线)双轴图 */
+function ReqLatencyChart({ points }: { points: MetricsSeriesPoint[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ w: 800, h: 260 });
+  const [hover, setHover] = useState<number | null>(null);
+  const PAD = { l: 52, r: 60, t: 16, b: 28 };
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver((es) => {
+      const r = es[0].contentRect;
+      setSize({ w: Math.max(320, Math.floor(r.width)), h: 260 });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const plotW = size.w - PAD.l - PAD.r;
+  const plotH = size.h - PAD.t - PAD.b;
+  const n = points.length;
+  const maxReq = Math.max(1, ...points.map((p) => p.requests));
+  const maxLat = Math.max(1, ...points.map((p) => p.p95_ms));
+
+  const xAt = (i: number) => PAD.l + (n <= 1 ? plotW / 2 : (plotW * i) / (n - 1));
+  const yReq = (v: number) => PAD.t + plotH - (plotH * v) / maxReq;
+  const yLat = (v: number) => PAD.t + plotH - (plotH * v) / maxLat;
+
+  const barW = Math.max(2, Math.min(22, (plotW / Math.max(1, n)) * 0.7));
+  const barsPath = points
+    .map((p, i) => {
+      const x = xAt(i);
+      const x0 = x - barW / 2;
+      const y = yReq(p.requests);
+      return `M${x0.toFixed(2)},${(PAD.t + plotH).toFixed(2)} L${x0.toFixed(2)},${y.toFixed(
+        2
+      )} L${(x0 + barW).toFixed(2)},${y.toFixed(2)} L${(x0 + barW).toFixed(2)},${(PAD.t + plotH).toFixed(2)} Z`;
+    })
+    .join(" ");
+  const linePath = points
+    .map((p, i) => `${i === 0 ? "M" : "L"}${xAt(i).toFixed(2)},${yLat(p.p95_ms).toFixed(2)}`)
+    .join(" ");
+
+  const ticksY = 4;
+  const ticksX = 5;
+  const formatTs = (ts: number) => {
+    const d = new Date(ts * 1000);
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+
+  return (
+    <div ref={ref} className="relative w-full">
+      <svg width={size.w} height={size.h}>
+        {Array.from({ length: ticksY + 1 }).map((_, i) => {
+          const y = PAD.t + (plotH * i) / ticksY;
+          return (
+            <line key={i} x1={PAD.l} y1={y} x2={PAD.l + plotW} y2={y} stroke="#e2e8f0" strokeDasharray="3 3" />
+          );
+        })}
+        {Array.from({ length: ticksY + 1 }).map((_, i) => {
+          const y = PAD.t + (plotH * i) / ticksY;
+          const v = (maxReq * (ticksY - i)) / ticksY;
+          return (
+            <text key={`yl${i}`} x={PAD.l - 6} y={y + 4} textAnchor="end" fontSize={10} fill="#64748b">
+              {fmtInt(v)}
+            </text>
+          );
+        })}
+        {Array.from({ length: ticksY + 1 }).map((_, i) => {
+          const y = PAD.t + (plotH * i) / ticksY;
+          const v = (maxLat * (ticksY - i)) / ticksY;
+          return (
+            <text key={`yr${i}`} x={PAD.l + plotW + 6} y={y + 4} textAnchor="start" fontSize={10} fill="#0ea5e9">
+              {fmtInt(v)}
+            </text>
+          );
+        })}
+        {Array.from({ length: ticksX + 1 }).map((_, i) => {
+          const idx = Math.min(n - 1, Math.floor(((n - 1) * i) / ticksX));
+          const x = xAt(idx);
+          const t = points[idx];
+          return (
+            <g key={`x${i}`}>
+              <line x1={x} y1={PAD.t + plotH} x2={x} y2={PAD.t + plotH + 4} stroke="#cbd5e1" />
+              <text x={x} y={PAD.t + plotH + 18} textAnchor="middle" fontSize={10} fill="#64748b">
+                {t ? formatTs(t.ts) : ""}
+              </text>
+            </g>
+          );
+        })}
+        <path d={barsPath} fill="#6366f1" opacity={0.55} />
+        {n >= 2 ? <path d={linePath} stroke="#0ea5e9" strokeWidth={2} fill="none" /> : null}
+        {/* Y 轴标签 */}
+        <text x={8} y={PAD.t + plotH / 2} textAnchor="middle" fontSize={10} fill="#6366f1"
+              transform={`rotate(-90, 8, ${PAD.t + plotH / 2})`}>
+          请求数
+        </text>
+        <text x={size.w - 8} y={PAD.t + plotH / 2} textAnchor="middle" fontSize={10} fill="#0ea5e9"
+              transform={`rotate(90, ${size.w - 8}, ${PAD.t + plotH / 2})`}>
+          P95 (ms)
+        </text>
+        {points.map((_, i) => {
+          const w = n <= 1 ? plotW : plotW / n;
+          const x = PAD.l + i * w;
+          return (
+            <rect
+              key={`hit${i}`}
+              x={x}
+              y={PAD.t}
+              width={w}
+              height={plotH}
+              fill="transparent"
+              onMouseEnter={() => setHover(i)}
+              onMouseLeave={() => setHover((v) => (v === i ? null : v))}
+            />
+          );
+        })}
+        {hover !== null && points[hover] ? (
+          <line
+            x1={xAt(hover)}
+            y1={PAD.t}
+            x2={xAt(hover)}
+            y2={PAD.t + plotH}
+            stroke="#94a3b8"
+            strokeDasharray="3 3"
+          />
+        ) : null}
+      </svg>
+      {hover !== null && points[hover] ? (
+        <div
+          className="pointer-events-none absolute z-10 w-52 rounded-md border border-slate-200 bg-white/95 px-3 py-2 text-xs shadow-md"
+          style={{
+            left: Math.min(size.w - 210, Math.max(0, xAt(hover) + 6)),
+            top: 8,
+          }}
+        >
+          <div className="font-semibold text-slate-800">
+            {new Date(points[hover].ts * 1000).toLocaleString()}
+          </div>
+          <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 tabular-nums text-slate-600">
+            <div>请求数</div>
+            <div className="text-right">{fmtInt(points[hover].requests)}</div>
+            <div>成功</div>
+            <div className="text-right">{fmtInt(points[hover].success)}</div>
+            <div>不可用</div>
+            <div className="text-right text-rose-600">{fmtInt(points[hover].fail_unavailable)}</div>
+            <div>P50</div>
+            <div className="text-right">{fmtMs(points[hover].p50_ms)}</div>
+            <div>P95</div>
+            <div className="text-right text-sky-700">{fmtMs(points[hover].p95_ms)}</div>
+            <div>P99</div>
+            <div className="text-right">{fmtMs(points[hover].p99_ms)}</div>
+            <div>IN tok</div>
+            <div className="text-right">{fmtInt(points[hover].input_tokens)}</div>
+            <div>OUT tok</div>
+            <div className="text-right">{fmtInt(points[hover].output_tokens)}</div>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** TPM 时序图 */
+function TpmChart({ points }: { points: MetricsSeriesPoint[] }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ w: 800, h: 220 });
+  const PAD = { l: 52, r: 16, t: 20, b: 28 };
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver((es) => {
+      const r = es[0].contentRect;
+      setSize({ w: Math.max(320, Math.floor(r.width)), h: 220 });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const plotW = size.w - PAD.l - PAD.r;
+  const plotH = size.h - PAD.t - PAD.b;
+  const n = points.length;
+  // 近似:桶长未知,用 max(input+output) 做 scale 即可(展示趋势)
+  const maxTot = Math.max(1, ...points.map((p) => p.input_tokens + p.output_tokens));
+  const xAt = (i: number) => PAD.l + (n <= 1 ? plotW / 2 : (plotW * i) / (n - 1));
+  const yV = (v: number) => PAD.t + plotH - (plotH * v) / maxTot;
+  const totalLine = points
+    .map((p, i) => `${i === 0 ? "M" : "L"}${xAt(i).toFixed(2)},${yV(p.input_tokens + p.output_tokens).toFixed(2)}`)
+    .join(" ");
+  const inputLine = points
+    .map((p, i) => `${i === 0 ? "M" : "L"}${xAt(i).toFixed(2)},${yV(p.input_tokens).toFixed(2)}`)
+    .join(" ");
+
+  const formatTs = (ts: number) => {
+    const d = new Date(ts * 1000);
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+  const ticksX = 5;
+  const ticksY = 4;
+
+  return (
+    <div ref={ref} className="w-full">
+      <svg width={size.w} height={size.h}>
+        {Array.from({ length: ticksY + 1 }).map((_, i) => {
+          const y = PAD.t + (plotH * i) / ticksY;
+          return (
+            <line key={i} x1={PAD.l} y1={y} x2={PAD.l + plotW} y2={y} stroke="#e2e8f0" strokeDasharray="3 3" />
+          );
+        })}
+        {Array.from({ length: ticksY + 1 }).map((_, i) => {
+          const y = PAD.t + (plotH * i) / ticksY;
+          const v = (maxTot * (ticksY - i)) / ticksY;
+          return (
+            <text key={`yl${i}`} x={PAD.l - 6} y={y + 4} textAnchor="end" fontSize={10} fill="#64748b">
+              {fmtBuckets(v, "")}
+            </text>
+          );
+        })}
+        {Array.from({ length: ticksX + 1 }).map((_, i) => {
+          const idx = Math.min(n - 1, Math.floor(((n - 1) * i) / ticksX));
+          const x = xAt(idx);
+          const t = points[idx];
+          return (
+            <text key={`x${i}`} x={x} y={PAD.t + plotH + 18} textAnchor="middle" fontSize={10} fill="#64748b">
+              {t ? formatTs(t.ts) : ""}
+            </text>
+          );
+        })}
+        {/* 总面积:输入+输出 */}
+        <path
+          d={`${totalLine} L${xAt(n - 1)},${PAD.t + plotH} L${xAt(0)},${PAD.t + plotH} Z`}
+          fill="#10b981"
+          opacity={0.18}
+        />
+        <path d={totalLine} stroke="#10b981" strokeWidth={2} fill="none" />
+        <path
+          d={`${inputLine} L${xAt(n - 1)},${PAD.t + plotH} L${xAt(0)},${PAD.t + plotH} Z`}
+          fill="#6366f1"
+          opacity={0.14}
+        />
+        <path d={inputLine} stroke="#6366f1" strokeWidth={2} fill="none" opacity={0.9} />
+        {/* 图例 */}
+        <g>
+          <rect x={PAD.l + plotW - 180} y={PAD.t - 14} width={10} height={10} fill="#10b981" opacity={0.35} />
+          <text x={PAD.l + plotW - 166} y={PAD.t - 5} fontSize={10} fill="#0f766e">
+            总 tokens (IN+OUT)
+          </text>
+          <rect x={PAD.l + plotW - 180} y={PAD.t + 2} width={10} height={10} fill="#6366f1" opacity={0.35} />
+          <text x={PAD.l + plotW - 166} y={PAD.t + 11} fontSize={10} fill="#4338ca">
+            仅 IN tokens
+          </text>
+        </g>
+      </svg>
+    </div>
+  );
+}
+
+function MetricsPanel() {
+  const [range, setRange] = useState<number>(3600);
+  const [busy, setBusy] = useState(false);
+  const [data, setData] = useState<MetricsDashboardResp | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setBusy(true);
+      setErr(null);
+      try {
+        const d = await api.metricsDashboard(range === 0 ? undefined : range, 10);
+        if (cancelled) return;
+
+        // ============== 数据完整性门禁 ==============
+        // 按 Experience 435821:接口返回半成品或缺字段时拒绝 setState,避免 UI 抖动/NaN。
+        const bad =
+          !d ||
+          typeof d !== "object" ||
+          !("summary" in d) ||
+          !d.summary ||
+          !("series" in d) ||
+          !Array.isArray(d.series) ||
+          !("upstreams" in d) ||
+          !Array.isArray(d.upstreams) ||
+          typeof d.summary.requests !== "number" ||
+          typeof d.summary.success_rate !== "number" ||
+          typeof d.summary.rps !== "number" ||
+          typeof d.summary.tpm !== "number";
+        if (bad) {
+          setErr("接口返回格式不完整,已拒绝本次刷新");
+          return;
+        }
+        // 额外防 NaN/Infinity:把 summary 里非有限数强制置 0
+        const s = d.summary;
+        const sanitize = (n: number) => (Number.isFinite(n) ? n : 0);
+        const s2: typeof s = {
+          ...s,
+          requests: sanitize(s.requests),
+          success_rate: sanitize(s.success_rate),
+          rps: sanitize(s.rps),
+          tpm: sanitize(s.tpm),
+          input_tokens: sanitize(s.input_tokens),
+          output_tokens: sanitize(s.output_tokens),
+          fail_unavailable: sanitize(s.fail_unavailable),
+          fail_other: sanitize(s.fail_other),
+          avg_ms: sanitize(s.avg_ms),
+          p50_ms: sanitize(s.p50_ms),
+          p95_ms: sanitize(s.p95_ms),
+          p99_ms: sanitize(s.p99_ms),
+          range_secs: sanitize(s.range_secs),
+          sampled_at: sanitize(s.sampled_at),
+        };
+        const series2: MetricsSeriesPoint[] = (d.series || [])
+          .filter((p: any) => p && typeof p.ts === "number" && typeof p.requests === "number")
+          .map((p: any) => ({
+            ts: sanitize(p.ts),
+            requests: sanitize(p.requests),
+            success: sanitize(p.success),
+            fail_unavailable: sanitize(p.fail_unavailable),
+            fail_other: sanitize(p.fail_other),
+            input_tokens: sanitize(p.input_tokens),
+            output_tokens: sanitize(p.output_tokens),
+            avg_ms: sanitize(p.avg_ms),
+            p50_ms: sanitize(p.p50_ms),
+            p95_ms: sanitize(p.p95_ms),
+            p99_ms: sanitize(p.p99_ms),
+          }));
+        const ups2: MetricsUpstreamRow[] = (d.upstreams || [])
+          .filter(
+            (u: any) =>
+              u && typeof u.upstream_id === "string" && typeof u.requests === "number"
+          )
+          .map((u: any) => ({
+            upstream_id: u.upstream_id,
+            kind: u.kind ?? "",
+            base_url: u.base_url ?? "",
+            key_fingerprint: u.key_fingerprint ?? "",
+            requests: sanitize(u.requests),
+            success_rate: sanitize(u.success_rate),
+            tpm: sanitize(u.tpm),
+            avg_ms: sanitize(u.avg_ms),
+            p99_ms: sanitize(u.p99_ms),
+            fail_unavailable: sanitize(u.fail_unavailable),
+          }));
+        setData({
+          ...d,
+          range_secs: sanitize(d.range_secs),
+          sampled_at: sanitize(d.sampled_at),
+          summary: s2,
+          series: series2,
+          upstreams: ups2,
+        });
+      } catch (e: any) {
+        if (cancelled) return;
+        setErr(e?.message ?? "读取失败");
+      } finally {
+        if (!cancelled) setBusy(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [range, tick]);
+
+  useEffect(() => {
+    const t = window.setInterval(() => setTick((x) => x + 1), 15_000);
+    return () => window.clearInterval(t);
+  }, []);
+
+  const s = data?.summary;
+  const series = data?.series ?? [];
+  const ups = data?.upstreams ?? [];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div>
+          <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100">接口指标仪表盘</h2>
+          <p className="mt-0.5 text-xs text-slate-500">
+            实时滚动窗口(秒桶 120s / 分钟桶 48h),15s 自动刷新。
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap gap-1 rounded-lg border border-slate-200 bg-white p-1 text-xs shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            {RANGE_PRESETS.map((p) => (
+              <button
+                key={p.secs}
+                onClick={() => setRange(p.secs)}
+                className={cn(
+                  "rounded-md px-2.5 py-1 transition",
+                  range === p.secs
+                    ? "bg-indigo-600 text-white shadow"
+                    : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+                )}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+          <Button variant="ghost" size="sm" onClick={() => setTick((x) => x + 1)} disabled={busy} className="gap-1">
+            <RefreshCw className={cn("h-4 w-4", busy && "animate-spin")} />
+            刷新
+          </Button>
+        </div>
+      </div>
+
+      {err ? (
+        <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">读取失败：{err}</div>
+      ) : null}
+
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <KpiCard
+          label="请求量"
+          value={fmtInt(s?.requests ?? 0)}
+          sub={`RPS ${(s?.rps ?? 0).toFixed(2)} · 窗口 ${
+            (s?.range_secs ?? 0) >= 3600
+              ? `${((s?.range_secs ?? 0) / 3600).toFixed(1)}h`
+              : `${s?.range_secs ?? 0}s`
+          }`}
+          tone="info"
+        />
+        <KpiCard
+          label="成功率"
+          value={fmtPct(s?.success_rate ?? 0)}
+          sub={
+            (s?.fail_unavailable ?? 0) + (s?.fail_other ?? 0) > 0
+              ? `不可用 ${fmtInt(s?.fail_unavailable ?? 0)} · 其他 ${fmtInt(s?.fail_other ?? 0)}`
+              : "全部成功 ✓"
+          }
+          tone={(s?.success_rate ?? 1) >= 0.99 ? "good" : (s?.success_rate ?? 1) >= 0.95 ? "warn" : "bad"}
+        />
+        <KpiCard
+          label="TPM (吞吐)"
+          value={fmtBuckets(s?.tpm ?? 0, "/min")}
+          sub={`IN ${fmtBuckets(s?.input_tokens ?? 0, "")} · OUT ${fmtBuckets(s?.output_tokens ?? 0, "")}`}
+          tone="default"
+        />
+        <KpiCard
+          label="延迟 P95"
+          value={fmtMs(s?.p95_ms ?? 0)}
+          sub={`avg ${fmtMs(s?.avg_ms ?? 0)} · P50 ${fmtMs(s?.p50_ms ?? 0)} · P99 ${fmtMs(s?.p99_ms ?? 0)}`}
+          tone={(s?.p95_ms ?? 0) < 2000 ? "good" : (s?.p95_ms ?? 0) < 8000 ? "warn" : "bad"}
+        />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">请求量(柱状) + P95 延迟(折线)</CardTitle>
+            <CardDescription className="text-xs">悬停查看单桶明细。</CardDescription>
+          </CardHeader>
+          <CardContent className="px-2">
+            {series.length === 0 ? (
+              <div className="flex h-[260px] items-center justify-center text-sm text-slate-400">
+                暂无数据 · 发起一次模型请求即可
+              </div>
+            ) : (
+              <ReqLatencyChart points={series} />
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Tokens 吞吐时序</CardTitle>
+            <CardDescription className="text-xs">输入(紫) vs 输入+输出(绿)；单位:每桶累计 tokens。</CardDescription>
+          </CardHeader>
+          <CardContent className="px-2">
+            {series.length === 0 ? (
+              <div className="flex h-[220px] items-center justify-center text-sm text-slate-400">暂无数据</div>
+            ) : (
+              <TpmChart points={series} />
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <CardTitle className="text-base">上游排行榜 Top {ups.length}</CardTitle>
+              <CardDescription className="text-xs">按窗口内总请求数降序。</CardDescription>
+            </div>
+            <div className="text-xs text-slate-500 tabular-nums">
+              {data?.sampled_at ? `采样于 ${new Date(data.sampled_at * 1000).toLocaleString()}` : ""}
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[920px] border-collapse text-sm">
+              <thead>
+                <tr className="text-left text-xs uppercase tracking-wider text-slate-500">
+                  <th className="border-b px-3 py-2">#</th>
+                  <th className="border-b px-3 py-2">上游 (kind / base_url / key)</th>
+                  <th className="border-b px-3 py-2 text-right">请求</th>
+                  <th className="border-b px-3 py-2 text-right">成功率</th>
+                  <th className="border-b px-3 py-2 text-right">TPM</th>
+                  <th className="border-b px-3 py-2 text-right">平均延迟</th>
+                  <th className="border-b px-3 py-2 text-right">P99</th>
+                  <th className="border-b px-3 py-2 text-right">不可用(次)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ups.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="px-3 py-10 text-center text-slate-400">
+                      暂无上游数据 · 调用一次模型即可
+                    </td>
+                  </tr>
+                ) : (
+                  ups.map((u, i) => {
+                    const ok = u.success_rate;
+                    const toneRow =
+                      ok >= 0.99
+                        ? ""
+                        : ok >= 0.95
+                        ? "bg-amber-50/40 dark:bg-amber-900/10"
+                        : "bg-rose-50/40 dark:bg-rose-900/10";
+                    return (
+                      <tr key={u.upstream_id} className={toneRow}>
+                        <td className="border-b px-3 py-2 font-mono text-xs text-slate-400 tabular-nums">
+                          {i + 1}
+                        </td>
+                        <td className="border-b px-3 py-2">
+                          <div className="flex flex-wrap items-center gap-2 text-xs">
+                            <span
+                              className={cn(
+                                "rounded px-1.5 py-0.5 font-semibold",
+                                u.kind.toLowerCase().includes("openai")
+                                  ? "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-200"
+                                  : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200"
+                              )}
+                            >
+                              {u.kind}
+                            </span>
+                            <span
+                              className="max-w-[260px] truncate font-mono text-slate-700 dark:text-slate-200"
+                              title={u.base_url}
+                            >
+                              {u.base_url}
+                            </span>
+                            <span
+                              className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500 dark:bg-slate-800 dark:text-slate-400"
+                              title="key fingerprint"
+                            >
+                              {u.key_fingerprint}
+                            </span>
+                          </div>
+                          <div
+                            className="mt-1 truncate font-mono text-[10px] text-slate-400"
+                            title={u.upstream_id}
+                          >
+                            {u.upstream_id}
+                          </div>
+                        </td>
+                        <td className="border-b px-3 py-2 text-right tabular-nums">{fmtInt(u.requests)}</td>
+                        <td
+                          className={cn(
+                            "border-b px-3 py-2 text-right tabular-nums font-semibold",
+                            ok >= 0.99
+                              ? "text-emerald-600 dark:text-emerald-400"
+                              : ok >= 0.95
+                              ? "text-amber-600 dark:text-amber-400"
+                              : "text-rose-600 dark:text-rose-400"
+                          )}
+                        >
+                          {fmtPct(ok)}
+                        </td>
+                        <td className="border-b px-3 py-2 text-right tabular-nums">
+                          {fmtBuckets(u.tpm, "")}
+                        </td>
+                        <td className="border-b px-3 py-2 text-right tabular-nums text-slate-600 dark:text-slate-300">
+                          {fmtMs(u.avg_ms)}
+                        </td>
+                        <td
+                          className={cn(
+                            "border-b px-3 py-2 text-right tabular-nums",
+                            u.p99_ms < 2000
+                              ? "text-slate-700 dark:text-slate-200"
+                              : u.p99_ms < 8000
+                              ? "text-amber-600 dark:text-amber-400"
+                              : "text-rose-600 dark:text-rose-400"
+                          )}
+                        >
+                          {fmtMs(u.p99_ms)}
+                        </td>
+                        <td
+                          className={cn(
+                            "border-b px-3 py-2 text-right tabular-nums",
+                            u.fail_unavailable === 0
+                              ? "text-slate-400"
+                              : "font-semibold text-rose-600 dark:text-rose-400"
+                          )}
+                        >
+                          {fmtInt(u.fail_unavailable)}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ======================== 请求链路追踪 ========================
+
+function attemptStatusColor(status: number): string {
+  if (status === 200) return "text-emerald-600 bg-emerald-50 ring-emerald-200";
+  if (status === -1) return "text-amber-600 bg-amber-50 ring-amber-200";
+  if (status >= 500) return "text-rose-600 bg-rose-50 ring-rose-200";
+  if (status > 0) return "text-orange-600 bg-orange-50 ring-orange-200";
+  return "text-muted-foreground bg-muted";
+}
+
+function attemptStatusLabel(status: number): string {
+  if (status === 200) return "200 OK";
+  if (status === -1) return "熔断跳过";
+  if (status === 503) return "503 不可用";
+  if (status === 0) return "未尝试";
+  return `${status}`;
+}
+
+function RequestLogPanel() {
+  const [rows, setRows] = useState<RequestLogRow[]>([]);
+  const [q, setQ] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const load = async (query?: string) => {
+    setLoading(true);
+    try {
+      const r = await api.requestLogs(query ?? q, 50);
+      setRows(r.data);
+    } finally { setLoading(false); }
+  };
+
+  useEffect(() => { load(""); }, []);
+
+  const onSearch = (v: string) => {
+    setQ(v);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => load(v), 500);
+  };
+
+  const fmtTime = (ts: number) => {
+    const d = new Date(ts * 1000);
+    return d.toLocaleTimeString("zh-CN", { hour12: false }) + "." + String(d.getMilliseconds()).padStart(3, "0");
+  };
+
+  const toggle = (id: string) => setExpanded((prev) => prev === id ? null : id);
+
+  return (
+    <div className="space-y-5">
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-base">请求链路({loading ? "…" : rows.length})</CardTitle>
+            <div className="flex items-center gap-2">
+              <div className="relative">
+                <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  placeholder="搜索 request_id / 模型…"
+                  className="h-8 w-56 pl-7 text-xs"
+                  value={q}
+                  onChange={(e) => onSearch(e.target.value)}
+                />
+              </div>
+              <Button size="sm" variant="outline" className="h-8" onClick={() => load()}>
+                <RefreshCw className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <p className="text-sm text-muted-foreground">加载中…</p>
+          ) : rows.length === 0 ? (
+            <p className="text-sm text-muted-foreground">暂无请求记录</p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-8" />
+                  <TableHead>时间</TableHead>
+                  <TableHead>用户</TableHead>
+                  <TableHead>模型</TableHead>
+                  <TableHead>路径</TableHead>
+                  <TableHead>最终上游</TableHead>
+                  <TableHead>状态</TableHead>
+                  <TableHead className="text-right">Tokens</TableHead>
+                  <TableHead className="text-right">延迟</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {rows.map((r) => {
+                  const isOpen = expanded === r.request_id;
+                  const isFail = r.final_status !== 200;
+                  return (
+                    <React.Fragment key={r.request_id}>
+                      <TableRow
+                        className={cn(
+                          "cursor-pointer transition-colors",
+                          isFail && "bg-rose-500/[0.04] hover:bg-rose-500/[0.07]",
+                        )}
+                        onClick={() => toggle(r.request_id)}
+                      >
+                        <TableCell className="w-8 px-1">
+                          <span className={cn("inline-block text-xs transition-transform", isOpen && "rotate-90")}>▶</span>
+                        </TableCell>
+                        <TableCell className="mono text-xs whitespace-nowrap">{fmtTime(r.ts)}</TableCell>
+                        <TableCell className="mono text-xs text-muted-foreground">{r.user_id.slice(0, 8)}</TableCell>
+                        <TableCell className="text-xs">{r.requested_model}</TableCell>
+                        <TableCell>
+                          <Badge variant={r.path === "chat" ? "default" : "muted"} className="text-[10px]">
+                            {r.path}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-xs">
+                          {r.final_upstream_model ? (
+                            <span className="inline-flex items-center gap-1">
+                              <span className="text-muted-foreground">{r.final_kind}</span>
+                              <span>{r.final_upstream_model}</span>
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(r.final_status))}>
+                            {attemptStatusLabel(r.final_status)}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right mono text-xs whitespace-nowrap">
+                          {r.input_tokens > 0 || r.output_tokens > 0 ? (
+                            <span>↑{r.input_tokens.toLocaleString()} ↓{r.output_tokens.toLocaleString()}</span>
+                          ) : <span className="text-muted-foreground">—</span>}
+                        </TableCell>
+                        <TableCell className="text-right text-xs whitespace-nowrap">
+                          {r.latency_ms > 0 ? <span>{r.latency_ms.toLocaleString()}ms</span> : <span className="text-muted-foreground">—</span>}
+                        </TableCell>
+                      </TableRow>
+                      {isOpen && (
+                        <TableRow className="bg-muted/30 hover:bg-muted/30">
+                          <TableCell colSpan={9} className="p-0">
+                            <div className="space-y-3 px-4 py-3">
+                              {/* 候选顺序 */}
+                              <div>
+                                <p className="mb-1 text-xs font-medium text-muted-foreground">候选顺序（负载策略）</p>
+                                <table className="w-full text-xs">
+                                  <thead>
+                                    <tr className="border-b text-left text-muted-foreground">
+                                      <th className="pb-1 font-normal">#</th>
+                                      <th className="pb-1 font-normal">上游</th>
+                                      <th className="pb-1 font-normal">模型</th>
+                                      <th className="pb-1 font-normal">权重</th>
+                                      <th className="pb-1 font-normal">状态</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {r.candidates.map((c, i) => (
+                                      <tr key={i} className="border-b border-dashed last:border-0">
+                                        <td className="py-1 text-muted-foreground">{i + 1}</td>
+                                        <td className="py-1">
+                                          <span className="text-muted-foreground">{c.kind}</span>
+                                          <span className="ml-1 text-muted-foreground/60">{c.base_url.length > 30 ? c.base_url.slice(0, 30) + "…" : c.base_url}</span>
+                                        </td>
+                                        <td className="py-1">{c.upstream_model}</td>
+                                        <td className="py-1 mono">{c.weight}</td>
+                                        <td className="py-1">
+                                          {(() => {
+                                            // 在 attempts 中查找对应候选的状态
+                                            const att = r.attempts.find((a) => a.kind === c.kind && a.upstream_model === c.upstream_model);
+                                            if (att) {
+                                              return <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(att.status))}>{attemptStatusLabel(att.status)}</span>;
+                                            }
+                                            // 有 status=0 说明在 candidates 里但未尝试
+                                            return <span className="text-muted-foreground">未尝试</span>;
+                                          })()}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                              {/* 实际尝试链 */}
+                              {r.attempts.length > 0 && (
+                                <div>
+                                  <p className="mb-1 text-xs font-medium text-muted-foreground">实际尝试（failover 链）</p>
+                                  <table className="w-full text-xs">
+                                    <thead>
+                                      <tr className="border-b text-left text-muted-foreground">
+                                        <th className="pb-1 font-normal">上游</th>
+                                        <th className="pb-1 font-normal">模型</th>
+                                        <th className="pb-1 font-normal">状态</th>
+                                        <th className="pb-1 font-normal">延迟</th>
+                                        <th className="pb-1 font-normal">错误</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {r.attempts.map((a, i) => (
+                                        <tr key={i} className="border-b border-dashed last:border-0">
+                                          <td className="py-1"><span className="text-muted-foreground">{a.kind}</span></td>
+                                          <td className="py-1">{a.upstream_model}</td>
+                                          <td className="py-1">
+                                            <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(a.status))}>
+                                              {attemptStatusLabel(a.status)}
+                                            </span>
+                                          </td>
+                                          <td className="py-1 mono">{a.latency_ms > 0 ? `${a.latency_ms}ms` : "—"}</td>
+                                          <td className="py-1 max-w-[300px] truncate text-muted-foreground">{a.error || "—"}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
+                              {/* Tokens 汇总 */}
+                              <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                                <span>Tokens: <span className="mono text-foreground">↑{r.input_tokens.toLocaleString()} ↓{r.output_tokens.toLocaleString()}</span></span>
+                                {r.charged_tokens > 0 && <span>计费: <span className="mono text-foreground">{r.charged_tokens.toLocaleString()}</span></span>}
+                                {r.stream && <Badge variant="muted" className="text-[10px]">stream</Badge>}
+                              </div>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
