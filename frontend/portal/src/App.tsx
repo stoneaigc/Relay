@@ -139,7 +139,7 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
     <div className="flex min-h-screen items-center justify-center p-4">
       <Card className="w-full max-w-sm">
         <CardHeader>
-          <CardTitle className="text-xl">Run<span className="text-primary">API</span> 控制台</CardTitle>
+          <CardTitle className="text-xl">Rel<span className="text-primary">ay</span> 控制台</CardTitle>
           <p className="text-sm text-muted-foreground">{subtitle}</p>
         </CardHeader>
         <CardContent className="space-y-3">

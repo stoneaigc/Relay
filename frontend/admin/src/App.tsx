@@ -32,7 +32,7 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
   return (
     <div className="flex min-h-screen items-center justify-center p-4">
       <Card className="w-full max-w-sm">
-        <CardHeader><CardTitle className="text-xl">Run<span className="text-primary">API</span> 管理后台</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="text-xl">Rel<span className="text-primary">ay</span> 管理后台</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           <Input placeholder="用户名" value={u} onChange={(e) => setU(e.target.value)} />
           <Input placeholder="密码" type="password" value={p} onChange={(e) => setP(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
