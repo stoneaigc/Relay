@@ -45,10 +45,12 @@ password = "Relay@123"
 # 例(网易):RELAY_EMAIL__SMTP_HOST=smtp.163.com RELAY_EMAIL__SMTP_PORT=465 RELAY_EMAIL__USERNAME=xxx@163.com RELAY_EMAIL__PASSWORD=授权码
 # 例(QQ):  RELAY_EMAIL__SMTP_HOST=smtp.qq.com  RELAY_EMAIL__SMTP_PORT=465 RELAY_EMAIL__USERNAME=xxx@qq.com  RELAY_EMAIL__PASSWORD=授权码
 [email]
-smtp_host = "smtp.163.com"
+# smtp_host 为空(默认)= 开发模式:验证码在日志打印并随响应返回,方便本地联调邮箱注册/重置密码。
+# 要开启真实邮件,填 SMTP 主机并把 username/password 换成你的邮箱授权码(可用环境变量 RELAY_EMAIL__* 覆盖)。
+smtp_host = ""
 smtp_port = 465
-username = "your-email-username"
-password = "your-email-password"
+username = ""
+password = ""
 from = ""
 
 # 全局默认限额(用户未单独设置时生效)
