@@ -582,6 +582,8 @@ pub async fn get_user(pool: &Db, id: Uuid) -> anyhow::Result<Option<UserRow>> {
     row.map(|r| row_to_user(&r)).transpose()
 }
 
+// 旧的全量版保留(避免影响其它潜在调用方);当前列表接口走下方 *_page 分页版。
+#[allow(dead_code)]
 pub async fn list_users(pool: &Db) -> anyhow::Result<Vec<UserRow>> {
     let rows = q!(
         "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, source, created_at
@@ -590,6 +592,24 @@ pub async fn list_users(pool: &Db) -> anyhow::Result<Vec<UserRow>> {
     .fetch_all(pool)
     .await?;
     rows.iter().map(row_to_user).collect()
+}
+
+/// 分页版用户列表。返回(当前页, 总条数)。
+pub async fn list_users_page(
+    pool: &Db,
+    limit: i64,
+    offset: i64,
+) -> anyhow::Result<(Vec<UserRow>, i64)> {
+    let total: i64 = q!("SELECT COUNT(*) AS c FROM users").fetch_one(pool).await?.get("c");
+    let rows = q!(
+        "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, source, created_at
+         FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    )
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    Ok((rows.iter().map(row_to_user).collect::<anyhow::Result<_>>()?, total))
 }
 
 fn row_to_user(r: &sqlx::any::AnyRow) -> anyhow::Result<UserRow> {
@@ -922,6 +942,8 @@ pub async fn list_user_reward_claims(pool: &Db, user_id: Uuid) -> anyhow::Result
 }
 
 /// 管理端列出申领(可按状态过滤),带用户标识与任务信息。
+/// 列出奖励申领(全量版,保留);分页请用 list_reward_claims_page。
+#[allow(dead_code)]
 pub async fn list_reward_claims(pool: &Db, status: Option<i64>) -> anyhow::Result<Vec<serde_json::Value>> {
     let base = "SELECT c.id, c.user_id, c.task_id, COALESCE(t.title, NULLIF(c.kind, '')) AS title, t.evidence_type, t.variable, t.reward_min, t.reward_max,
                     c.evidence, c.reward_tokens, c.status, c.review_note, c.created_at, c.reviewed_at,
@@ -954,6 +976,68 @@ pub async fn list_reward_claims(pool: &Db, status: Option<i64>) -> anyhow::Resul
         "created_at": r.get::<String,_>("created_at"),
         "reviewed_at": r.get::<Option<String>,_>("reviewed_at"),
     })).collect())
+}
+
+/// 分页版奖励申领列表(保留 status 过滤)。返回(当前页, 总条数)。
+pub async fn list_reward_claims_page(
+    pool: &Db,
+    status: Option<i64>,
+    limit: i64,
+    offset: i64,
+) -> anyhow::Result<(Vec<serde_json::Value>, i64)> {
+    let base = "SELECT c.id, c.user_id, c.task_id, COALESCE(t.title, NULLIF(c.kind, '')) AS title, t.evidence_type, t.variable, t.reward_min, t.reward_max,
+                    c.evidence, c.reward_tokens, c.status, c.review_note, c.created_at, c.reviewed_at,
+                    COALESCE(u.username, u.email, u.phone) AS name
+             FROM reward_claims c
+             LEFT JOIN users u ON u.id = c.user_id
+             LEFT JOIN reward_tasks t ON t.id = c.task_id";
+    let total: i64 = if let Some(st) = status {
+        q!("SELECT COUNT(*) AS c FROM reward_claims c WHERE c.status = ?")
+            .bind(st)
+            .fetch_one(pool)
+            .await?
+            .get("c")
+    } else {
+        q!("SELECT COUNT(*) AS c FROM reward_claims c").fetch_one(pool).await?.get("c")
+    };
+    let rows = if let Some(st) = status {
+        q!(&format!("{base} WHERE c.status = ? ORDER BY c.created_at DESC LIMIT ? OFFSET ?"))
+            .bind(st)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await?
+    } else {
+        q!(&format!("{base} ORDER BY c.created_at DESC LIMIT ? OFFSET ?"))
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await?
+    };
+    Ok((
+        rows.iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.get::<String,_>("id"),
+                    "user_id": r.get::<String,_>("user_id"),
+                    "name": r.get::<Option<String>,_>("name"),
+                    "task_id": r.get::<Option<i64>,_>("task_id"),
+                    "title": r.get::<Option<String>,_>("title"),
+                    "evidence_type": r.get::<Option<String>,_>("evidence_type"),
+                    "variable": r.get::<Option<i64>,_>("variable").map(|v| v != 0).unwrap_or(false),
+                    "reward_min": r.get::<Option<i64>,_>("reward_min").unwrap_or(0),
+                    "reward_max": r.get::<Option<i64>,_>("reward_max").unwrap_or(0),
+                    "evidence": r.get::<Option<String>,_>("evidence"),
+                    "reward_tokens": r.get::<i64,_>("reward_tokens"),
+                    "status": r.get::<i64,_>("status"),
+                    "review_note": r.get::<Option<String>,_>("review_note"),
+                    "created_at": r.get::<String,_>("created_at"),
+                    "reviewed_at": r.get::<Option<String>,_>("reviewed_at"),
+                })
+            })
+            .collect(),
+        total,
+    ))
 }
 
 /// 取申领的审核字段(含所属任务的额度规则)。
@@ -1103,6 +1187,8 @@ pub async fn list_keys(pool: &Db, user_id: Uuid) -> anyhow::Result<Vec<KeyRow>> 
 
 // ---- 用量查询 ----
 
+/// 用量日志(全量版,保留);分页请用 usage_rows_page。
+#[allow(dead_code)]
 pub async fn usage_rows(
     pool: &Db,
     user_id: Option<Uuid>,
@@ -1141,6 +1227,61 @@ pub async fn usage_rows(
             })
         })
         .collect())
+}
+
+/// 分页版用量日志。返回(当前页, 总条数)。
+pub async fn usage_rows_page(
+    pool: &Db,
+    user_id: Option<Uuid>,
+    page_size: i64,
+    offset: i64,
+) -> anyhow::Result<(Vec<serde_json::Value>, i64)> {
+    let total: i64 = if let Some(uid) = user_id {
+        q!("SELECT COUNT(*) AS c FROM usage_logs WHERE user_id = ?")
+            .bind(uid.to_string())
+            .fetch_one(pool)
+            .await?
+            .get("c")
+    } else {
+        q!("SELECT COUNT(*) AS c FROM usage_logs").fetch_one(pool).await?.get("c")
+    };
+    let rows = if let Some(uid) = user_id {
+        q!(
+            "SELECT user_id, model, provider, input_tokens, output_tokens, charged_tokens, status, created_at
+             FROM usage_logs WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+        )
+        .bind(uid.to_string())
+        .bind(page_size)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?
+    } else {
+        q!(
+            "SELECT user_id, model, provider, input_tokens, output_tokens, charged_tokens, status, created_at
+             FROM usage_logs ORDER BY id DESC LIMIT ? OFFSET ?",
+        )
+        .bind(page_size)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?
+    };
+    Ok((
+        rows.iter()
+            .map(|r| {
+                serde_json::json!({
+                    "user_id": r.get::<String, _>("user_id"),
+                    "model": r.get::<Option<String>, _>("model"),
+                    "provider": r.get::<Option<String>, _>("provider"),
+                    "input_tokens": r.get::<Option<i64>, _>("input_tokens"),
+                    "output_tokens": r.get::<Option<i64>, _>("output_tokens"),
+                    "charged_tokens": r.get::<Option<i64>, _>("charged_tokens"),
+                    "status": r.get::<Option<i64>, _>("status"),
+                    "created_at": r.get::<String, _>("created_at"),
+                })
+            })
+            .collect(),
+        total,
+    ))
 }
 
 // ---- 统计聚合 ----

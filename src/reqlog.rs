@@ -71,7 +71,13 @@ pub trait RequestLogStore: Send + Sync {
         &self,
         q: &str,
         limit: u32,
+        offset: u32,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<RequestLog>>> + Send + '_>>;
+
+    fn count(
+        &self,
+        q: &str,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<i64>> + Send + '_>>;
 }
 
 // ======================== SQLite 实现 ========================
@@ -147,9 +153,11 @@ impl RequestLogStore for SqliteRequestLogStore {
         &self,
         q: &str,
         limit: u32,
+        offset: u32,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<RequestLog>>> + Send + '_>> {
         let q = q.to_string();
         let limit = limit.clamp(1, 200);
+        let offset = offset as i64;
         let db = self.db.clone();
         let has_q = !q.trim().is_empty();
         let sql: &'static str = if has_q {
@@ -158,20 +166,20 @@ impl RequestLogStore for SqliteRequestLogStore {
                     input_tokens, output_tokens, charged_tokens, created_at
              FROM request_logs
              WHERE request_id LIKE ? OR requested_model LIKE ?
-             ORDER BY id DESC LIMIT ?"
+             ORDER BY id DESC LIMIT ? OFFSET ?"
         } else {
             "SELECT request_id, user_id, path, requested_model, stream, candidates, attempts,
                     final_kind, final_upstream_model, final_status, latency_ms,
                     input_tokens, output_tokens, charged_tokens, created_at
-             FROM request_logs ORDER BY id DESC LIMIT ?"
+             FROM request_logs ORDER BY id DESC LIMIT ? OFFSET ?"
         };
         let pat = format!("%{}%", q.trim());
         Box::pin(async move {
             let mut query = sqlx::query(sql);
             if has_q {
-                query = query.bind(&pat).bind(&pat).bind(limit as i64);
+                query = query.bind(&pat).bind(&pat).bind(limit as i64).bind(offset);
             } else {
-                query = query.bind(limit as i64);
+                query = query.bind(limit as i64).bind(offset);
             }
             let rows = query.fetch_all(&db).await?;
             let mut out = Vec::with_capacity(rows.len());
@@ -204,6 +212,30 @@ impl RequestLogStore for SqliteRequestLogStore {
                 });
             }
             Ok(out)
+        })
+    }
+
+    fn count(
+        &self,
+        q: &str,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<i64>> + Send + '_>> {
+        let q = q.to_string();
+        let db = self.db.clone();
+        let has_q = !q.trim().is_empty();
+        let sql: &'static str = if has_q {
+            "SELECT COUNT(*) AS c FROM request_logs WHERE request_id LIKE ? OR requested_model LIKE ?"
+        } else {
+            "SELECT COUNT(*) AS c FROM request_logs"
+        };
+        let pat = format!("%{}%", q.trim());
+        Box::pin(async move {
+            use sqlx::Row;
+            let mut query = sqlx::query(sql);
+            if has_q {
+                query = query.bind(&pat).bind(&pat);
+            }
+            let row = query.fetch_one(&db).await?;
+            Ok(row.get::<i64, _>("c"))
         })
     }
 }
@@ -241,7 +273,17 @@ impl RequestLogStore for EsRequestLogStore {
         &self,
         _q: &str,
         _limit: u32,
+        _offset: u32,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<RequestLog>>> + Send + '_>> {
+        Box::pin(async {
+            anyhow::bail!("elasticsearch request-log store is not implemented yet; use sqlite")
+        })
+    }
+
+    fn count(
+        &self,
+        _q: &str,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<i64>> + Send + '_>> {
         Box::pin(async {
             anyhow::bail!("elasticsearch request-log store is not implemented yet; use sqlite")
         })

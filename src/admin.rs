@@ -29,6 +29,31 @@ fn admin_guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     jwt::from_headers(&cfg.auth.jwt_secret, headers, "admin").map(|_| ())
 }
 
+/// 统一分页查询参数:page(默认1,>=1)、page_size(默认20,clamp到1..=100)。
+#[derive(Deserialize, Default)]
+pub struct PageQuery {
+    #[serde(default)]
+    pub page: Option<u32>,
+    #[serde(default)]
+    pub page_size: Option<u32>,
+}
+
+/// 规范化分页参数,返回 (page, page_size, offset)。
+pub fn normalize_page(page: Option<u32>, page_size: Option<u32>) -> (u32, u32, u32) {
+    let page = page.unwrap_or(1).max(1);
+    let page_size = page_size.unwrap_or(20).clamp(1, 100);
+    (page, page_size, (page - 1) * page_size)
+}
+
+/// 计算总页数:ceil(total / page_size)。
+pub fn total_pages(total: i64, page_size: u32) -> u64 {
+    if total <= 0 {
+        0
+    } else {
+        ((total as u64) + (page_size as u64) - 1) / (page_size as u64)
+    }
+}
+
 #[derive(Deserialize)]
 pub struct AdminLogin {
     pub username: String,
@@ -93,13 +118,15 @@ pub async fn overview_series(
     Ok(Json(json!({ "granularity": gran, "data": data })))
 }
 
-/// GET /admin/users —— 所有用户(余额取内存实时值)。
+/// GET /admin/users?page=&page_size= —— 所有用户(余额取内存实时值,分页)。
 pub async fn list_users(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<PageQuery>,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
-    let rows = storage::list_users(&state.db)
+    let (page, page_size, offset) = normalize_page(q.page, q.page_size);
+    let (rows, total) = storage::list_users_page(&state.db, page_size as i64, offset as i64)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let tz = state.config().defaults.tz_offset_hours;
@@ -131,7 +158,13 @@ pub async fn list_users(
             })
         })
         .collect();
-    Ok(Json(json!({ "data": data })))
+    Ok(Json(json!({
+        "data": data,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages(total, page_size),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -324,29 +357,45 @@ pub async fn user_series(
     Ok(Json(json!({ "data": data })))
 }
 
-/// GET /admin/users/:id/usage
+/// GET /admin/users/:id/usage?page=&page_size=
 pub async fn user_usage(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
+    axum::extract::Query(q): axum::extract::Query<PageQuery>,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
-    let rows = storage::usage_rows(&state.db, Some(id), 200)
+    let (page, page_size, offset) = normalize_page(q.page, q.page_size);
+    let (rows, total) = storage::usage_rows_page(&state.db, Some(id), page_size as i64, offset as i64)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(json!({ "data": rows })))
+    Ok(Json(json!({
+        "data": rows,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages(total, page_size),
+    })))
 }
 
-/// GET /admin/usage —— 全局用量
+/// GET /admin/usage?page=&page_size= —— 全局用量
 pub async fn global_usage(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<PageQuery>,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
-    let rows = storage::usage_rows(&state.db, None, 200)
+    let (page, page_size, offset) = normalize_page(q.page, q.page_size);
+    let (rows, total) = storage::usage_rows_page(&state.db, None, page_size as i64, offset as i64)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(json!({ "data": rows })))
+    Ok(Json(json!({
+        "data": rows,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages(total, page_size),
+    })))
 }
 
 // ---- 奖励任务(后台配置)----
@@ -484,9 +533,13 @@ pub async fn delete_reward_task(
 pub struct RewardQuery {
     #[serde(default)]
     pub status: Option<String>, // pending | approved | rejected | all(默认全部)
+    #[serde(default)]
+    pub page: Option<u32>,
+    #[serde(default)]
+    pub page_size: Option<u32>,
 }
 
-/// GET /admin/rewards?status=pending|approved|rejected —— 奖励申领列表。
+/// GET /admin/rewards?status=&page=&page_size= —— 奖励申领列表(分页,保留 status 过滤)。
 pub async fn list_rewards(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -499,10 +552,17 @@ pub async fn list_rewards(
         Some("rejected") => Some(2),
         _ => None,
     };
-    let data = storage::list_reward_claims(&state.db, status)
+    let (page, page_size, offset) = normalize_page(q.page, q.page_size);
+    let (data, total) = storage::list_reward_claims_page(&state.db, status, page_size as i64, offset as i64)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(json!({ "data": data })))
+    Ok(Json(json!({
+        "data": data,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages(total, page_size),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -1101,12 +1161,14 @@ pub struct RequestLogsQuery {
     /// 检索关键字(request_id / 模型名)。空 = 最近全部。
     #[serde(default)]
     pub q: Option<String>,
-    /// 返回条数,默认 50,最大 200。
     #[serde(default)]
-    pub limit: Option<u32>,
+    pub page: Option<u32>,
+    /// 每页条数,默认 50,最大 200。
+    #[serde(default)]
+    pub page_size: Option<u32>,
 }
 
-/// GET /admin/api/request-logs?q=&limit=50 —— 最近请求链路日志(倒序)。
+/// GET /admin/api/request-logs?q=&page=&page_size= —— 最近请求链路日志(倒序,分页)。
 /// 记录每次请求的候选顺序、权重、实际选中、failover 链与 tokens。
 pub async fn list_request_logs(
     State(state): State<Arc<AppState>>,
@@ -1114,12 +1176,27 @@ pub async fn list_request_logs(
     axum::extract::Query(q): axum::extract::Query<RequestLogsQuery>,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
+    let keyword = q.q.as_deref().unwrap_or("");
+    let page = q.page.unwrap_or(1).max(1);
+    let page_size = q.page_size.unwrap_or(50).clamp(1, 200);
+    let offset = (page - 1) * page_size;
     let logs = state
         .request_log
-        .recent(q.q.as_deref().unwrap_or(""), q.limit.unwrap_or(50))
+        .recent(keyword, page_size, offset)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(json!({ "data": logs })))
+    let total = state
+        .request_log
+        .count(keyword)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({
+        "data": logs,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages(total, page_size),
+    })))
 }
 
 // ======================== 接口指标仪表盘 ========================

@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import PaginationBar from "./PaginationBar";
 
 export default function App() {
   const [authed, setAuthed] = useState(!!getToken());
@@ -430,17 +431,20 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
   const [rows, setRows] = useState<UserRow[]>([]);
   const [groups, setGroups] = useState<GroupRow[]>([]);
   const [q, setQ] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
   const [userDlg, setUserDlg] = useState<{ edit: UserRow | null } | null>(null);
   const [chart, setChart] = useState<UserRow | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
 
   const load = async () => {
     try {
-      const [u, g] = await Promise.all([api.users(), api.groups()]);
-      setRows(u.data); setGroups(g.data);
+      const [u, g] = await Promise.all([api.users(page, pageSize), api.groups()]);
+      setRows(u.data); setGroups(g.data); setTotal(u.total);
     } catch (e: any) { if (String(e.message).includes("auth")) onAuthErr(); }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [page, pageSize]);
 
   const filtered = rows.filter((u) =>
     !q.trim() || (u.username || "").includes(q.trim()) || (u.phone || "").includes(q.trim()) || u.id.includes(q.trim()));
@@ -459,7 +463,7 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
           <div className="flex items-center justify-between gap-3">
             <CardTitle className="text-base">所有用户({filtered.length}/{rows.length})</CardTitle>
             <div className="flex items-center gap-2">
-              <Input className="w-56" placeholder="搜索手机号 / ID" value={q} onChange={(e) => setQ(e.target.value)} />
+              <Input className="w-56" placeholder="搜索手机号 / ID" value={q} onChange={(e) => { setQ(e.target.value); if (page !== 1) setPage(1); }} />
               <Button size="sm" onClick={() => setUserDlg({ edit: null })}><Plus className="h-4 w-4" />创建用户</Button>
             </div>
           </div>
@@ -511,6 +515,7 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
               ))}
             </TableBody>
           </Table>
+          <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={setPage} onPageSizeChange={(s) => { setPage(1); setPageSize(s); }} />
         </CardContent>
       </Card>
 
@@ -857,15 +862,18 @@ function RewardsPanel() {
   const [reject, setReject] = useState<RewardClaimRow | null>(null);
   const [approveDlg, setApproveDlg] = useState<RewardClaimRow | null>(null);
   const [preview, setPreview] = useState<{ type: "image" | "text"; content: string } | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
 
   const load = async () => {
     setLoading(true);
     try {
-      const r = await api.rewards(filter === "all" ? undefined : filter);
-      setRows(r.data);
+      const r = await api.rewards(filter === "all" ? undefined : filter, page, pageSize);
+      setRows(r.data); setTotal(r.total);
     } finally { setLoading(false); }
   };
-  useEffect(() => { load(); }, [filter]);
+  useEffect(() => { load(); }, [filter, page, pageSize]);
 
   const fmt = (n: number) => n.toLocaleString();
   // 固定额度任务直接入账;区间类任务需管理员评定额度,走对话框。
@@ -880,10 +888,10 @@ function RewardsPanel() {
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
-            <CardTitle className="text-base">奖励申领({rows.length})</CardTitle>
+            <CardTitle className="text-base">奖励申领({total})</CardTitle>
             <div className="flex items-center gap-1 rounded-lg bg-muted p-0.5">
               {(Object.keys(FILTER_LABEL) as RewardFilter[]).map((f) => (
-                <button key={f} onClick={() => setFilter(f)}
+                <button key={f} onClick={() => { setFilter(f); setPage(1); }}
                   className={cn("rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
                     filter === f ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground")}>
                   {FILTER_LABEL[f]}
@@ -958,6 +966,7 @@ function RewardsPanel() {
               </TableBody>
             </Table>
           )}
+          <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={setPage} onPageSizeChange={(s) => { setPage(1); setPageSize(s); }} />
         </CardContent>
       </Card>
       <RejectRewardDialog claim={reject} onClose={() => setReject(null)} onDone={load} />
@@ -1176,7 +1185,7 @@ function RewardTaskDialog({ task, onClose, onDone }: {
         <div className="space-y-3">
           <div>
             <label className="mb-1 block text-xs text-muted-foreground">标题</label>
-            <Input value={form.title} onChange={(e) => set("title", e.target.value)} placeholder="如:给 runify 点 Star" autoFocus />
+            <Input value={form.title} onChange={(e) => set("title", e.target.value)} placeholder="如:给 Relay 点 Star" autoFocus />
           </div>
           <div>
             <label className="mb-1 block text-xs text-muted-foreground">说明(可选)</label>
@@ -1242,10 +1251,13 @@ function RewardTaskDialog({ task, onClose, onDone }: {
 
 function UsagePanel() {
   const [rows, setRows] = useState<any[]>([]);
-  useEffect(() => { api.usage().then((r) => setRows(r.data)); }, []);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const [total, setTotal] = useState(0);
+  useEffect(() => { api.usage(page, pageSize).then((r) => { setRows(r.data); setTotal(r.total); }); }, [page, pageSize]);
   return (
     <Card>
-      <CardHeader><CardTitle className="text-base">全局用量(最近 200 条)</CardTitle></CardHeader>
+      <CardHeader><CardTitle className="text-base">全局用量({total})</CardTitle></CardHeader>
       <CardContent>
         {rows.length === 0 ? <p className="text-sm text-muted-foreground">暂无记录</p> : (
           <Table>
@@ -1261,6 +1273,7 @@ function UsagePanel() {
             </TableBody>
           </Table>
         )}
+        <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={setPage} onPageSizeChange={(s) => { setPage(1); setPageSize(s); }} />
       </CardContent>
     </Card>
   );
@@ -2750,22 +2763,30 @@ function RequestLogPanel() {
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const qRef = useRef("");
 
-  const load = async (query?: string) => {
+  const load = async () => {
     setLoading(true);
     try {
-      const r = await api.requestLogs(query ?? q, 50);
-      setRows(r.data);
+      const r = await api.requestLogs(qRef.current || undefined, page, pageSize);
+      setRows(r.data); setTotal(r.total);
     } finally { setLoading(false); }
   };
 
-  useEffect(() => { load(""); }, []);
+  useEffect(() => { load(); }, [page, pageSize]);
 
   const onSearch = (v: string) => {
     setQ(v);
+    qRef.current = v;
     if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => load(v), 500);
+    timerRef.current = setTimeout(() => {
+      if (page !== 1) setPage(1);
+      else load();
+    }, 500);
   };
 
   const fmtTime = (ts: number) => {
@@ -2780,7 +2801,7 @@ function RequestLogPanel() {
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
-            <CardTitle className="text-base">请求链路({loading ? "…" : rows.length})</CardTitle>
+            <CardTitle className="text-base">请求链路({loading ? "…" : total})</CardTitle>
             <div className="flex items-center gap-2">
               <div className="relative">
                 <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -2956,6 +2977,7 @@ function RequestLogPanel() {
               </TableBody>
             </Table>
           )}
+          <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={setPage} onPageSizeChange={(s) => { setPage(1); setPageSize(s); }} />
         </CardContent>
       </Card>
     </div>

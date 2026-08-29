@@ -63,7 +63,13 @@ export const api = {
   overviewSeries: (granularity: "day" | "week" | "month"): Promise<{ granularity: string; data: { ts: number; tokens: number; calls: number }[] }> =>
     req(`/admin/api/overview/series?granularity=${granularity}`),
 
-  users: (): Promise<{ data: UserRow[] }> => req("/admin/api/users"),
+  users: (page?: number, pageSize?: number): Promise<{ data: UserRow[]; total: number; page: number; page_size: number; total_pages: number }> => {
+    const qs = new URLSearchParams();
+    if (typeof page === "number") qs.set("page", String(page));
+    if (typeof pageSize === "number") qs.set("page_size", String(pageSize));
+    const s = qs.toString();
+    return req(`/admin/api/users${s ? "?" + s : ""}`);
+  },
   createUser: (body: { username: string; password: string; email?: string; phone?: string; group_id?: number; grant_tokens?: number; concurrency_limit?: number }) =>
     req("/admin/api/users", { method: "POST", body: JSON.stringify(body) }),
   patchUser: (id: string, body: any) =>
@@ -71,6 +77,13 @@ export const api = {
   deleteUser: (id: string) => req(`/admin/api/users/${id}`, { method: "DELETE" }),
   userSeries: (id: string): Promise<{ data: { ts: number; tokens: number; calls: number }[] }> =>
     req(`/admin/api/users/${id}/series`),
+  userUsage: (id: string, page?: number, pageSize?: number): Promise<{ data: any[]; total: number; page: number; page_size: number; total_pages: number }> => {
+    const qs = new URLSearchParams();
+    if (typeof page === "number") qs.set("page", String(page));
+    if (typeof pageSize === "number") qs.set("page_size", String(pageSize));
+    const s = qs.toString();
+    return req(`/admin/api/users/${id}/usage${s ? "?" + s : ""}`);
+  },
 
   models: (): Promise<{ data: ModelRow[] }> => req("/admin/api/models"),
   addModel: (body: { label?: string; kind: string; base_url: string; api_key?: string; upstream_model: string }) =>
@@ -93,10 +106,22 @@ export const api = {
     req(`/admin/api/routes/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteRoute: (id: number) => req(`/admin/api/routes/${id}`, { method: "DELETE" }),
 
-  usage: () => req("/admin/api/usage"),
+  usage: (page?: number, pageSize?: number): Promise<{ data: any[]; total: number; page: number; page_size: number; total_pages: number }> => {
+    const qs = new URLSearchParams();
+    if (typeof page === "number") qs.set("page", String(page));
+    if (typeof pageSize === "number") qs.set("page_size", String(pageSize));
+    const s = qs.toString();
+    return req(`/admin/api/usage${s ? "?" + s : ""}`);
+  },
 
-  rewards: (status?: "pending" | "approved" | "rejected"): Promise<RewardListResp> =>
-    req(`/admin/api/rewards${status ? `?status=${status}` : ""}`),
+  rewards: (status?: "pending" | "approved" | "rejected", page?: number, pageSize?: number): Promise<RewardListResp> => {
+    const qs = new URLSearchParams();
+    if (status) qs.set("status", status);
+    if (typeof page === "number") qs.set("page", String(page));
+    if (typeof pageSize === "number") qs.set("page_size", String(pageSize));
+    const q = qs.toString();
+    return req(`/admin/api/rewards${q ? "?" + q : ""}`);
+  },
   reviewReward: (id: string, approve: boolean, note?: string, reward_tokens?: number) =>
     req(`/admin/api/rewards/${id}/review`, { method: "POST", body: JSON.stringify({ approve, note, reward_tokens }) }),
 
@@ -139,10 +164,11 @@ export const api = {
   },
 
   // ---- 请求链路追踪 ----
-  requestLogs: (q?: string, limit?: number): Promise<{ data: RequestLogRow[] }> => {
+  requestLogs: (q?: string, page?: number, pageSize?: number): Promise<{ data: RequestLogRow[]; total: number; page: number; page_size: number; total_pages: number }> => {
     const qs = new URLSearchParams();
     if (q) qs.set("q", q);
-    if (typeof limit === "number") qs.set("limit", String(limit));
+    if (typeof page === "number") qs.set("page", String(page));
+    if (typeof pageSize === "number") qs.set("page_size", String(pageSize));
     const s = qs.toString();
     return req(`/admin/api/request-logs${s ? "?" + s : ""}`);
   },
@@ -197,6 +223,10 @@ export interface RewardClaimRow {
 
 export interface RewardListResp {
   data: RewardClaimRow[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
 }
 
 export interface EmailSettingsBody {

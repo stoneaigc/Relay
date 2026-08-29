@@ -47,7 +47,13 @@ export const api = {
   models: (): Promise<{ data: string[] }> => req("/portal/api/models"),
   summary: (): Promise<{ granted: number; used: number; balance: number }> => req("/portal/api/summary"),
   series: (): Promise<{ data: { ts: number; tokens: number; calls: number }[] }> => req("/portal/api/series"),
-  usage: () => req("/portal/api/usage"),
+  usage: (page?: number, pageSize?: number): Promise<{ data: any[]; total: number; page: number; page_size: number; total_pages: number }> => {
+    const qs = new URLSearchParams();
+    if (typeof page === "number") qs.set("page", String(page));
+    if (typeof pageSize === "number") qs.set("page_size", String(pageSize));
+    const s = qs.toString();
+    return req(`/portal/api/usage${s ? "?" + s : ""}`);
+  },
   rewards: (): Promise<RewardInfo> => req("/portal/api/rewards"),
   claimReward: (task_id: number, evidence?: string) =>
     req("/portal/api/rewards", { method: "POST", body: JSON.stringify({ task_id, evidence }) }),

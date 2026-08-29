@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::state::{AppState, KeyEntry, UserState};
+use crate::admin::{PageQuery, normalize_page, total_pages};
 use crate::{jwt, storage};
 
 /// 校验门户会话,返回 user_id。
@@ -443,14 +444,22 @@ pub async fn claim_reward(
     Ok(Json(json!({ "id": id, "status": 0, "reward_tokens": reward_tokens })))
 }
 
-/// GET /portal/usage
+/// GET /portal/usage?page=&page_size= —— 当前登录用户自己的用量(分页)。
 pub async fn usage(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<PageQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let uid = portal_user(&state, &headers)?;
-    let rows = storage::usage_rows(&state.db, Some(uid), 100)
+    let (page, page_size, offset) = normalize_page(q.page, q.page_size);
+    let (rows, total) = storage::usage_rows_page(&state.db, Some(uid), page_size as i64, offset as i64)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(json!({ "data": rows })))
+    Ok(Json(json!({
+        "data": rows,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages(total, page_size),
+    })))
 }

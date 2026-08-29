@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import PaginationBar from "./PaginationBar";
 
 const GRANT = 10_000_000;
 
@@ -202,14 +203,25 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [phone, setPhone] = useState("");
   const [keys, setKeys] = useState<KeyInfo[]>([]);
   const [usage, setUsage] = useState<any[]>([]);
+  const [usageTotal, setUsageTotal] = useState(0);
+  const [usagePage, setUsagePage] = useState(1);
+  const [usagePageSize, setUsagePageSize] = useState(20);
   const [models, setModels] = useState<string[]>([]);
   const [series, setSeries] = useState<{ ts: number; tokens: number; calls: number }[]>([]);
   const [reveal, setReveal] = useState<{ kind: string; key: string } | null>(null);
 
+  const loadUsage = async () => {
+    try {
+      const u = await api.usage(usagePage, usagePageSize);
+      setUsage(u.data); setUsageTotal(u.total);
+    } catch (e: any) { if (String(e.message).includes("auth")) onLogout(); }
+  };
+  useEffect(() => { loadUsage(); }, [usagePage, usagePageSize]);
+
   const refresh = async () => {
     try {
-      const [me, k, u, m, s, ser] = await Promise.all([api.me(), api.keys(), api.usage(), api.models(), api.summary(), api.series()]);
-      setPhone(me.phone || "—"); setKeys(k.data); setUsage(u.data); setModels(m.data); setSummary(s); setSeries(ser.data);
+      const [me, k, m, s, ser] = await Promise.all([api.me(), api.keys(), api.models(), api.summary(), api.series()]);
+      setPhone(me.phone || "—"); setKeys(k.data); setModels(m.data); setSummary(s); setSeries(ser.data);
     } catch (e: any) { if (String(e.message).includes("auth")) onLogout(); }
   };
   useEffect(() => { refresh(); }, []);
@@ -330,7 +342,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                 <RewardsView />
               ) : (
                 <Card>
-                  <CardHeader><CardTitle className="text-base">用量明细</CardTitle></CardHeader>
+                  <CardHeader><CardTitle className="text-base">用量明细({usageTotal})</CardTitle></CardHeader>
                   <CardContent>
                     {usage.length === 0 ? <p className="text-sm text-muted-foreground">暂无调用记录</p> : (
                       <Table>
@@ -351,6 +363,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                         </TableBody>
                       </Table>
                     )}
+                    <PaginationBar page={usagePage} pageSize={usagePageSize} total={usageTotal} onPageChange={setUsagePage} onPageSizeChange={(s) => { setUsagePage(1); setUsagePageSize(s); }} />
                   </CardContent>
                 </Card>
               )}
