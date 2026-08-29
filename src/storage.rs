@@ -803,10 +803,10 @@ pub async fn seed_reward_tasks_if_empty(pool: &Db) -> anyhow::Result<()> {
     if c > 0 {
         return Ok(());
     }
-    let repo = "https://github.com/runify-dev/runify";
+    let repo = "https://github.com/stoneaigc/Relay";
     create_reward_task(
         pool,
-        "给 runify 点 Star",
+        "给 Relay 点 Star",
         Some("为项目点亮 GitHub Star,上传 star 后的截图即可申领。"),
         "screenshot",
         false,
@@ -820,7 +820,7 @@ pub async fn seed_reward_tasks_if_empty(pool: &Db) -> anyhow::Result<()> {
     .await?;
     create_reward_task(
         pool,
-        "使用 runify 并提交 Issue",
+        "使用 Relay 并提交 Issue",
         Some("在 GitHub 提交一个有效 issue,填写 issue 链接即可申领。"),
         "link",
         false,
@@ -834,7 +834,7 @@ pub async fn seed_reward_tasks_if_empty(pool: &Db) -> anyhow::Result<()> {
     .await?;
     create_reward_task(
         pool,
-        "给 runify 提建议",
+        "给 Relay 提建议",
         Some("用纯文本写下你的产品建议,额度由管理员评定后入账。"),
         "text",
         true,
