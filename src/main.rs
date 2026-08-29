@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,runapi=debug".into()),
+                .unwrap_or_else(|_| "info,relay=debug".into()),
         )
         .init();
 
@@ -201,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/", get(|| async { axum::response::Redirect::to("/portal/") }));
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    tracing::info!("RunAPI listening on {}", bind);
+    tracing::info!("Relay listening on {}", bind);
 
     let shutdown_state = Arc::clone(&state);
     axum::serve(listener, app)

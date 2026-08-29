@@ -1,14 +1,14 @@
 [Unit]
-Description=RunAPI
+Description=Relay
 After=network.target
 
 [Service]
 # 工作目录必须是安装目录,程序按相对路径找 config/ 和 frontend/*/dist
 WorkingDirectory=@INSTALL_DIR@
-ExecStart=@INSTALL_DIR@/runapi
-# 敏感配置(如邮箱授权码)放到该文件,形如:RUNAPI_EMAIL__PASSWORD=xxx
+ExecStart=@INSTALL_DIR@/relay
+# 敏感配置(如邮箱授权码)放到该文件,形如:RELAY_EMAIL__PASSWORD=xxx
 # 前缀 - 表示文件不存在也不报错
-EnvironmentFile=-@INSTALL_DIR@/runapi.env
+EnvironmentFile=-@INSTALL_DIR@/relay.env
 Restart=always
 RestartSec=3
 

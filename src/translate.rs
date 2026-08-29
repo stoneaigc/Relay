@@ -200,7 +200,7 @@ pub fn anthropic_to_openai(aresp: &Value, public_model: &str) -> Value {
     let finish = map_stop_reason(aresp.get("stop_reason").and_then(|s| s.as_str()));
     let input = aresp.pointer("/usage/input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
     let output = aresp.pointer("/usage/output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-    let id = aresp.get("id").and_then(|v| v.as_str()).unwrap_or("chatcmpl-runapi");
+    let id = aresp.get("id").and_then(|v| v.as_str()).unwrap_or("chatcmpl-relay");
 
     let mut message = json!({ "role": "assistant" });
     message["content"] = if text.is_empty() && !tool_calls.is_empty() { Value::Null } else { json!(text) };
@@ -409,7 +409,7 @@ pub fn openai_to_anthropic_response(oai: &Value, public_model: &str) -> Value {
     let output = oai.pointer("/usage/completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
 
     json!({
-        "id": oai.get("id").cloned().unwrap_or(json!("msg_runapi")),
+        "id": oai.get("id").cloned().unwrap_or(json!("msg_relay")),
         "type": "message",
         "role": "assistant",
         "model": public_model,

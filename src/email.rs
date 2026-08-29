@@ -14,13 +14,13 @@ pub async fn send_code(cfg: &EmailConfig, to: &str, code: &str) -> anyhow::Resul
 <p style="margin:0 0 12px;">尊敬的用户：</p>
 <p style="margin:0 0 12px;">您的注册验证码为 <strong style="font-size:20px;letter-spacing:2px;color:#2563eb;">{code}</strong>，5 分钟内有效。</p>
 <p style="margin:0 0 12px;">如非本人操作，请忽略此邮件。</p>
-<p style="margin:12px 0 0;color:#8a8f99;font-size:13px;">—— RunAPI</p>
+<p style="margin:12px 0 0;color:#8a8f99;font-size:13px;">—— Relay</p>
 </div>"#
     );
     let email = Message::builder()
         .from(from.parse()?)
         .to(to.parse()?)
-        .subject("RunAPI 注册验证码")
+        .subject("Relay 注册验证码")
         .header(ContentType::TEXT_HTML)
         .body(html)?;
 

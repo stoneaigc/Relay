@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# RunAPI 安装/升级脚本。在解压后的包目录里执行:sudo ./install.sh
-# 可用环境变量覆盖安装目录:INSTALL_DIR=/srv/runapi sudo -E ./install.sh
+# Relay 安装/升级脚本。在解压后的包目录里执行:sudo ./install.sh
+# 可用环境变量覆盖安装目录:INSTALL_DIR=/srv/relay sudo -E ./install.sh
 set -euo pipefail
 
-INSTALL_DIR="${INSTALL_DIR:-/opt/runapi}"
-SERVICE="runapi"
+INSTALL_DIR="${INSTALL_DIR:-/opt/relay}"
+SERVICE="relay"
 SRC="$(cd "$(dirname "$0")" && pwd)" # 包根目录(脚本所在目录)
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -21,7 +21,7 @@ if [ "$SRC" = "$(cd "$INSTALL_DIR" && pwd)" ]; then
 else
   # 二进制 + 前端:每次都更新
   echo "==> 更新二进制与前端资源"
-  install -m 0755 "$SRC/runapi" "$INSTALL_DIR/runapi"
+  install -m 0755 "$SRC/relay" "$INSTALL_DIR/relay"
   rm -rf "$INSTALL_DIR/frontend"
   cp -r "$SRC/frontend" "$INSTALL_DIR/frontend"
 fi
@@ -36,19 +36,19 @@ else
 fi
 
 # 敏感配置文件模板(首次创建,空)
-if [ ! -f "$INSTALL_DIR/runapi.env" ]; then
-  cat > "$INSTALL_DIR/runapi.env" <<'EOF'
+if [ ! -f "$INSTALL_DIR/relay.env" ]; then
+  cat > "$INSTALL_DIR/relay.env" <<'EOF'
 # systemd 注入的环境变量,每行 KEY=VALUE。敏感项建议放这里而非 default.toml。
 # 例:
-# RUNAPI_EMAIL__PASSWORD=你的邮箱授权码
+# RELAY_EMAIL__PASSWORD=你的邮箱授权码
 EOF
-  chmod 600 "$INSTALL_DIR/runapi.env"
-  echo "==> 已创建 $INSTALL_DIR/runapi.env(可写入授权码等敏感变量)"
+  chmod 600 "$INSTALL_DIR/relay.env"
+  echo "==> 已创建 $INSTALL_DIR/relay.env(可写入授权码等敏感变量)"
 fi
 
 # systemd 单元:把占位符替换成实际安装目录
 echo "==> 安装 systemd 服务:$SERVICE"
-sed "s#@INSTALL_DIR@#${INSTALL_DIR}#g" "$SRC/runapi.service" \
+sed "s#@INSTALL_DIR@#${INSTALL_DIR}#g" "$SRC/relay.service" \
   > "/etc/systemd/system/${SERVICE}.service"
 systemctl daemon-reload
 systemctl enable "$SERVICE" >/dev/null

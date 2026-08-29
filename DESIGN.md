@@ -1,4 +1,4 @@
-# RunAPI —— LLM API 网关设计文档
+# Relay —— LLM API 网关设计文档
 
 > 版本:v0.1(草案) · 语言:Rust · 最后更新:2026-06-29
 

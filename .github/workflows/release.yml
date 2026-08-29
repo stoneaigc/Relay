@@ -67,24 +67,24 @@ jobs:
         run: cross build --release --locked --target ${{ matrix.target }}
 
       - name: Verify static binary
-        run: file "target/${{ matrix.target }}/release/runapi"
+        run: file "target/${{ matrix.target }}/release/relay"
 
       # ---- 组装产物 ----
       # 运行时路径(均相对工作目录):
-      #   ./runapi  ./config/default.toml  ./frontend/{admin,portal}/dist
+      #   ./relay  ./config/default.toml  ./frontend/{admin,portal}/dist
       - name: Assemble package
         run: |
-          PKG="runapi-${VERSION}-linux-${{ matrix.arch }}"
+          PKG="relay-${VERSION}-linux-${{ matrix.arch }}"
           mkdir -p "dist/${PKG}/config" \
                    "dist/${PKG}/frontend/admin" \
                    "dist/${PKG}/frontend/portal"
-          cp "target/${{ matrix.target }}/release/runapi"  "dist/${PKG}/"
+          cp "target/${{ matrix.target }}/release/relay"  "dist/${PKG}/"
           cp config/default.toml            "dist/${PKG}/config/"
           cp -r frontend/admin/dist         "dist/${PKG}/frontend/admin/dist"
           cp -r frontend/portal/dist        "dist/${PKG}/frontend/portal/dist"
           # 部署脚本 + systemd 模板放到包根目录
           install -m 0755 deploy/install.sh "dist/${PKG}/install.sh"
-          cp deploy/runapi.service          "dist/${PKG}/runapi.service"
+          cp deploy/relay.service           "dist/${PKG}/relay.service"
           tar -C dist -czf "${PKG}.tar.gz" "${PKG}"
           echo "PKG=${PKG}" >> "$GITHUB_ENV"
 

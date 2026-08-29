@@ -1,4 +1,4 @@
--- RunAPI 初始 schema(SQLite)。运行时由 storage::init_schema 以 IF NOT EXISTS 执行。
+-- Relay 初始 schema(SQLite)。运行时由 storage::init_schema 以 IF NOT EXISTS 执行。
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 

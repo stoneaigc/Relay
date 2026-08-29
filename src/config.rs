@@ -258,7 +258,7 @@ impl Config {
     pub fn load() -> anyhow::Result<Self> {
         let cfg: Config = Figment::new()
             .merge(Toml::file("config/default.toml"))
-            .merge(Env::prefixed("RUNAPI_").split("__"))
+            .merge(Env::prefixed("RELAY_").split("__"))
             .extract()?;
         Ok(cfg)
     }

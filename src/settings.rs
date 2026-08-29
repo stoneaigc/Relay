@@ -26,7 +26,7 @@ pub const K_PASS_ENC: &str = "email.password_enc";
 fn derive_key(secret: &str) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(None, secret.as_bytes());
     let mut okm = [0u8; 32];
-    hk.expand(b"runapi-email-encryption", &mut okm)
+    hk.expand(b"relay-email-encryption", &mut okm)
         .expect("hkdf expand 32 bytes");
     okm
 }

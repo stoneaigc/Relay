@@ -134,7 +134,7 @@ pub async fn init_pool(cfg: &crate::config::DatabaseConfig) -> anyhow::Result<Db
         }
     } else {
         // SQLite:Any 不暴露 create_if_missing,用 URL 参数 mode=rwc 确保文件不存在时自动创建。
-        let base = if cfg.url.is_empty() { "sqlite://runapi.db" } else { cfg.url.as_str() };
+        let base = if cfg.url.is_empty() { "sqlite://relay.db" } else { cfg.url.as_str() };
         anyhow::ensure!(!base.starts_with("postgres"), "database.type=sqlite 但 url 是 postgres://:{base}");
         if base.contains("mode=") {
             base.to_string()

@@ -111,7 +111,7 @@ pub async fn list_models(
     let names = state.routing.load().group_model_names(auth.user.group());
     let data: Vec<Value> = names
         .iter()
-        .map(|n| json!({ "id": n, "object": "model", "owned_by": "runapi" }))
+        .map(|n| json!({ "id": n, "object": "model", "owned_by": "relay" }))
         .collect();
     Ok(Json(json!({ "object": "list", "data": data })))
 }
