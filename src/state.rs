@@ -367,6 +367,11 @@ pub struct AppState {
     pub upstream_slots: DashMap<UpstreamKey, Arc<Semaphore>>,
     /// 每个上游的熔断器状态。
     pub upstream_breakers: DashMap<UpstreamKey, Arc<AsyncMutex<Breaker>>>,
+    /// ---------- 组级负载策略的运行态 ----------
+    /// 轮询游标(加权轮询 / 简单轮询用):group_id -> 自增计数。跨路由热替换存活。
+    pub round_robin: DashMap<i64, std::sync::atomic::AtomicU32>,
+    /// 高峰/低谷时段判断用的时区偏移秒数(Asia/Shanghai → 28800;DST 感知)。
+    pub tz_offset_secs: i32,
     /// ---------- 路由失败审计(ring buffer,最新 push_back) ----------
     pub audit_failures: AsyncMutex<VecDeque<FailureRecord>>,
     /// ---------- 接口指标(内存滚动窗口) ----------

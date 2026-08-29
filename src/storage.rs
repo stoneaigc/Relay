@@ -208,6 +208,9 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE model_groups ADD COLUMN is_active INTEGER NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
+        let _ = q!("ALTER TABLE model_groups ADD COLUMN strategy TEXT NOT NULL DEFAULT 'weighted_random'")
+            .execute(pool)
+            .await;
         // 请求链路:旧库补 request_id 列(已存在则忽略错误)。
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN request_id TEXT")
             .execute(pool)
@@ -350,12 +353,13 @@ pub async fn delete_group(pool: &Db, id: i64) -> anyhow::Result<()> {
 }
 
 pub async fn list_groups(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
-    let rows = q!("SELECT id, name, is_active FROM model_groups ORDER BY id")
+    let rows = q!("SELECT id, name, is_active, strategy FROM model_groups ORDER BY id")
         .fetch_all(pool).await?;
     Ok(rows.iter().map(|r| serde_json::json!({
         "id": r.get::<i64,_>("id"),
         "name": r.get::<String,_>("name"),
         "is_active": r.get::<i64,_>("is_active") != 0,
+        "strategy": r.get::<Option<String>,_>("strategy").unwrap_or_else(|| "weighted_random".to_string()),
     })).collect())
 }
 
@@ -363,6 +367,13 @@ pub async fn list_groups(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
 pub async fn set_active_group(pool: &Db, id: i64) -> anyhow::Result<()> {
     q!("UPDATE model_groups SET is_active = 0 WHERE is_active <> 0").execute(pool).await?;
     q!("UPDATE model_groups SET is_active = 1 WHERE id = ?").bind(id).execute(pool).await?;
+    Ok(())
+}
+
+/// 设置某组的负载策略。
+pub async fn set_group_strategy(pool: &Db, id: i64, strategy: &str) -> anyhow::Result<()> {
+    q!("UPDATE model_groups SET strategy = ? WHERE id = ?")
+        .bind(strategy).bind(id).execute(pool).await?;
     Ok(())
 }
 
@@ -408,6 +419,58 @@ pub async fn list_routes(pool: &Db, group_id: i64) -> anyhow::Result<Vec<serde_j
     })).collect())
 }
 
+// ---- 高峰/低谷时段规则 ----
+pub struct TimeRuleInput {
+    pub group_id: i64,
+    pub name: String,
+    pub weekdays: String,
+    pub start_time: String,
+    pub end_time: String,
+    pub multiplier: f64,
+    pub weight_map: Option<String>,
+    pub active: bool,
+}
+
+pub async fn list_time_rules(pool: &Db, group_id: i64) -> anyhow::Result<Vec<serde_json::Value>> {
+    let rows = q!(
+        "SELECT id, group_id, name, weekdays, start_time, end_time, multiplier, weight_map, active, created_at
+         FROM time_rules WHERE group_id = ? ORDER BY id")
+        .bind(group_id).fetch_all(pool).await?;
+    Ok(rows.iter().map(|r| serde_json::json!({
+        "id": r.get::<i64,_>("id"), "group_id": r.get::<i64,_>("group_id"),
+        "name": r.get::<String,_>("name"), "weekdays": r.get::<String,_>("weekdays"),
+        "start_time": r.get::<String,_>("start_time"), "end_time": r.get::<String,_>("end_time"),
+        "multiplier": r.try_get::<f64,_>("multiplier").unwrap_or(1.0),
+        "weight_map": r.get::<Option<String>,_>("weight_map"),
+        "active": r.try_get::<i64,_>("active").unwrap_or(1) != 0,
+        "created_at": r.get::<String,_>("created_at"),
+    })).collect())
+}
+
+pub async fn add_time_rule(pool: &Db, rule: &TimeRuleInput) -> anyhow::Result<i64> {
+    let r = q!(
+        "INSERT INTO time_rules (group_id, name, weekdays, start_time, end_time, multiplier, weight_map, active, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id")
+        .bind(rule.group_id).bind(&rule.name).bind(&rule.weekdays)
+        .bind(&rule.start_time).bind(&rule.end_time).bind(rule.multiplier)
+        .bind(&rule.weight_map).bind(rule.active as i64).bind(now_iso())
+        .fetch_one(pool).await?;
+    Ok(r.get::<i64, _>("id"))
+}
+
+pub async fn update_time_rule(pool: &Db, id: i64, rule: &TimeRuleInput) -> anyhow::Result<()> {
+    q!("UPDATE time_rules SET name = ?, weekdays = ?, start_time = ?, end_time = ?, multiplier = ?, weight_map = ?, active = ? WHERE id = ?")
+        .bind(&rule.name).bind(&rule.weekdays).bind(&rule.start_time).bind(&rule.end_time)
+        .bind(rule.multiplier).bind(&rule.weight_map).bind(rule.active as i64).bind(id)
+        .execute(pool).await?;
+    Ok(())
+}
+
+pub async fn delete_time_rule(pool: &Db, id: i64) -> anyhow::Result<()> {
+    q!("DELETE FROM time_rules WHERE id = ?").bind(id).execute(pool).await?;
+    Ok(())
+}
+
 pub async fn set_user_group(pool: &Db, user_id: Uuid, group_id: Option<i64>) -> anyhow::Result<()> {
     q!("UPDATE users SET group_id = ? WHERE id = ?")
         .bind(group_id).bind(user_id.to_string()).execute(pool).await?;
@@ -433,9 +496,10 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
             upstream_model: r.get("upstream_model"),
         });
     }
-    for r in q!("SELECT id, name FROM model_groups").fetch_all(pool).await? {
+    for r in q!("SELECT id, name, strategy FROM model_groups").fetch_all(pool).await? {
         let id: i64 = r.get("id");
         routing.group_names.insert(id, r.get("name"));
+        routing.group_strategy.insert(id, crate::routing::strategy_from_str(r.try_get("strategy").unwrap_or(None).unwrap_or("weighted_random")));
         routing.groups.entry(id).or_default();
     }
     for r in q!("SELECT group_id, public_name, model_id, weight, multiplier FROM group_routes").fetch_all(pool).await? {
@@ -447,6 +511,25 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
                 weight: r.get::<i64, _>("weight") as u32,
                 multiplier: r.try_get("multiplier").unwrap_or(1.0),
             });
+    }
+    // 加载每组的「高峰/低谷」时段规则(倍率 + 权重覆盖)。
+    for r in q!("SELECT id, group_id, name, weekdays, start_time, end_time, multiplier, weight_map, active FROM time_rules").fetch_all(pool).await? {
+        let gid: i64 = r.get("group_id");
+        let wm: std::collections::HashMap<String, std::collections::HashMap<i64, u32>> = r
+            .try_get::<Option<String>, _>("weight_map")
+            .unwrap_or(None)
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        routing.time_rules.entry(gid).or_default().push(crate::routing::TimeRule {
+            id: r.get("id"),
+            name: r.get("name"),
+            weekdays: r.try_get("weekdays").unwrap_or("0-6".to_string()),
+            start_time: r.try_get("start_time").unwrap_or("00:00".to_string()),
+            end_time: r.try_get("end_time").unwrap_or("23:59".to_string()),
+            multiplier: r.try_get("multiplier").unwrap_or(1.0),
+            weight_map: wm,
+            active: r.try_get::<i64, _>("active").unwrap_or(1) != 0,
+        });
     }
     Ok(routing)
 }

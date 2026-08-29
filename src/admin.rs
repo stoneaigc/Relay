@@ -822,6 +822,27 @@ pub async fn activate_group(
     Ok(Json(json!({ "ok": true })))
 }
 
+#[derive(Deserialize)]
+pub struct SetGroupStrategy {
+    pub strategy: String,
+}
+
+/// POST /admin/groups/:id/strategy —— 设置该组的负载策略。
+pub async fn set_group_strategy(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<SetGroupStrategy>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let strategy = crate::routing::strategy_from_str(&body.strategy);
+    storage::set_group_strategy(&state.db, id, strategy.as_str())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true, "strategy": strategy.as_str() })))
+}
+
 /// DELETE /admin/groups/:id
 pub async fn delete_group(
     State(state): State<Arc<AppState>>,
@@ -830,6 +851,110 @@ pub async fn delete_group(
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
     storage::delete_group(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---- 高峰/低谷时段规则 ----
+
+/// GET /admin/groups/:id/time-rules
+pub async fn list_time_rules(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let data = storage::list_time_rules(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "data": data })))
+}
+
+#[derive(Deserialize)]
+pub struct TimeRuleBody {
+    pub name: String,
+    #[serde(default = "time_rule_default_weekdays")]
+    pub weekdays: String,
+    pub start_time: String,
+    pub end_time: String,
+    #[serde(default = "time_rule_default_one")]
+    pub multiplier: f64,
+    #[serde(default)]
+    pub weight_map: Option<String>,
+    #[serde(default = "time_rule_default_true")]
+    pub active: bool,
+}
+
+fn time_rule_default_weekdays() -> String { "0-6".to_string() }
+fn time_rule_default_one() -> f64 { 1.0 }
+fn time_rule_default_true() -> bool { true }
+
+/// POST /admin/groups/:id/time-rules
+pub async fn add_time_rule(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<TimeRuleBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let input = storage::TimeRuleInput {
+        group_id: id,
+        name: body.name.trim().to_string(),
+        weekdays: body.weekdays,
+        start_time: body.start_time,
+        end_time: body.end_time,
+        multiplier: body.multiplier,
+        weight_map: body.weight_map,
+        active: body.active,
+    };
+    if input.name.is_empty() {
+        return Err(ApiError::BadRequest("name required".into()));
+    }
+    let nid = storage::add_time_rule(&state.db, &input)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true, "id": nid })))
+}
+
+/// PUT /admin/groups/:id/time-rules/:rule_id
+pub async fn update_time_rule(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((id, rule_id)): Path<(i64, i64)>,
+    Json(body): Json<TimeRuleBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let input = storage::TimeRuleInput {
+        group_id: id,
+        name: body.name.trim().to_string(),
+        weekdays: body.weekdays,
+        start_time: body.start_time,
+        end_time: body.end_time,
+        multiplier: body.multiplier,
+        weight_map: body.weight_map,
+        active: body.active,
+    };
+    if input.name.is_empty() {
+        return Err(ApiError::BadRequest("name required".into()));
+    }
+    storage::update_time_rule(&state.db, rule_id, &input)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// DELETE /admin/groups/:id/time-rules/:rule_id
+pub async fn delete_time_rule(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((_id, rule_id)): Path<(i64, i64)>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    storage::delete_time_rule(&state.db, rule_id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;

@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS model_groups (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   name       TEXT NOT NULL UNIQUE,
   is_active  INTEGER NOT NULL DEFAULT 0,   -- 1=激活(默认组),新用户注册默认绑定
+  strategy   TEXT NOT NULL DEFAULT 'weighted_random', -- 负载策略:weighted_random(加权随机,当前)|(可扩展 weighted_round_robin 等)
   created_at TEXT NOT NULL
 );
 
@@ -141,3 +142,18 @@ CREATE TABLE IF NOT EXISTS settings (
   value      TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+-- 高峰/低谷时段策略:按「星期 + 时间段」驱动 计费倍率 与 路由权重覆盖。
+CREATE TABLE IF NOT EXISTS time_rules (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id    INTEGER NOT NULL,                 -- 绑定的模型组
+  name        TEXT NOT NULL,                    -- 时段名:高峰/平峰/低谷/自定义
+  weekdays    TEXT NOT NULL DEFAULT '0-6',      -- 生效星期:0-6 或 "1-5" / "0,6" / "0-6"
+  start_time  TEXT NOT NULL,                    -- 开始 HH:MM
+  end_time    TEXT NOT NULL,                    -- 结束 HH:MM
+  multiplier  REAL NOT NULL DEFAULT 1.0,        -- 该时段计费倍率系数(与模型倍率/用户倍率相乘)
+  weight_map  TEXT,                             -- 该时段路由权重覆盖 JSON {"public_name":{"model_id":weight}}
+  active      INTEGER NOT NULL DEFAULT 1,
+  created_at  TEXT NOT NULL
+);
+

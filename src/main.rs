@@ -31,6 +31,33 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use crate::config::Config;
 use crate::state::{AppState, AUDIT_FAILURE_CAP, UsageEvent};
 
+use chrono::{Datelike, Timelike};
+
+/// 解析高峰/低谷时区:优先按 IANA 名解析为秒偏移(Asia/Shanghai → 28800);
+/// 解析失败时回退到 tz_offset_hours * 3600 秒偏移。
+fn parse_timezone_offset_secs(name: &str, fallback_offset_h: i64) -> i32 {
+    match name.trim().parse::<chrono_tz::Tz>() {
+        Ok(tz) => {
+            // 取该时区当前 UTC 偏移秒数(DST 下取当前时刻的偏移)。
+            // 通过比较「UTC 总天数+分钟」与「本地总天数+分钟」的差来计算,正确处理跨天(如 UTC 23:xx + 8h → 次日 07:xx)。
+            let utc_now = chrono::Utc::now();
+            let local_now = utc_now.with_timezone(&tz);
+            let utc_days = utc_now.num_days_from_ce();
+            let local_days = local_now.num_days_from_ce();
+            let utc_min = utc_now.hour() as i32 * 60 + utc_now.minute() as i32;
+            let local_min = local_now.hour() as i32 * 60 + local_now.minute() as i32;
+            let offset_secs = ((local_days - utc_days) as i32 * 86400 + (local_min - utc_min) * 60) as i32;
+            tracing::info!("time-of-day policy timezone: {} (UTC{:+}h)", tz.name(), offset_secs / 3600);
+            offset_secs
+        }
+        Err(e) => {
+            let offset_secs = (fallback_offset_h as i32) * 3600;
+            tracing::warn!("timezone '{}' 无法解析(UTC{:+}h): {e},回退到固定偏移", name.trim(), fallback_offset_h);
+            offset_secs
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -96,6 +123,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("cache backend: {}", cfg.cache.kind);
 
     let bind = cfg.server.bind.clone();
+    // 高峰/低谷时区:按 IANA 名解析为偏移秒数(DST 感知),失败回退固定偏移。
+    let tz_offset_secs = parse_timezone_offset_secs(&cfg.defaults.timezone, cfg.defaults.tz_offset_hours);
     let state = Arc::new(AppState {
         config: ArcSwap::from_pointee(cfg),
         routing: ArcSwap::from_pointee(routing),
@@ -107,6 +136,8 @@ async fn main() -> anyhow::Result<()> {
         cache,
         upstream_slots: DashMap::new(),
         upstream_breakers: DashMap::new(),
+        round_robin: DashMap::new(),
+        tz_offset_secs,
         audit_failures: AsyncMutex::new(VecDeque::with_capacity(AUDIT_FAILURE_CAP)),
         metrics: crate::state::MetricsStore::default(),
         request_log: log_store,
@@ -165,8 +196,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/groups", get(admin::list_groups).post(admin::add_group))
         .route("/groups/:id", axum::routing::delete(admin::delete_group))
         .route("/groups/:id/activate", post(admin::activate_group))
+        .route("/groups/:id/strategy", post(admin::set_group_strategy))
         .route("/groups/:id/routes", get(admin::list_routes).post(admin::add_route))
         .route("/routes/:id", axum::routing::delete(admin::delete_route).patch(admin::update_route))
+        .route("/groups/:id/time-rules", get(admin::list_time_rules).post(admin::add_time_rule))
+        .route("/groups/:id/time-rules/:rule_id", axum::routing::delete(admin::delete_time_rule).put(admin::update_time_rule))
         .route("/settings/email", get(admin::get_email_settings).post(admin::save_email_settings))
         .route("/settings/email/test", post(admin::test_email_settings))
         // ---- 上游治理仪表盘 ----

@@ -199,6 +199,9 @@ pub struct Defaults {
     pub concurrency_limit: u32,
     #[serde(default = "default_grant")]
     pub signup_grant_tokens: i64,
+    /// IANA 时区名(高峰/低谷时段判断用),如 "Asia/Shanghai"。解析失败时回退 tz_offset_hours。
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
     #[serde(default = "default_tz")]
     pub tz_offset_hours: i64,
     /// 用户级默认限流(0 = 不限):每分钟最大请求数。
@@ -219,6 +222,7 @@ impl Default for Defaults {
         Self {
             concurrency_limit: default_concurrency(),
             signup_grant_tokens: default_grant(),
+            timezone: default_timezone(),
             tz_offset_hours: default_tz(),
             rpm_limit: default_rpm(),
             tpm_limit: default_tpm(),
@@ -236,6 +240,10 @@ fn default_tpm() -> u32 {
 
 fn default_tz() -> i64 {
     8
+}
+
+fn default_timezone() -> String {
+    "Asia/Shanghai".to_string()
 }
 
 fn default_concurrency() -> u32 {

@@ -42,7 +42,29 @@ export interface ModelRow {
   upstream_model: string;
 }
 
-export interface GroupRow { id: number; name: string; is_active: boolean }
+export interface GroupRow { id: number; name: string; is_active: boolean; strategy: string }
+
+export interface TimeRuleRow {
+  id: number;
+  group_id: number;
+  name: string;
+  weekdays: string;
+  start_time: string;
+  end_time: string;
+  multiplier: number;
+  weight_map: string | null;
+  active: boolean;
+}
+
+export interface TimeRulePayload {
+  name: string;
+  weekdays?: string;
+  start_time: string;
+  end_time: string;
+  multiplier?: number;
+  weight_map?: string | null;
+  active?: boolean;
+}
 
 export interface RouteRow {
   id: number;
@@ -98,6 +120,15 @@ export const api = {
   addGroup: (name: string) => req("/admin/api/groups", { method: "POST", body: JSON.stringify({ name }) }),
   deleteGroup: (id: number) => req(`/admin/api/groups/${id}`, { method: "DELETE" }),
   activateGroup: (id: number) => req(`/admin/api/groups/${id}/activate`, { method: "POST" }),
+  setGroupStrategy: (id: number, strategy: string) =>
+    req(`/admin/api/groups/${id}/strategy`, { method: "POST", body: JSON.stringify({ strategy }) }),
+
+  timeRules: (groupId: number): Promise<{ data: TimeRuleRow[] }> => req(`/admin/api/groups/${groupId}/time-rules`),
+  addTimeRule: (groupId: number, body: TimeRulePayload) =>
+    req(`/admin/api/groups/${groupId}/time-rules`, { method: "POST", body: JSON.stringify(body) }),
+  updateTimeRule: (groupId: number, ruleId: number, body: TimeRulePayload) =>
+    req(`/admin/api/groups/${groupId}/time-rules/${ruleId}`, { method: "PUT", body: JSON.stringify(body) }),
+  deleteTimeRule: (groupId: number, ruleId: number) => req(`/admin/api/groups/${groupId}/time-rules/${ruleId}`, { method: "DELETE" }),
 
   routes: (groupId: number): Promise<{ data: RouteRow[] }> => req(`/admin/api/groups/${groupId}/routes`),
   addRoute: (groupId: number, body: { public_name: string; model_id: number; weight?: number; multiplier?: number }) =>

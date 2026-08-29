@@ -9,6 +9,7 @@ import { api, getToken, setToken, clearToken, KeyInfo, chatStream, ChatMsg, Rewa
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
@@ -157,7 +158,7 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
               </Button>
             </div>
           )}
-          <Input type="password" placeholder={pwPlaceholder} value={password}
+          <PasswordInput placeholder={pwPlaceholder} value={password}
             onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
           {needCode && (
             <Input type="password" placeholder="确认密码" value={confirm}

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
 import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch } from "lucide-react";
-import { api, getToken, setToken, clearToken, UserRow, ModelRow, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt } from "./api";
+import { api, getToken, setToken, clearToken, UserRow, ModelRow, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -11,6 +11,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import PaginationBar from "./PaginationBar";
+import { PasswordInput } from "@/components/ui/password-input";
 
 export default function App() {
   const [authed, setAuthed] = useState(!!getToken());
@@ -36,7 +37,7 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
         <CardHeader><CardTitle className="text-xl">Rel<span className="text-primary">ay</span> 管理后台</CardTitle></CardHeader>
         <CardContent className="space-y-3">
           <Input placeholder="用户名" value={u} onChange={(e) => setU(e.target.value)} />
-          <Input placeholder="密码" type="password" value={p} onChange={(e) => setP(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
+          <PasswordInput placeholder="密码" value={p} onChange={(e) => setP(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
           <Button className="w-full" onClick={submit}>登录</Button>
           {err && <p className="text-sm text-destructive">{err}</p>}
         </CardContent>
@@ -131,7 +132,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
 }
 
 const SOURCE_LABEL: Record<string, string> = {
-  admin: "管理员", phone: "手机号", wechat: "微信", alipay: "支付宝",
+  admin: "管理员", phone: "手机号", wechat: "微信", alipay: "支付宝", email: "邮箱",
 };
 
 function LineChart({ points }: { points: { ts: number; tokens: number }[] }) {
@@ -570,13 +571,13 @@ function ModelsPanel() {
                   <TableCell><Badge variant="muted">{m.kind}</Badge></TableCell>
                   <TableCell className="mono">{m.upstream_model}</TableCell>
                   <TableCell className="mono text-xs">{m.base_url}</TableCell>
-                  <TableCell className="text-right">
+                  <TableCell className="text-right w-[210px]">
                     <div className="flex items-center justify-end gap-2">
                       {(() => {
                         const r = test[m.id];
-                        if (r === "loading") return <span className="text-xs text-muted-foreground">校验中…</span>;
-                        if (r) return <span className={cn("max-w-[180px] truncate text-xs", r.ok ? "text-success" : "text-destructive")} title={r.msg}>{r.ok ? `✓ ${r.msg}` : `✗ ${r.msg}`}</span>;
-                        return null;
+                        if (r === "loading") return <span className="min-w-[64px] text-right text-xs text-muted-foreground">校验中…</span>;
+                        if (r) return <span className={cn("min-w-[64px] max-w-[120px] truncate text-right text-xs", r.ok ? "text-success" : "text-destructive")} title={r.msg}>{r.ok ? `✓ ${r.msg}` : `✗ ${r.msg}`}</span>;
+                        return <span className="min-w-[64px]" />;
                       })()}
                       <RowActions actions={[
                         { label: "校验", icon: <Activity className="h-4 w-4" />, onClick: () => runTest(m.id) },
@@ -613,6 +614,47 @@ function AddModelDialog({ dlg, onClose, onSaved }: { dlg: { edit: ModelRow | nul
     }
   }, [dlg]);
 
+  // 主流供应商模板:选一个自动带出协议 + base_url;选"自定义"则完全手填。
+  const PROVIDER_TEMPLATES: Record<string, { kind: string; base_url: string; hint?: string }> = {
+    custom: { kind: "", base_url: "", hint: "手动填写协议、Base URL 与上游模型名" },
+    anthropic: { kind: "anthropic", base_url: "https://api.anthropic.com", hint: "v1/messages,填模型名如 claude-sonnet-4-5" },
+    openai: { kind: "openai", base_url: "https://api.openai.com/v1", hint: "填模型名如 gpt-4o" },
+    deepseek: { kind: "openai", base_url: "https://api.deepseek.com/v1", hint: "填模型名如 deepseek-chat" },
+    qwen: { kind: "openai", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", hint: "阿里通义,填模型名如 qwen-max" },
+    zhipu: { kind: "openai", base_url: "https://open.bigmodel.cn/api/paas/v4", hint: "智谱 GLM,填模型名如 glm-4-plus" },
+    moonshot: { kind: "openai", base_url: "https://api.moonshot.cn/v1", hint: "Kimi,填模型名如 kimi-k2-0905-preview" },
+    qianfan: { kind: "openai", base_url: "https://qianfan.baidubce.com/v2", hint: "百度千帆,填模型名如 ernie-4.0-8k" },
+    hunyuan: { kind: "openai", base_url: "https://api.hunyuan.cloud.tencent.com/v1", hint: "腾讯混元,填模型名如 hunyuan-turbo" },
+    ollama: { kind: "openai", base_url: "http://localhost:11434/v1", hint: "本地 Ollama,填模型名如 llama3" },
+  };
+  const [providerAc, setProviderAc] = useState<string>(""); // 当前选中模板(ac 避免与 providers 概念混淆)
+  const applyTemplate = (key: string) => {
+    setProviderAc(key);
+    if (key !== "custom") {
+      const t = PROVIDER_TEMPLATES[key];
+      setKind(t.kind);
+      setBaseUrl(t.base_url);
+    }
+  };
+  const suggestUpstream = (key: string): string => {
+    switch (key) {
+      case "anthropic": return "claude-sonnet-4-5";
+      case "openai": return "gpt-4o-mini";
+      case "deepseek": return "deepseek-chat";
+      case "qwen": return "qwen-plus";
+      case "zhipu": return "glm-4-flash";
+      case "moonshot": return "moonshot-v1-8k";
+      case "qianfan": return "ernie-3.5-8k";
+      case "hunyuan": return "hunyuan-turbo";
+      case "ollama": return "llama3";
+      default: return "";
+    }
+  };
+  const applyTemplateWithModel = (key: string) => {
+    applyTemplate(key);
+    if (key !== "custom" && !edit) setUpstream(suggestUpstream(key));
+  };
+
   const submit = async () => {
     setErr("");
     try {
@@ -633,6 +675,25 @@ function AddModelDialog({ dlg, onClose, onSaved }: { dlg: { edit: ModelRow | nul
         <div className="space-y-3">
           <div><label className="mb-1 block text-xs text-muted-foreground">备注/显示名(可选)</label>
             <Input placeholder="如 智谱 GLM-4" value={label} onChange={(e) => setLabel(e.target.value)} autoFocus /></div>
+          {!edit && (
+            <div><label className="mb-1 block text-xs text-muted-foreground">供应商模板(选内置自动带出协议与地址,亦可用自定义)</label>
+              <select value={providerAc || "custom"} onChange={(e) => applyTemplateWithModel(e.target.value)} className={sel}>
+                <option value="custom">自定义(手动填写)</option>
+                <option value="anthropic">Anthropic 官方</option>
+                <option value="openai">OpenAI 官方</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="qwen">通义千问(阿里)</option>
+                <option value="zhipu">智谱 GLM</option>
+                <option value="moonshot">Moonshot Kimi</option>
+                <option value="qianfan">百度千帆</option>
+                <option value="hunyuan">腾讯混元</option>
+                <option value="ollama">Ollama 本地</option>
+              </select>
+              {PROVIDER_TEMPLATES[providerAc || "custom"]?.hint && (
+                <p className="mt-1 text-[11px] text-muted-foreground">{PROVIDER_TEMPLATES[providerAc || "custom"].hint}</p>
+              )}
+            </div>
+          )}
           <div><label className="mb-1 block text-xs text-muted-foreground">协议</label>
             <select value={kind} onChange={(e) => setKind(e.target.value)} className={sel}>
               <option value="openai">openai 兼容</option><option value="anthropic">anthropic</option>
@@ -642,7 +703,7 @@ function AddModelDialog({ dlg, onClose, onSaved }: { dlg: { edit: ModelRow | nul
           <div><label className="mb-1 block text-xs text-muted-foreground">API 密钥{edit ? "(留空保持不变)" : "(可选,留空则不加鉴权头)"}</label>
             <Input type="password" placeholder={edit ? "留空保持原密钥" : "sk-...(本地无鉴权服务可留空)"} value={apiKey} onChange={(e) => setApiKey(e.target.value)} /></div>
           <div><label className="mb-1 block text-xs text-muted-foreground">上游模型名(供应商真实模型名)</label>
-            <Input placeholder="如 deepseek-chat" value={upstream} onChange={(e) => setUpstream(e.target.value)} /></div>
+            <Input placeholder={edit ? "" : "如 deepseek-chat"} value={upstream} onChange={(e) => setUpstream(e.target.value)} /></div>
           {err && <p className="text-sm text-destructive">{err}</p>}
         </div>
         <div className="flex justify-end gap-2">
@@ -659,9 +720,11 @@ function GroupsPanel() {
   const [models, setModels] = useState<ModelRow[]>([]);
   const [sel, setSel] = useState<number | null>(null);
   const [routes, setRoutes] = useState<RouteRow[]>([]);
+  const [timeRules, setTimeRules] = useState<TimeRuleRow[]>([]);
   const [gq, setGq] = useState("");
   const [groupOpen, setGroupOpen] = useState(false);
   const [routeDlg, setRouteDlg] = useState<{ edit: RouteRow | null } | null>(null);
+  const [timeRuleDlg, setTimeRuleDlg] = useState<{ edit: TimeRuleRow | null } | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
 
   const loadGroups = async () => {
@@ -670,8 +733,9 @@ function GroupsPanel() {
     if (sel == null && g.data.length) setSel(g.data[0].id);
   };
   const loadRoutes = async (gid: number) => { setRoutes((await api.routes(gid)).data); };
+  const loadTimeRules = async (gid: number) => { setTimeRules((await api.timeRules(gid)).data); };
   useEffect(() => { loadGroups(); }, []);
-  useEffect(() => { if (sel != null) loadRoutes(sel); }, [sel]);
+  useEffect(() => { if (sel != null) { loadRoutes(sel); loadTimeRules(sel); } }, [sel]);
 
   const createGroup = async (name: string) => { const r = await api.addGroup(name); await loadGroups(); setSel(r.id); };
   const setActive = async (g: GroupRow) => { if (!g.is_active) { await api.activateGroup(g.id); loadGroups(); } };
@@ -684,6 +748,21 @@ function GroupsPanel() {
     title: "删除该路由?",
     action: async () => { await api.deleteRoute(id); if (sel != null) loadRoutes(sel); },
   });
+  const setStrategy = async (gid: number, strategy: string) => {
+    await api.setGroupStrategy(gid, strategy);
+    await loadGroups();
+  };
+  const delTimeRule = (id: number) => setConfirm({
+    title: "删除该时段规则?",
+    desc: "删除后该时段不再生效(回到默认倍率与权重)。",
+    action: async () => { if (sel != null) { await api.deleteTimeRule(sel, id); loadTimeRules(sel); } },
+  });
+  const STRATEGY_LABEL: Record<string, string> = {
+    weighted_random: "加权随机（默认）",
+    weighted_round_robin: "加权轮询（预留）",
+    round_robin: "简单轮询（预留）",
+  };
+  const curStrategy = groups.find((g) => g.id === sel)?.strategy ?? "weighted_random";
   const filteredGroups = groups.filter((g) => !gq.trim() || g.name.includes(gq.trim()));
 
   return (
@@ -722,12 +801,60 @@ function GroupsPanel() {
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
             <CardTitle className="text-base">组内路由 {sel != null && `· ${groups.find((g) => g.id === sel)?.name ?? ""}`}</CardTitle>
-            {sel != null && <Button size="sm" onClick={() => setRouteDlg({ edit: null })}><Plus className="h-4 w-4" />添加路由</Button>}
+            <div className="flex items-center gap-2">
+              {sel != null && (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-muted-foreground">负载策略</span>
+                  <select value={curStrategy} onChange={(e) => setStrategy(sel, e.target.value)} className="h-8 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring">
+                    <option value="weighted_random">加权随机</option>
+                    <option value="weighted_round_robin">加权轮询</option>
+                    <option value="round_robin">简单轮询</option>
+                  </select>
+                </div>
+              )}
+              {sel != null && <Button size="sm" onClick={() => setRouteDlg({ edit: null })}><Plus className="h-4 w-4" />添加路由</Button>}
+            </div>
           </div>
         </CardHeader>
         <CardContent className="min-h-0 flex-1 overflow-auto">
           {sel == null ? <p className="text-sm text-muted-foreground">先选择左侧一个模型组</p> : (
             <>
+              <div className="mb-4 rounded-lg border border-border/60 bg-card/40 p-3">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Clock className="h-4 w-4 text-muted-foreground" />
+                    <span className="text-sm font-medium">高峰/低谷时段策略</span>
+                    <span className="hidden text-[11px] text-muted-foreground sm:inline">按 星期+时间段 驱动 计费倍率 与 路由权重</span>
+                  </div>
+                  <Button size="sm" variant="outline" onClick={() => setTimeRuleDlg({ edit: null })}><Plus className="h-4 w-4" />添加时段</Button>
+                </div>
+                {timeRules.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">尚未配置时段规则。未命中时段时,使用默认倍率 ×1.0 与默认权重。</p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {timeRules.map((tr) => (
+                      <div key={tr.id} className="flex items-center gap-2 rounded-md border border-border/60 px-2 py-1.5">
+                        <span className={cn("h-2 w-2 shrink-0 rounded-full", tr.active ? "bg-emerald-500" : "bg-muted")} />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-center gap-2">
+                            <span className="text-sm font-medium">{tr.name}</span>
+                            <Badge variant={tr.multiplier === 1 ? "muted" : "default"}>×{tr.multiplier}</Badge>
+                          </span>
+                          <span className="block truncate text-[11px] text-muted-foreground">
+                            {tr.weekdays === "0-6" ? "每天" : "星期" + tr.weekdays} {tr.start_time}~{tr.end_time}
+                            {!tr.active && <span className="ml-1 text-destructive">(停用)</span>}
+                          </span>
+                        </span>
+                        <span className="hidden shrink-0 text-[11px] text-muted-foreground md:inline">
+                          {tr.weight_map && tr.weight_map !== "{}" ? "含权重覆盖" : "仅倍率"}
+                        </span>
+                        <button className="text-muted-foreground transition-colors hover:text-foreground" title="编辑" onClick={() => setTimeRuleDlg({ edit: tr })}><Pencil className="h-3.5 w-3.5" /></button>
+                        <button className="text-muted-foreground transition-colors hover:text-destructive" title="删除" onClick={() => delTimeRule(tr.id)}><Trash2 className="h-3.5 w-3.5" /></button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
               <p className="mb-3 text-xs text-muted-foreground">用户请求「对外模型名」→ 路由到指定模型;响应里保留用户传的名字。同名多条按权重分流。</p>
               <Table>
                 <TableHeader><TableRow>
@@ -757,6 +884,7 @@ function GroupsPanel() {
       </Card>
 
       {sel != null && <AddRouteDialog dlg={routeDlg} groupId={sel} models={models} onClose={() => setRouteDlg(null)} onSaved={() => loadRoutes(sel)} />}
+      {sel != null && <TimeRuleDialog dlg={timeRuleDlg} groupId={sel} onClose={() => setTimeRuleDlg(null)} onSaved={() => loadTimeRules(sel)} />}
       <AddGroupDialog open={groupOpen} onClose={() => setGroupOpen(false)} onCreate={createGroup} />
       <ConfirmDialog confirm={confirm} onClose={() => setConfirm(null)} />
     </div>
@@ -840,6 +968,116 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>取消</Button>
           <Button onClick={submit} disabled={!publicName.trim() || modelId === ""}><Plus className="h-4 w-4" />{edit ? "保存" : "添加"}</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function TimeRuleDialog({ dlg, groupId, onClose, onSaved }: {
+  dlg: { edit: TimeRuleRow | null } | null; groupId: number; onClose: () => void; onSaved: () => void;
+}) {
+  const open = !!dlg;
+  const edit = dlg?.edit ?? null;
+  const WD = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+  const [name, setName] = useState("");
+  const [days, setDays] = useState<boolean[]>([true, true, true, true, true, true, true]);
+  const [start, setStart] = useState("09:00");
+  const [end, setEnd] = useState("17:00");
+  const [mult, setMult] = useState("1.0");
+  const [weightMap, setWeightMap] = useState("");
+  const [active, setActive] = useState(true);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    if (open) {
+      setName(edit?.name ?? "");
+      setStart(edit?.start_time ?? "09:00");
+      setEnd(edit?.end_time ?? "17:00");
+      setMult(String(edit?.multiplier ?? 1));
+      setWeightMap(edit?.weight_map ?? "");
+      setActive(edit ? edit.active : true);
+      // 解析 weekdays:"0-6" 或 "1-5" / "0,6" / "5"
+      const bits = [false, false, false, false, false, false, false];
+      if (edit) {
+        const spec = edit.weekdays || "0-6";
+        for (const part of spec.split(",")) {
+          if (part.includes("-")) {
+            const [a, b] = part.split("-").map((x) => Number(x));
+            for (let w = Math.min(a, b); w <= Math.max(a, b); w++) bits[w] = true;
+          } else if (part !== "") bits[Number(part)] = true;
+        }
+      } else {
+        bits.fill(true);
+      }
+      setDays(bits);
+      setErr("");
+    }
+  }, [dlg]);
+  const weekdaysFromBits = () => days.map((on, i) => (on ? String(i) : "")).filter(Boolean).join(",");
+  const submit = async () => {
+    setErr("");
+    if (!name.trim()) { setErr("请填写时段名"); return; }
+    const daysSpec = weekdaysFromBits();
+    if (!daysSpec) { setErr("请至少选择一个星期"); return; }
+    if (start === end) { setErr("开始与结束不能相同"); return; }
+    try {
+      const body: TimeRulePayload = {
+        name: name.trim(), weekdays: daysSpec, start_time: start, end_time: end,
+        multiplier: Number(mult) || 1, active,
+        weight_map: weightMap.trim() === "" ? null : weightMap.trim(),
+      };
+      if (edit) await api.updateTimeRule(groupId, edit.id, body); else await api.addTimeRule(groupId, body);
+      onSaved(); onClose();
+    } catch (e: any) { setErr(e.message); }
+  };
+  const sel = "h-9 w-full rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
+  const inp = "h-9 w-full rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>{edit ? "编辑时段规则" : "添加时段规则"}</DialogTitle>
+          <DialogDescription>命中该时间段时:计费倍率按 ×multiplier 计算,并可覆盖各模型的路由权重(高峰/低谷策略)。</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="grid grid-cols-3 gap-3">
+            <div><label className="mb-1 block text-xs text-muted-foreground">时段名</label>
+              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="高峰" /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">开始 HH:MM</label>
+              <input type="time" value={start} onChange={(e) => setStart(e.target.value)} className={inp} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">结束 HH:MM</label>
+              <input type="time" value={end} onChange={(e) => setEnd(e.target.value)} className={inp} /></div>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-muted-foreground">生效星期</label>
+            <div className="flex flex-wrap gap-1.5">
+              {WD.map((w, i) => (
+                <button key={w} type="button" onClick={() => setDays((d) => d.map((x, j) => (j === i ? !x : x)))}
+                  className={cn("rounded-md border px-2 py-1 text-xs transition-colors", days[i] ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground")}>
+                  {w}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="mb-1 block text-xs text-muted-foreground">计费倍率系数</label>
+              <Input value={mult} onChange={(e) => setMult(e.target.value)} placeholder="如高峰 1.3 / 低谷 0.7" /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">启用</label>
+              <button type="button" onClick={() => setActive(!active)} className={cn("mt-1 flex h-8 items-center gap-2 rounded-lg border px-3 text-xs", active ? "border-primary bg-primary/10 text-primary" : "border-input text-muted-foreground")}>
+                <span className={cn("h-2.5 w-2.5 rounded-full", active ? "bg-emerald-500" : "bg-muted")} />{active ? "启用" : "停用"}
+              </button></div>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs text-muted-foreground">路由权重覆盖(可选,JSON)</label>
+            <textarea value={weightMap} onChange={(e) => setWeightMap(e.target.value)} rows={3}
+              placeholder={'{"deepseek-chat":{"1":30,"2":70}}\n对外名 -> {模型ID: 权重}。留空 = 仅适用倍率'}
+              className="w-full rounded-lg border border-input bg-card p-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring" />
+          </div>
+          {err && <p className="text-sm text-destructive">{err}</p>}
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>取消</Button>
+          <Button onClick={submit} disabled={!name.trim()}><Plus className="h-4 w-4" />{edit ? "保存" : "添加"}</Button>
         </div>
       </DialogContent>
     </Dialog>
