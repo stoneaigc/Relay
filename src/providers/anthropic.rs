@@ -4,6 +4,7 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 /// 向 Anthropic Messages API 发起请求,返回原始流式/非流式响应。
+/// 传输失败(连接/超时)、429 与 5xx 记作可重试的 `Unavailable`;其余错误为非重试 `Upstream`。
 pub async fn messages(
     state: &AppState,
     base_url: &str,
@@ -23,11 +24,14 @@ pub async fn messages(
         .json(&body)
         .send()
         .await
-        .map_err(|e| ApiError::Upstream(e.to_string()))?;
+        .map_err(|e| ApiError::Unavailable(format!("transport: {e}")))?;
 
     if !resp.status().is_success() {
-        let code = resp.status();
+        let code = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
+        if code == 429 || code >= 500 {
+            return Err(ApiError::Unavailable(format!("{code}: {text}")));
+        }
         return Err(ApiError::Upstream(format!("{code}: {text}")));
     }
     Ok(resp)

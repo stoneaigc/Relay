@@ -1054,17 +1054,6 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::config::ProviderKind;
-    use std::time::Duration;
-
-    fn make_state() -> Arc<AppState> {
-        // 用最小的字段构造(需要 Routing / usage_tx / usage_rx / breaker_store / ...)。
-        // 简化:直接调用 metrics 独立方法即可,不需要完整的 AppState。
-        // 但我们要测整体 query_metrics,所以还是需要整个 AppState。
-        // 我们在这里直接用 MetricsStore 本身做白盒测试 + 不启动 Axum 的 AppState 假构造。
-        // 为了不过度依赖外部字段初始化,我们直接测 MetricsBucket/TimeBuckets/MetricsStore 三层独立正确性,
-        // 然后再对 AppState 的 query_metrics JSON 输出做一次黑盒测试。
-        unimplemented!()
-    }
 
     // --- 白盒 1:MetricsBucket 计数与分位 ---
     #[test]

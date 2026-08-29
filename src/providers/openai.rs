@@ -5,6 +5,7 @@ use crate::state::AppState;
 
 /// 向 OpenAI 兼容上游发起 chat/completions 请求,返回原始流式/非流式响应。
 /// 仅改写 `model` 为上游真名,并在流式时打开 `include_usage` 以便计费。
+/// 传输失败(连接/超时)、429 与 5xx 记作可重试的 `Unavailable`;其余错误为非重试 `Upstream`。
 pub async fn chat_completions(
     state: &AppState,
     base_url: &str,
@@ -30,11 +31,14 @@ pub async fn chat_completions(
         .json(&body)
         .send()
         .await
-        .map_err(|e| ApiError::Upstream(e.to_string()))?;
+        .map_err(|e| ApiError::Unavailable(format!("transport: {e}")))?;
 
     if !resp.status().is_success() {
-        let code = resp.status();
+        let code = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
+        if code == 429 || code >= 500 {
+            return Err(ApiError::Unavailable(format!("{code}: {text}")));
+        }
         return Err(ApiError::Upstream(format!("{code}: {text}")));
     }
 

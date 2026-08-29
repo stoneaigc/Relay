@@ -28,6 +28,9 @@ pub enum ApiError {
     BadRequest(String),
     #[error("upstream error: {0}")]
     Upstream(String),
+    /// 上游可重试错误(连接失败 / 超时 / 5xx / 429)。failover 时应切换下一目标。
+    #[error("upstream unavailable: {0}")]
+    Unavailable(String),
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -39,7 +42,9 @@ impl ApiError {
             ApiError::AccountDisabled => StatusCode::FORBIDDEN,
             ApiError::InsufficientBalance => StatusCode::PAYMENT_REQUIRED,
             ApiError::ModelNotFound(_) | ApiError::ModelNotAllowed(_) => StatusCode::NOT_FOUND,
-            ApiError::NoTarget(_) | ApiError::Upstream(_) => StatusCode::BAD_GATEWAY,
+            ApiError::NoTarget(_) => StatusCode::BAD_GATEWAY,
+            ApiError::Upstream(_) => StatusCode::BAD_GATEWAY,
+            ApiError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -55,6 +60,34 @@ impl ApiError {
             ApiError::TooManyRequests => "rate_limit_error",
             ApiError::BadRequest(_) => "invalid_request_error",
             ApiError::NoTarget(_) | ApiError::Upstream(_) => "upstream_error",
+            ApiError::Unavailable(_) => "upstream_error",
+            ApiError::Internal(_) => "internal_error",
+        }
+    }
+}
+
+impl ApiError {
+    /// 渲染成 Anthropic 规范错误体(供 /v1/messages 入口使用)。
+    pub fn into_anthropic_response(self) -> Response {
+        let body = json!({
+            "type": "error",
+            "error": {
+                "type": self.anthropic_error_type(),
+                "message": self.to_string(),
+            }
+        });
+        (self.status(), Json(body)).into_response()
+    }
+
+    fn anthropic_error_type(&self) -> &'static str {
+        match self {
+            ApiError::Unauthorized | ApiError::InvalidKey => "authentication_error",
+            ApiError::AccountDisabled => "permission_error",
+            ApiError::InsufficientBalance => "api_error",
+            ApiError::ModelNotFound(_) | ApiError::ModelNotAllowed(_) => "not_found_error",
+            ApiError::TooManyRequests => "rate_limit_error",
+            ApiError::BadRequest(_) => "invalid_request_error",
+            ApiError::NoTarget(_) | ApiError::Upstream(_) | ApiError::Unavailable(_) => "api_error",
             ApiError::Internal(_) => "internal_error",
         }
     }

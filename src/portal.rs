@@ -96,9 +96,9 @@ pub async fn register(
         _ => return Err(ApiError::BadRequest("验证码错误或已过期".into())),
     }
     let email = email.as_str();
-    let (grant, limit, secret, ttl) = {
+    let (grant, limit, rpm, tpm, secret, ttl) = {
         let cfg = state.config();
-        (cfg.defaults.signup_grant_tokens, cfg.defaults.concurrency_limit, cfg.auth.jwt_secret.clone(), cfg.auth.session_ttl_secs)
+        (cfg.defaults.signup_grant_tokens, cfg.defaults.concurrency_limit, cfg.defaults.rpm_limit, cfg.defaults.tpm_limit, cfg.auth.jwt_secret.clone(), cfg.auth.session_ttl_secs)
     };
     let pwhash = storage::hash_password(&body.password);
     // 注册默认绑定到激活(默认)模型组;无激活组则不绑定。
@@ -108,7 +108,9 @@ pub async fn register(
     let id = storage::admin_create_user(&state.db, email, &pwhash, Some(email), None, grant, active_group, "email")
         .await
         .map_err(|_| ApiError::BadRequest("该邮箱已注册".into()))?;
-    state.users.insert(id, Arc::new(UserState::new(id, grant, limit, 0, 1.0, active_group.unwrap_or(0))));
+    let us = Arc::new(UserState::new(id, grant, limit, 0, 1.0, active_group.unwrap_or(0)));
+    us.set_limits(rpm, tpm);
+    state.users.insert(id, us);
     let token = jwt::issue(&secret, &id.to_string(), "portal", ttl)?;
     Ok(Json(json!({ "token": token, "user": { "id": id, "email": email } })))
 }

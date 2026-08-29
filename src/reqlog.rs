@@ -1,5 +1,5 @@
-use std::pin::Pin;
 use std::future::Future;
+use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +16,7 @@ pub struct RequestAttempt {
     pub upstream_model: String,
     /// 该候选在路由中的权重。
     pub weight: u32,
-    /// 尝试结果状态:200=成功;503=上游不可用(UNAVAILABLE);-1=被熔断跳过(未实际调用);4xx/500=其它错误。
+    /// 200=成功; 503=不可用; -1=熔断跳过; 4xx/500=其它错误; 0=初始状态(候选列表)。
     pub status: i32,
     /// 本次尝试耗时(ms)。
     pub latency_ms: u32,
@@ -25,9 +25,8 @@ pub struct RequestAttempt {
 }
 
 /// 一次完整请求的链路日志(成功 + 失败均记录)。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestLog {
-    /// 本次请求唯一 ID(UUID v4 字符串)。
     pub request_id: String,
     pub user_id: String,
     /// chat | messages。
@@ -37,13 +36,13 @@ pub struct RequestLog {
     pub stream: bool,
     /// resolve_all 生成的候选顺序(加权命中 + failover 次序)。
     pub candidates: Vec<RequestAttempt>,
-    /// 每个候选的实际尝试结果(与 candidates 对应的 attempts;熔断跳过不入此列,记在 candidates 的 status 里)。
+    /// 每个候选的实际尝试结果。
     pub attempts: Vec<RequestAttempt>,
     /// 最终命中的上游 kind(失败时为 null)。
     pub final_kind: Option<String>,
     /// 最终命中的上游模型名(失败时为 null)。
     pub final_upstream_model: Option<String>,
-    /// 最终状态:200=成功;非 200=失败。
+    /// 最终状态:200=成功;非200=失败。
     pub final_status: i32,
     /// 总耗时(ms)。
     pub latency_ms: u32,
@@ -61,15 +60,13 @@ fn kind_str(kind: ProviderKind) -> &'static str {
     }
 }
 
-/// 请求链路日志的存储后端抽象。当前实现:SQLite(默认);ES 预留。
-/// 使用 `Pin<Box<dyn Future>>` 以保持 dyn-compatible(可供 Arc<dyn ...> 存储)。
+/// 请求链路日志的存储后端抽象。
 pub trait RequestLogStore: Send + Sync {
-    /// 写入一条请求链路日志。
     fn write(
         &self,
         log: &RequestLog,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>>;
-    /// 最近 N 条(倒序)。`q` 可为空 = 全部;否则匹配 request_id / 模型。
+
     fn recent(
         &self,
         q: &str,
@@ -77,7 +74,8 @@ pub trait RequestLogStore: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<RequestLog>>> + Send + '_>>;
 }
 
-/// 默认实现:写入 SQLite `request_logs` 表。
+// ======================== SQLite 实现 ========================
+
 pub struct SqliteRequestLogStore {
     db: Db,
 }
@@ -217,7 +215,8 @@ fn parse_ts(created_at: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/// 预留实现:接到 Elasticsearch,暂未启用。
+// ======================== ES 占位实现 ========================
+
 pub struct EsRequestLogStore {
     _url: String,
 }
@@ -233,7 +232,7 @@ impl RequestLogStore for EsRequestLogStore {
         &self,
         _log: &RequestLog,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>> {
-        Box::pin(async move {
+        Box::pin(async {
             anyhow::bail!("elasticsearch request-log store is not implemented yet; use sqlite")
         })
     }
@@ -243,13 +242,15 @@ impl RequestLogStore for EsRequestLogStore {
         _q: &str,
         _limit: u32,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<RequestLog>>> + Send + '_>> {
-        Box::pin(async move {
+        Box::pin(async {
             anyhow::bail!("elasticsearch request-log store is not implemented yet; use sqlite")
         })
     }
 }
 
-/// 按 `Resolved`(候选)构造一个待尝试的 attempt 条目。
+// ======================== 工具函数 ========================
+
+/// 按 Resolved 构造一个待尝试的 attempt 条目。
 pub fn candidate_attempt(
     kind: ProviderKind,
     base_url: &str,
@@ -264,5 +265,91 @@ pub fn candidate_attempt(
         status: 0,
         latency_ms: 0,
         error: String::new(),
+    }
+}
+
+// ======================== 单元测试 ========================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn candidate_attempt_fields() {
+        let a = candidate_attempt(ProviderKind::Openai, "https://api.openai.com", "gpt-4", 200);
+        assert_eq!(a.kind, "openai");
+        assert_eq!(a.base_url, "https://api.openai.com");
+        assert_eq!(a.upstream_model, "gpt-4");
+        assert_eq!(a.weight, 200);
+        assert_eq!(a.status, 0);
+        assert_eq!(a.latency_ms, 0);
+        assert!(a.error.is_empty());
+    }
+
+    #[test]
+    fn request_attempt_json_roundtrip() {
+        let a = RequestAttempt {
+            kind: "anthropic".into(),
+            base_url: "https://api.anthropic.com".into(),
+            upstream_model: "claude-3".into(),
+            weight: 100,
+            status: 200,
+            latency_ms: 42,
+            error: String::new(),
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        let de: RequestAttempt = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.kind, "anthropic");
+        assert_eq!(de.status, 200);
+        assert_eq!(de.latency_ms, 42);
+    }
+
+    #[test]
+    fn request_log_json_roundtrip() {
+        let log = RequestLog {
+            request_id: "req_test123".into(),
+            user_id: "user-uuid".into(),
+            path: "chat".into(),
+            requested_model: "model-a".into(),
+            stream: false,
+            candidates: vec![RequestAttempt {
+                kind: "openai".into(),
+                base_url: "http://localhost".into(),
+                upstream_model: "gpt-4".into(),
+                weight: 100,
+                status: 0,
+                latency_ms: 0,
+                error: String::new(),
+            }],
+            attempts: vec![RequestAttempt {
+                kind: "openai".into(),
+                base_url: "http://localhost".into(),
+                upstream_model: "gpt-4".into(),
+                weight: 100,
+                status: 200,
+                latency_ms: 42,
+                error: String::new(),
+            }],
+            final_kind: Some("openai".into()),
+            final_upstream_model: Some("gpt-4".into()),
+            final_status: 200,
+            latency_ms: 42,
+            input_tokens: 12,
+            output_tokens: 8,
+            charged_tokens: 20,
+            ts: 1726000000,
+        };
+        let json = serde_json::to_string(&log).unwrap();
+        let de: RequestLog = serde_json::from_str(&json).unwrap();
+        assert_eq!(de.request_id, "req_test123");
+        assert_eq!(de.candidates.len(), 1);
+        assert_eq!(de.attempts[0].status, 200);
+        assert_eq!(de.charged_tokens, 20);
+    }
+
+    #[test]
+    fn kind_str_mapping() {
+        assert_eq!(kind_str(ProviderKind::Openai), "openai");
+        assert_eq!(kind_str(ProviderKind::Anthropic), "anthropic");
     }
 }

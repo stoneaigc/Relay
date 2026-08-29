@@ -204,7 +204,7 @@ pub async fn run_chat(
     let user_id_str = user.id.to_string();
     let mut final_kind: Option<String> = None;
     let mut final_upstream: Option<String> = None;
-    let mut final_status: i32 = 0;
+    let final_status: i32 = 200;
     for r in &candidates {
         let kind = r.kind;
         let (provider_name, base_url, api_key, upstream_model, multiplier) =
@@ -241,7 +241,6 @@ pub async fn run_chat(
                         state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
                         final_kind = Some(match kind { ProviderKind::Openai => "openai".into(), ProviderKind::Anthropic => "anthropic".into() });
                         final_upstream = Some(upstream_model.clone());
-                        final_status = 200;
                         attempts.push(RequestAttempt {
                             kind: "openai".into(),
                             base_url: base_url.clone(),
@@ -271,7 +270,6 @@ pub async fn run_chat(
                         state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
                         final_kind = Some("openai".into());
                         final_upstream = Some(upstream_model.clone());
-                        final_status = 200;
                         attempts.push(RequestAttempt {
                             kind: "openai".into(),
                             base_url: base_url.clone(),
@@ -316,7 +314,6 @@ pub async fn run_chat(
                     Err(e) => {
                         // 非重试错误(4xx / 解析错 / 权限不足 ...):记 per-upstream + 全局 fail_other 后直接返回
                         state.record_metrics_request(Some(&ukey), 400, up_start.elapsed()).await;
-                        final_status = 400;
                         attempts.push(RequestAttempt {
                             kind: "openai".into(),
                             base_url: base_url.clone(),
@@ -348,7 +345,6 @@ pub async fn run_chat(
                         state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
                         final_kind = Some("anthropic".into());
                         final_upstream = Some(upstream_model.clone());
-                        final_status = 200;
                         attempts.push(RequestAttempt {
                             kind: "anthropic".into(),
                             base_url: base_url.clone(),
@@ -378,7 +374,6 @@ pub async fn run_chat(
                         state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
                         final_kind = Some("anthropic".into());
                         final_upstream = Some(upstream_model.clone());
-                        final_status = 200;
                         attempts.push(RequestAttempt {
                             kind: "anthropic".into(),
                             base_url: base_url.clone(),
@@ -698,7 +693,7 @@ pub async fn run_messages(
     let user_id_str = user.id.to_string();
     let mut final_kind: Option<String> = None;
     let mut final_upstream: Option<String> = None;
-    let mut final_status: i32 = 0;
+    let final_status: i32 = 200;
     for r in &candidates {
         let kind = r.kind;
         let (provider_name, base_url, api_key, upstream_model, multiplier) =
@@ -734,7 +729,6 @@ pub async fn run_messages(
                         state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
                         final_kind = Some("anthropic".into());
                         final_upstream = Some(upstream_model.clone());
-                        final_status = 200;
                         attempts.push(RequestAttempt {
                             kind: "anthropic".into(),
                             base_url: base_url.clone(),
@@ -758,7 +752,6 @@ pub async fn run_messages(
                         state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
                         final_kind = Some("anthropic".into());
                         final_upstream = Some(upstream_model.clone());
-                        final_status = 200;
                         attempts.push(RequestAttempt {
                             kind: "anthropic".into(),
                             base_url: base_url.clone(),
@@ -826,7 +819,6 @@ pub async fn run_messages(
                         state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
                         final_kind = Some("openai".into());
                         final_upstream = Some(upstream_model.clone());
-                        final_status = 200;
                         attempts.push(RequestAttempt {
                             kind: "openai".into(),
                             base_url: base_url.clone(),
@@ -850,7 +842,6 @@ pub async fn run_messages(
                         state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_OK, up_start.elapsed()).await;
                         final_kind = Some("openai".into());
                         final_upstream = Some(upstream_model.clone());
-                        final_status = 200;
                         attempts.push(RequestAttempt {
                             kind: "openai".into(),
                             base_url: base_url.clone(),
