@@ -217,7 +217,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const sidebar = (
     <>
       <div className="flex items-center justify-between px-4 py-4">
-        <div className="text-lg font-bold">Run<span className="text-primary">API</span></div>
+        <div className="text-lg font-bold">Rel<span className="text-primary">ay</span></div>
         <button className="md:hidden" onClick={() => setMobileOpen(false)}><X className="h-5 w-5" /></button>
       </div>
       <nav className="flex-1 space-y-1 px-2">

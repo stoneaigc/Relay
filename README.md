@@ -229,4 +229,4 @@ deploy/          安装脚本 + systemd 模板
 
 ## License
 
-MIT（占位，发布前确认）。
+本项目采用 [MIT License](LICENSE) 开源协议（Copyright © 2026 stoneaigc）。

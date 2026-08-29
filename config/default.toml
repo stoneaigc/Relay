@@ -35,8 +35,9 @@ jwt_secret = "dev-secret-change-me"
 session_ttl_secs = 604800
 
 [admin]
+# 注意:默认凭据仅用于首次启动。生产务必通过环境变量 RELAY_ADMIN__USERNAME / RELAY_ADMIN__PASSWORD 覆盖。
 username = "admin"
-password = "Relay@1"
+password = "Relay@123"
 
 # 邮箱验证码 SMTP。smtp_host 为空=开发模式(验证码打日志并在响应里返回)。
 # 端口:465=隐式 TLS(SSL),587/25=STARTTLS,代码按端口自动选择。
