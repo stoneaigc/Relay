@@ -1244,28 +1244,27 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
               {batchMode && (
                 <div className="space-y-2">
                   <label className="block text-xs font-medium text-muted-foreground">配置每条路由</label>
-                  <div className="max-h-64 space-y-2 overflow-y-auto rounded-lg border p-3">
+                  <div className="max-h-64 overflow-y-auto rounded-lg border p-3">
+                    {/* 表头 */}
+                    <div className="mb-1 grid grid-cols-[1fr_auto_120px_70px_40px] items-center gap-2 text-[10px] text-muted-foreground">
+                      <span>对外模型名</span><span/>
+                      <span className="text-center">权重</span><span className="text-center">倍率</span><span/>
+                    </div>
                     {[...selectedModels].map(id => {
                       const m = models.find(x => x.id === id);
                       const row = routeRows.get(id);
                       if (!m || !row) return null;
                       return (
-                        <div key={id} className="grid grid-cols-[1fr_120px_70px_70px] items-center gap-2 text-sm">
-                          <div>
-                            <div className="text-xs text-muted-foreground">{m.label || m.upstream_model}</div>
-                            <Input value={row.public_name} onChange={(e) => updateRow(id, "public_name", e.target.value)} placeholder="对外模型名" className="h-8 text-xs" />
+                        <div key={id} className="grid grid-cols-[1fr_auto_120px_70px_40px] items-center gap-2 py-1 text-sm">
+                          <Input value={row.public_name} onChange={(e) => updateRow(id, "public_name", e.target.value)} placeholder="如 chat / fast" className="h-8 text-xs" />
+                          <span className="text-muted-foreground">→</span>
+                          <div className="flex items-center gap-1 rounded bg-muted/50 px-2 py-1 text-xs" title={m.upstream_model}>
+                            <Boxes className="h-3 w-3 shrink-0 text-muted-foreground" />
+                            <span className="max-w-[140px] truncate">{m.label || m.upstream_model}</span>
                           </div>
-                          <div>
-                            <div className="text-xs text-muted-foreground">权重</div>
-                            <Input value={row.weight} onChange={(e) => updateRow(id, "weight", e.target.value)} className="h-8 text-xs" />
-                          </div>
-                          <div>
-                            <div className="text-xs text-muted-foreground">倍率</div>
-                            <Input value={row.multiplier} onChange={(e) => updateRow(id, "multiplier", e.target.value)} className="h-8 text-xs" />
-                          </div>
-                          <div className="flex items-end pb-1">
-                            <button onClick={() => toggleModel(id)} className="text-xs text-destructive hover:underline">移除</button>
-                          </div>
+                          <Input value={row.weight} onChange={(e) => updateRow(id, "weight", e.target.value)} className="h-8 text-xs text-center" />
+                          <Input value={row.multiplier} onChange={(e) => updateRow(id, "multiplier", e.target.value)} className="h-8 text-xs text-center" />
+                          <button onClick={() => toggleModel(id)} className="text-xs text-destructive hover:underline">移除</button>
                         </div>
                       );
                     })}
