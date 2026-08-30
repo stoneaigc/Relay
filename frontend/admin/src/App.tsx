@@ -1091,7 +1091,7 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
       } else {
         setPublicName(""); setModelId(models[0]?.id ?? "");
         setWeight("100"); setMult("1");
-        setSelectedModels(new Set()); setRouteRows(new Map());
+        setSelectedModels(new Set()); setRouteRows(new Map()); setSelectedProvider("");
       }
       setErr("");
     }
@@ -1114,22 +1114,6 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
   const updateRow = (id: number, field: string, value: string) => {
     const row = routeRows.get(id);
     if (row) { routeRows.set(id, { ...row, [field]: value }); setRouteRows(new Map(routeRows)); }
-  };
-
-  // 一键选中某供应商下全部模型
-  const selectProviderGroup = (items: ModelRow[]) => {
-    setSelectedModels(prev => {
-      const next = new Set(prev);
-      const newRows = new Map(routeRows);
-      for (const m of items) {
-        if (!next.has(m.id)) {
-          next.add(m.id);
-          newRows.set(m.id, { public_name: m.upstream_model, weight: "100", multiplier: "1" });
-        }
-      }
-      setRouteRows(newRows);
-      return next;
-    });
   };
 
   // 编辑模式:单个提交;批量模式:多条提交
@@ -1177,6 +1161,33 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
     return [...seen.values()];
   })();
 
+  // 新建模式:当前选中的供应商
+  const [selectedProvider, setSelectedProvider] = useState<string>("");
+  const providerModels = modelGroups.find(g => g.label === selectedProvider)?.items ?? [];
+
+  // 切换供应商时清空已选模型
+  const onProviderChange = (label: string) => {
+    setSelectedProvider(label);
+    setSelectedModels(new Set());
+    setRouteRows(new Map());
+  };
+
+  // 全选当前供应商下所有模型
+  const selectAllProvider = () => {
+    setSelectedModels(prev => {
+      const next = new Set(prev);
+      const newRows = new Map(routeRows);
+      for (const m of providerModels) {
+        if (!next.has(m.id)) {
+          next.add(m.id);
+          newRows.set(m.id, { public_name: m.upstream_model, weight: "100", multiplier: "1" });
+        }
+      }
+      setRouteRows(newRows);
+      return next;
+    });
+  };
+
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className={batchMode ? "max-w-3xl max-h-[85vh]" : ""}>
@@ -1204,28 +1215,31 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
               </div>
             </>
           ) : (
-            /* 新建模式:多选模型 + 每行配置 */
+            /* 新建模式:选供应商 → 选模型 → 配置映射 */
             <>
-              <div><label className="mb-1 block text-xs text-muted-foreground">选择要添加路由的模型(可多选)</label>
-                <div className="rounded-lg border bg-card">
-                  {modelGroups.map((g) => (
-                    <div key={g.label}>
-                      <div className="flex items-center justify-between border-b bg-muted/50 px-3 py-1">
-                        <span className="text-xs font-medium text-muted-foreground">{g.label}</span>
-                        <button type="button" className="text-xs text-primary hover:underline" onClick={() => selectProviderGroup(g.items)}>全选该供应商</button>
-                      </div>
-                      {g.items.map((m) => (
-                        <label key={m.id} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-accent">
-                          <input type="checkbox" checked={selectedModels.has(m.id)} onChange={() => toggleModel(m.id)} className="h-4 w-4 rounded border-input" />
-                          <span className="flex-1">{m.label || m.upstream_model}</span>
-                          <span className="text-xs text-muted-foreground">{m.upstream_model}</span>
-                        </label>
-                      ))}
-                    </div>
-                  ))}
-                  {models.length === 0 && <p className="px-3 py-2 text-xs text-destructive">请先在「模型」里添加模型</p>}
-                </div>
+              <div><label className="mb-1 block text-xs text-muted-foreground">选择供应商</label>
+                <select value={selectedProvider} onChange={(e) => onProviderChange(e.target.value)} className={sel}>
+                  <option value="">-- 请选择供应商 --</option>
+                  {modelGroups.map((g) => <option key={g.label} value={g.label}>{g.label} ({g.items.length} 个模型)</option>)}
+                </select>
+                {models.length === 0 && <p className="mt-1 text-xs text-destructive">请先在「模型」页面添加上游供应商</p>}
               </div>
+              {selectedProvider && (
+                <div><label className="mb-1 flex items-center justify-between text-xs text-muted-foreground">
+                  <span>选择模型(可多选)</span>
+                  <button type="button" className="text-primary hover:underline" onClick={selectAllProvider}>全选该供应商</button>
+                </label>
+                  <div className="max-h-40 overflow-y-auto rounded-lg border bg-card">
+                    {providerModels.map((m) => (
+                      <label key={m.id} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-accent">
+                        <input type="checkbox" checked={selectedModels.has(m.id)} onChange={() => toggleModel(m.id)} className="h-4 w-4 rounded border-input" />
+                        <span className="flex-1">{m.label || m.upstream_model}</span>
+                        <span className="text-xs text-muted-foreground">{m.upstream_model}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
               {/* 每个选中的模型生成一行配置 */}
               {batchMode && (
                 <div className="space-y-2">
