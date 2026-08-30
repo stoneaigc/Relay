@@ -822,6 +822,8 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
 function EditModelDialog({ model, onClose, onSaved }: { model: ModelRow; onClose: () => void; onSaved: () => void }) {
   const [label, setLabel] = useState(model.label ?? "");
   const [upstream, setUpstream] = useState(model.upstream_model);
+  const [baseUrl, setBaseUrl] = useState(model.base_url ?? "");
+  const [apiKey, setApiKey] = useState(model.api_key ?? "");
   const [err, setErr] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
@@ -829,7 +831,7 @@ function EditModelDialog({ model, onClose, onSaved }: { model: ModelRow; onClose
   const submit = async () => {
     setErr("");
     try {
-      await api.updateModel(model.id, { kind: model.kind || "openai", base_url: model.base_url || "", upstream_model: upstream.trim(), label: label.trim() || undefined });
+      await api.updateModel(model.id, { kind: model.kind || "openai", base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, upstream_model: upstream.trim(), label: label.trim() || undefined });
       onSaved();
     } catch (e: any) { setErr(e.message); }
   };
@@ -848,10 +850,14 @@ function EditModelDialog({ model, onClose, onSaved }: { model: ModelRow; onClose
       <DialogContent>
         <DialogHeader><DialogTitle>编辑模型</DialogTitle></DialogHeader>
         <div className="space-y-3">
-          <div><label className="mb-1 block text-xs text-muted-foreground">备注</label>
-            <Input value={label} onChange={(e) => setLabel(e.target.value)} /></div>
+          <div><label className="mb-1 block text-xs text-muted-foreground">Base URL</label>
+            <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} /></div>
+          <div><label className="mb-1 block text-xs text-muted-foreground">API Key</label>
+            <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="留空保持原密钥" /></div>
           <div><label className="mb-1 block text-xs text-muted-foreground">上游模型名</label>
             <Input value={upstream} onChange={(e) => setUpstream(e.target.value)} /></div>
+          <div><label className="mb-1 block text-xs text-muted-foreground">备注</label>
+            <Input value={label} onChange={(e) => setLabel(e.target.value)} /></div>
           <Button variant="outline" size="sm" onClick={doTest} disabled={testing} className="w-full">
             <Activity className="h-4 w-4 mr-1" />{testing ? "测试中..." : "测试连通性"}
           </Button>

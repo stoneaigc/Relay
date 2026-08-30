@@ -439,7 +439,7 @@ pub async fn delete_model_cascade(pool: &Db, id: i64) -> anyhow::Result<()> {
 
 pub async fn list_models(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = q!(
-        "SELECT m.id, m.upstream_model, m.label, p.name as provider_name, p.kind, p.base_url
+        "SELECT m.id, m.upstream_model, m.label, p.name as provider_name, p.kind, p.base_url, p.api_key
          FROM models m LEFT JOIN providers p ON p.name = m.provider ORDER BY p.name, m.id")
         .fetch_all(pool).await?;
     Ok(rows.iter().map(|r| serde_json::json!({
@@ -449,6 +449,7 @@ pub async fn list_models(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
         "provider": r.get::<Option<String>,_>("provider_name"),
         "kind": r.get::<Option<String>,_>("kind"),
         "base_url": r.get::<Option<String>,_>("base_url"),
+        "api_key": r.get::<Option<String>,_>("api_key"),
     })).collect())
 }
 

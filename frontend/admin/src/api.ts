@@ -41,6 +41,7 @@ export interface ModelRow {
   base_url: string | null;
   upstream_model: string;
   provider?: string | null;
+  api_key?: string | null;
 }
 
 export interface ProviderRow {
