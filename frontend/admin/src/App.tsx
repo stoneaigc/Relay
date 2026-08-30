@@ -1057,11 +1057,29 @@ function GroupsPanel() {
                   <TableHead>倍率</TableHead><TableHead className="text-right">操作</TableHead>
                 </TableRow></TableHeader>
                 <TableBody>
-                  {routes.map((r) => (
-                    <TableRow key={r.id}>
-                      <TableCell className="mono">{r.public_name}</TableCell>
-                      <TableCell className="text-xs text-muted-foreground">{(r.label ? r.label + " · " : "") }<span className="mono">{r.provider}/{r.upstream_model}</span></TableCell>
-                      <TableCell>{r.weight}</TableCell>
+                  {(() => {
+                    // 优先级模式:按权重降序排列,同名路由形成故障转移链
+                    const sorted = curStrategy === "priority"
+                      ? [...routes].sort((a, b) => b.weight - a.weight || a.id - b.id)
+                      : routes;
+                    return sorted.map((r, idx) => {
+                      // 故障链指示:同名路由之间的连接线
+                      const prevSameName = idx > 0 && sorted[idx - 1].public_name === r.public_name;
+                      const nextSameName = idx < sorted.length - 1 && sorted[idx + 1]?.public_name === r.public_name;
+                      return (
+                        <TableRow key={r.id}>
+                          <TableCell className="mono">
+                            {curStrategy === "priority" && prevSameName && <span className="mr-1 text-muted-foreground">↓</span>}
+                            {r.public_name}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">{(r.label ? r.label + " · " : "") }<span className="mono">{r.provider}/{r.upstream_model}</span></TableCell>
+                          <TableCell>
+                            {curStrategy === "priority" ? (
+                              <Badge variant={idx === 0 || (prevSameName && sorted[idx - 1].public_name !== r.public_name) ? "default" : "muted"}>
+                                P{idx + 1}
+                              </Badge>
+                            ) : r.weight}
+                          </TableCell>
                       <TableCell><Badge variant={r.multiplier === 1 ? "muted" : "default"}>×{r.multiplier}</Badge></TableCell>
                       <TableCell className="text-right">
                         <RowActions actions={[
@@ -1070,7 +1088,9 @@ function GroupsPanel() {
                         ]} />
                       </TableCell>
                     </TableRow>
-                  ))}
+                  );
+                    });
+                  })()}
                   {routes.length === 0 && <TableRow><TableCell colSpan={5} className="text-sm text-muted-foreground">该组暂无路由</TableCell></TableRow>}
                 </TableBody>
               </Table>
@@ -1079,7 +1099,7 @@ function GroupsPanel() {
         </CardContent>
       </Card>
 
-      {sel != null && <AddRouteDialog dlg={routeDlg} groupId={sel} models={models} onClose={() => setRouteDlg(null)} onSaved={() => loadRoutes(sel)} />}
+      {sel != null && <AddRouteDialog dlg={routeDlg} groupId={sel} models={models} strategy={curStrategy} onClose={() => setRouteDlg(null)} onSaved={() => loadRoutes(sel)} />}
       {sel != null && <TimeRuleDialog dlg={timeRuleDlg} groupId={sel} onClose={() => setTimeRuleDlg(null)} onSaved={() => loadTimeRules(sel)} />}
       <AddGroupDialog open={groupOpen} onClose={() => setGroupOpen(false)} onCreate={createGroup} />
       <ConfirmDialog confirm={confirm} onClose={() => setConfirm(null)} />
@@ -1113,8 +1133,8 @@ function AddGroupDialog({ open, onClose, onCreate }: { open: boolean; onClose: (
   );
 }
 
-function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
-  dlg: { edit: RouteRow | null } | null; groupId: number; models: ModelRow[]; onClose: () => void; onSaved: () => void;
+function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
+  dlg: { edit: RouteRow | null } | null; groupId: number; models: ModelRow[]; strategy: string; onClose: () => void; onSaved: () => void;
 }) {
   const open = !!dlg;
   const edit = dlg?.edit ?? null;
@@ -1293,7 +1313,7 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
                     <div className="mb-1 grid grid-cols-[140px_20px_1fr_70px_70px_36px] items-center gap-2 text-[10px] text-muted-foreground">
                       <span>对外模型名</span><span/>
                       <span>→ 实际模型</span>
-                      <span className="text-center">权重</span><span className="text-center">倍率</span><span/>
+                      <span className="text-center">{strategy === "priority" ? "优先级" : "权重"}</span><span className="text-center">倍率</span><span/>
                     </div>
                     {[...selectedModels].map(id => {
                       const m = models.find(x => x.id === id);
