@@ -55,10 +55,12 @@ pub struct TimeRule {
 pub enum Strategy {
     /// 加权随机(默认):按 weight 概率随机挑一个,失败后按权重序 failover。
     WeightedRandom,
-    /// 预留:加权轮询。
+    /// 加权轮询。
     WeightedRoundRobin,
-    /// 预留:简单轮询。
+    /// 简单轮询。
     RoundRobin,
+    /// 优先级:按 weight 降序(越大越优先),失败自动切下一个。
+    Priority,
 }
 
 impl Strategy {
@@ -67,6 +69,7 @@ impl Strategy {
             Strategy::WeightedRandom => "weighted_random",
             Strategy::WeightedRoundRobin => "weighted_round_robin",
             Strategy::RoundRobin => "round_robin",
+            Strategy::Priority => "priority",
         }
     }
 }
@@ -76,6 +79,7 @@ pub fn strategy_from_str(s: &str) -> Strategy {
     match s {
         "weighted_round_robin" => Strategy::WeightedRoundRobin,
         "round_robin" => Strategy::RoundRobin,
+        "priority" => Strategy::Priority,
         _ => Strategy::WeightedRandom,
     }
 }
@@ -163,9 +167,9 @@ impl Routing {
         let sort_targets: &[Target] = weighted_targets.as_deref().unwrap_or(targets);
         let order = match strategy {
             Strategy::WeightedRandom => shuffle_weighted(sort_targets),
-            // 简单轮询:simple_mode=true;加权轮询:simple_mode=false。
             Strategy::RoundRobin => order_round_robin(group_id, sort_targets, rr_counter, true),
             Strategy::WeightedRoundRobin => order_round_robin(group_id, sort_targets, rr_counter, false),
+            Strategy::Priority => order_by_priority(sort_targets),
         };
         let mut seen: std::collections::HashSet<(ProviderKind, String, String)> = std::collections::HashSet::new();
         let mut out: Vec<Resolved> = Vec::new();
@@ -283,6 +287,13 @@ fn shuffle_weighted(targets: &[Target]) -> Vec<usize> {
         }
     }
     order
+}
+
+/// 优先级排序:按 weight 降序(越大越优先),返回索引排列。
+fn order_by_priority(targets: &[Target]) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..targets.len()).collect();
+    idx.sort_by(|&a, &b| targets[b].weight.cmp(&targets[a].weight));
+    idx
 }
 
 /// 轮询类负载策略:生成候选顺序,第一条为「本次命中的目标」,其后为 failover 次序。

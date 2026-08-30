@@ -917,8 +917,9 @@ function GroupsPanel() {
   });
   const STRATEGY_LABEL: Record<string, string> = {
     weighted_random: "加权随机（默认）",
-    weighted_round_robin: "加权轮询（预留）",
-    round_robin: "简单轮询（预留）",
+    weighted_round_robin: "加权轮询",
+    round_robin: "简单轮询",
+    priority: "优先级（故障转移链）",
   };
   const curStrategy = groups.find((g) => g.id === sel)?.strategy ?? "weighted_random";
   const filteredGroups = groups.filter((g) => !gq.trim() || g.name.includes(gq.trim()));
@@ -967,12 +968,14 @@ function GroupsPanel() {
                     <option value="weighted_random">加权随机</option>
                     <option value="weighted_round_robin">加权轮询</option>
                     <option value="round_robin">简单轮询</option>
+                    <option value="priority">优先级（故障转移链）</option>
                   </select>
                 </div>
               )}
               {sel != null && <Button size="sm" onClick={() => setRouteDlg({ edit: null })}><Plus className="h-4 w-4" />添加路由</Button>}
             </div>
           </div>
+          {curStrategy === "priority" && <p className="mt-1 text-[11px] text-muted-foreground">优先级模式:数字越大越优先;主模型故障时自动切换到下一个。</p>}
         </CardHeader>
         <CardContent className="min-h-0 flex-1 overflow-auto">
           {sel == null ? <p className="text-sm text-muted-foreground">先选择左侧一个模型组</p> : (
@@ -1013,10 +1016,12 @@ function GroupsPanel() {
                   </div>
                 )}
               </div>
-              <p className="mb-3 text-xs text-muted-foreground">用户请求「对外模型名」→ 路由到指定模型;响应里保留用户传的名字。同名多条按权重分流。</p>
+              <p className="mb-3 text-xs text-muted-foreground">用户请求「对外模型名」→ 路由到指定模型;响应里保留用户传的名字。同名多条按权重/优先级分流。</p>
               <Table>
                 <TableHeader><TableRow>
-                  <TableHead>对外模型名</TableHead><TableHead>→ 实际模型</TableHead><TableHead>权重</TableHead><TableHead>倍率</TableHead><TableHead className="text-right">操作</TableHead>
+                  <TableHead>对外模型名</TableHead><TableHead>→ 实际模型</TableHead>
+                  <TableHead>{curStrategy === "priority" ? "优先级" : "权重"}</TableHead>
+                  <TableHead>倍率</TableHead><TableHead className="text-right">操作</TableHead>
                 </TableRow></TableHeader>
                 <TableBody>
                   {routes.map((r) => (
