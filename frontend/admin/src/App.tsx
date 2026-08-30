@@ -1116,6 +1116,22 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
     if (row) { routeRows.set(id, { ...row, [field]: value }); setRouteRows(new Map(routeRows)); }
   };
 
+  // 一键选中某供应商下全部模型
+  const selectProviderGroup = (items: ModelRow[]) => {
+    setSelectedModels(prev => {
+      const next = new Set(prev);
+      const newRows = new Map(routeRows);
+      for (const m of items) {
+        if (!next.has(m.id)) {
+          next.add(m.id);
+          newRows.set(m.id, { public_name: m.upstream_model, weight: "100", multiplier: "1" });
+        }
+      }
+      setRouteRows(newRows);
+      return next;
+    });
+  };
+
   // 编辑模式:单个提交;批量模式:多条提交
   const submit = async () => {
     setErr(""); setSubmitting(true);
@@ -1194,7 +1210,10 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
                 <div className="rounded-lg border bg-card">
                   {modelGroups.map((g) => (
                     <div key={g.label}>
-                      <div className="border-b bg-muted/50 px-3 py-1 text-xs font-medium text-muted-foreground">{g.label}</div>
+                      <div className="flex items-center justify-between border-b bg-muted/50 px-3 py-1">
+                        <span className="text-xs font-medium text-muted-foreground">{g.label}</span>
+                        <button type="button" className="text-xs text-primary hover:underline" onClick={() => selectProviderGroup(g.items)}>全选该供应商</button>
+                      </div>
                       {g.items.map((m) => (
                         <label key={m.id} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-accent">
                           <input type="checkbox" checked={selectedModels.has(m.id)} onChange={() => toggleModel(m.id)} className="h-4 w-4 rounded border-input" />
