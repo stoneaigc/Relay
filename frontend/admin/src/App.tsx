@@ -1246,8 +1246,9 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
                   <label className="block text-xs font-medium text-muted-foreground">配置每条路由</label>
                   <div className="max-h-64 overflow-y-auto rounded-lg border p-3">
                     {/* 表头 */}
-                    <div className="mb-1 grid grid-cols-[1fr_auto_120px_70px_40px] items-center gap-2 text-[10px] text-muted-foreground">
+                    <div className="mb-1 grid grid-cols-[140px_20px_1fr_70px_70px_36px] items-center gap-2 text-[10px] text-muted-foreground">
                       <span>对外模型名</span><span/>
+                      <span>→ 实际模型</span>
                       <span className="text-center">权重</span><span className="text-center">倍率</span><span/>
                     </div>
                     {[...selectedModels].map(id => {
@@ -1255,12 +1256,13 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
                       const row = routeRows.get(id);
                       if (!m || !row) return null;
                       return (
-                        <div key={id} className="grid grid-cols-[1fr_auto_120px_70px_40px] items-center gap-2 py-1 text-sm">
-                          <Input value={row.public_name} onChange={(e) => updateRow(id, "public_name", e.target.value)} placeholder="如 chat / fast" className="h-8 text-xs" />
-                          <span className="text-muted-foreground">→</span>
-                          <div className="flex items-center gap-1 rounded bg-muted/50 px-2 py-1 text-xs" title={m.upstream_model}>
+                        <div key={id} className="grid grid-cols-[140px_20px_1fr_70px_70px_36px] items-center gap-2 py-1.5 text-sm">
+                          <Input value={row.public_name} onChange={(e) => updateRow(id, "public_name", e.target.value)} placeholder="如 chat" className="h-8 text-xs" />
+                          <span className="text-center text-muted-foreground">→</span>
+                          <div className="flex items-center gap-1.5 rounded border border-border/50 bg-muted/30 px-2 py-1 text-xs" title={m.upstream_model}>
                             <Boxes className="h-3 w-3 shrink-0 text-muted-foreground" />
-                            <span className="max-w-[140px] truncate">{m.label || m.upstream_model}</span>
+                            <span className="truncate">{m.label || m.upstream_model}</span>
+                            <span className="shrink-0 text-[10px] text-muted-foreground">/ {m.upstream_model}</span>
                           </div>
                           <Input value={row.weight} onChange={(e) => updateRow(id, "weight", e.target.value)} className="h-8 text-xs text-center" />
                           <Input value={row.multiplier} onChange={(e) => updateRow(id, "multiplier", e.target.value)} className="h-8 text-xs text-center" />
