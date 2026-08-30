@@ -1,7 +1,7 @@
 mod admin;
 mod auth;
 mod cache;
-mod config;
+pub mod config;
 mod email;
 mod error;
 mod handlers;
@@ -9,7 +9,7 @@ mod jwt;
 mod portal;
 mod providers;
 mod reqlog;
-mod routing;
+pub mod routing;
 mod settings;
 mod state;
 mod storage;
