@@ -1167,4 +1167,43 @@ mod tests {
         assert_eq!(ut.output_tokens, 5678);
         assert_eq!(ut.p(0.5), 200);
     }
+
+    // ---- Breaker 熔断器 ----
+
+    #[test]
+    fn breaker_available_by_default() {
+        let b = Breaker::default();
+        assert!(b.is_available());
+    }
+
+    #[test]
+    fn breaker_trips_after_threshold() {
+        let mut b = Breaker::default();
+        for _ in 0..BREAKER_FAILS {
+            b.record_unavailable();
+        }
+        assert!(!b.is_available());
+    }
+
+    #[test]
+    fn breaker_resets_on_success() {
+        let mut b = Breaker::default();
+        for _ in 0..BREAKER_FAILS {
+            b.record_unavailable();
+        }
+        assert!(!b.is_available());
+        b.record_success();
+        assert!(b.is_available());
+    }
+
+    #[test]
+    fn breaker_half_open_after_window() {
+        let mut b = Breaker::default();
+        for _ in 0..BREAKER_FAILS {
+            b.record_unavailable();
+        }
+        b.recover_at = Some(Instant::now() - std::time::Duration::from_secs(1));
+        assert!(b.maybe_half_open());
+        assert!(b.is_available());
+    }
 }

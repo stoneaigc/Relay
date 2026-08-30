@@ -342,3 +342,105 @@ fn order_round_robin(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- strategy_from_str / as_str ----
+
+    #[test]
+    fn strategy_from_str_known() {
+        assert_eq!(strategy_from_str("weighted_random"), Strategy::WeightedRandom);
+        assert_eq!(strategy_from_str("weighted_round_robin"), Strategy::WeightedRoundRobin);
+        assert_eq!(strategy_from_str("round_robin"), Strategy::RoundRobin);
+        assert_eq!(strategy_from_str("priority"), Strategy::Priority);
+    }
+
+    #[test]
+    fn strategy_from_str_unknown_falls_back() {
+        assert_eq!(strategy_from_str("anything"), Strategy::WeightedRandom);
+        assert_eq!(strategy_from_str(""), Strategy::WeightedRandom);
+    }
+
+    #[test]
+    fn strategy_as_str_roundtrip() {
+        let strategies = [Strategy::WeightedRandom, Strategy::WeightedRoundRobin, Strategy::RoundRobin, Strategy::Priority];
+        for s in &strategies {
+            assert_eq!(strategy_from_str(s.as_str()), *s);
+        }
+    }
+
+    // ---- order_by_priority ----
+
+    #[test]
+    fn priority_single_target() {
+        let targets = vec![Target { model_id: 1, weight: 100, multiplier: 1.0 }];
+        let order = order_by_priority(&targets);
+        assert_eq!(order, vec![0]);
+    }
+
+    #[test]
+    fn priority_descending_by_weight() {
+        let targets = vec![
+            Target { model_id: 1, weight: 10, multiplier: 1.0 },
+            Target { model_id: 2, weight: 50, multiplier: 1.0 },
+            Target { model_id: 3, weight: 30, multiplier: 1.0 },
+        ];
+        let order = order_by_priority(&targets);
+        // 50 > 30 > 10 → indices 1, 2, 0
+        assert_eq!(order, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn priority_equal_weights_stable_order() {
+        let targets = vec![
+            Target { model_id: 1, weight: 100, multiplier: 1.0 },
+            Target { model_id: 2, weight: 100, multiplier: 1.0 },
+            Target { model_id: 3, weight: 100, multiplier: 1.0 },
+        ];
+        let order = order_by_priority(&targets);
+        // 相同权重时保持原序(0,1,2)
+        assert_eq!(order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn priority_empty_targets() {
+        let targets: Vec<Target> = vec![];
+        let order = order_by_priority(&targets);
+        assert!(order.is_empty());
+    }
+
+    #[test]
+    fn priority_zero_weight() {
+        let targets = vec![
+            Target { model_id: 1, weight: 0, multiplier: 1.0 },
+            Target { model_id: 2, weight: 50, multiplier: 1.0 },
+        ];
+        let order = order_by_priority(&targets);
+        assert_eq!(order, vec![1, 0]);
+    }
+
+    // ---- shuffle_weighted 基本性质 ----
+
+    #[test]
+    fn shuffle_weighted_covers_all() {
+        let targets = vec![
+            Target { model_id: 1, weight: 10, multiplier: 1.0 },
+            Target { model_id: 2, weight: 20, multiplier: 1.0 },
+            Target { model_id: 3, weight: 30, multiplier: 1.0 },
+        ];
+        let order = shuffle_weighted(&targets);
+        assert_eq!(order.len(), 3);
+        let mut sorted = order.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn shuffle_weighted_single() {
+        let targets = vec![Target { model_id: 1, weight: 100, multiplier: 1.0 }];
+        let order = shuffle_weighted(&targets);
+        assert_eq!(order, vec![0]);
+    }
+}
+
