@@ -196,8 +196,8 @@ fn time_rule_overrides_weight() {
         id: 1,
         name: "全天生效".into(),
         weekdays: "0-6".into(),
-        start_time: "00:00".into(),
-        end_time: "23:58".into(), // 覆盖绝大部分时间(23:59 边界不匹配是已知行为)
+        start_time: "12:00".into(),
+        end_time: "11:59".into(), // 跨午夜:12:00→次日11:59,覆盖全天
         multiplier: 1.5,
         weight_map,
         active: true,

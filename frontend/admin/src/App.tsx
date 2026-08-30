@@ -1065,7 +1065,6 @@ function GroupsPanel() {
                     return sorted.map((r, idx) => {
                       // 故障链指示:同名路由之间的连接线
                       const prevSameName = idx > 0 && sorted[idx - 1].public_name === r.public_name;
-                      const nextSameName = idx < sorted.length - 1 && sorted[idx + 1]?.public_name === r.public_name;
                       return (
                         <TableRow key={r.id}>
                           <TableCell className="mono">
@@ -1080,13 +1079,13 @@ function GroupsPanel() {
                               </Badge>
                             ) : r.weight}
                           </TableCell>
-                      <TableCell><Badge variant={r.multiplier === 1 ? "muted" : "default"}>×{r.multiplier}</Badge></TableCell>
-                      <TableCell className="text-right">
-                        <RowActions actions={[
-                          { label: "编辑", icon: <Pencil className="h-4 w-4" />, onClick: () => setRouteDlg({ edit: r }) },
-                          { label: "删除", icon: <Trash2 className="h-4 w-4" />, variant: "destructive", onClick: () => delRoute(r.id) },
-                        ]} />
-                      </TableCell>
+                          <TableCell><Badge variant={r.multiplier === 1 ? "muted" : "default"}>×{r.multiplier}</Badge></TableCell>
+                          <TableCell className="text-right">
+                            <RowActions actions={[
+                              { label: "编辑", icon: <Pencil className="h-4 w-4" />, onClick: () => setRouteDlg({ edit: r }) },
+                              { label: "删除", icon: <Trash2 className="h-4 w-4" />, variant: "destructive", onClick: () => delRoute(r.id) },
+                            ]} />
+                          </TableCell>
                     </TableRow>
                   );
                     });

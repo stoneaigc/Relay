@@ -354,14 +354,21 @@ pub async fn delete_provider_cascade(pool: &Db, provider_name: &str) -> anyhow::
 }
 
 /// 更新供应商的 base_url 和 api_key。
+/// api_key 为 None 或空字符串时保持原值不更新。
 pub async fn update_provider(
     pool: &Db,
     name: &str,
     base_url: &str,
     api_key: Option<&str>,
 ) -> anyhow::Result<()> {
-    q!("UPDATE providers SET base_url = ?, api_key = ? WHERE name = ?")
-        .bind(base_url).bind(api_key).bind(name).execute(pool).await?;
+    let key = api_key.filter(|k| !k.is_empty());
+    if let Some(k) = key {
+        q!("UPDATE providers SET base_url = ?, api_key = ? WHERE name = ?")
+            .bind(base_url).bind(k).bind(name).execute(pool).await?;
+    } else {
+        q!("UPDATE providers SET base_url = ? WHERE name = ?")
+            .bind(base_url).bind(name).execute(pool).await?;
+    }
     Ok(())
 }
 
