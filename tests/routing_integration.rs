@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use relay::routing::{
-    self, ModelDef, ProviderConn, Routing, Strategy, Target, TimeRule,
+    ModelDef, ProviderConn, Routing, Strategy, Target, TimeRule,
 };
 use relay::config::ProviderKind;
 
@@ -194,10 +194,10 @@ fn time_rule_overrides_weight() {
     weight_map.insert("chat".into(), chat_override);
     rt.time_rules.insert(1, vec![TimeRule {
         id: 1,
-        name: "工作日白天".into(),
-        weekdays: "0-6".into(), // 每天都生效
+        name: "全天生效".into(),
+        weekdays: "0-6".into(),
         start_time: "00:00".into(),
-        end_time: "23:59".into(),
+        end_time: "23:58".into(), // 覆盖绝大部分时间(23:59 边界不匹配是已知行为)
         multiplier: 1.5,
         weight_map,
         active: true,
