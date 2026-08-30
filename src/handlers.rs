@@ -190,7 +190,7 @@ pub async fn run_chat(
 
     // 路由解析:按用户所在模型组,把对外模型名解析到全部候选上游。
     // failover:依次尝试每个候选;仅可重试错误(Unavailable)才切换到下一目标。
-    let candidates = match state.routing.load().resolve_all(user.group(), &model, &state.round_robin, state.tz_offset_secs) {
+    let candidates = match state.routing.load().resolve_all(user.group(), &model, &state.round_robin, state.tz_offset_secs, None) {
         Ok(c) => c,
         Err(e) => {
             fail_global!();
@@ -681,7 +681,7 @@ pub async fn run_messages(
         None => { fail_global!(); return Err(ApiError::TooManyRequests); }
     };
 
-    let candidates = match state.routing.load().resolve_all(user.group(), &model, &state.round_robin, state.tz_offset_secs) {
+    let candidates = match state.routing.load().resolve_all(user.group(), &model, &state.round_robin, state.tz_offset_secs, None) {
         Ok(c) => c,
         Err(e) => { fail_global!(); return Err(e); }
     };

@@ -565,6 +565,7 @@ function ModelsPanel() {
   const [test, setTest] = useState<Record<number, "loading" | { ok: boolean; msg: string }>>({});
   const [page, setPage] = useState(1);
   const [pageMeta, setPageMeta] = useState({ total: 0, total_pages: 1 });
+  const [providerSearch, setProviderSearch] = useState("");
 
   const loadProviders = async (p?: number) => {
     const pg = p ?? page;
@@ -631,8 +632,12 @@ function ModelsPanel() {
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
+          <div className="relative">
+            <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <input value={providerSearch} onChange={(e) => setProviderSearch(e.target.value)} placeholder="搜索供应商名称或地址..." className="h-8 w-full rounded-lg border border-input bg-card pl-7 pr-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring" />
+          </div>
           {providers.length === 0 && <p className="text-sm text-muted-foreground">暂无上游供应商，点击「添加上游」开始</p>}
-          {providers.map((p) => (
+          {providers.filter((p) => !providerSearch.trim() || p.name.toLowerCase().includes(providerSearch.toLowerCase()) || p.base_url.toLowerCase().includes(providerSearch.toLowerCase())).map((p) => (
             <div key={p.name} className="rounded-lg border">
               {/* Provider 头部 */}
               <div className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-muted/50" onClick={() => toggleExpand(p.name)}>

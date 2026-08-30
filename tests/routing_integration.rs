@@ -1,4 +1,4 @@
-//! 优先级路由 + 故障转移链 集成测试。
+﻿//! 优先级路由 + 故障转移链 集成测试。
 //! 测试 Routing::resolve_all 在不同策略和场景下的完整行为。
 
 use std::collections::HashMap;
@@ -6,6 +6,7 @@ use relay::routing::{
     ModelDef, ProviderConn, Routing, Strategy, Target, TimeRule,
 };
 use relay::config::ProviderKind;
+use chrono::{TimeZone, Utc};
 
 /// 构造一个包含多个 provider + model + group 的测试路由图。
 fn make_test_routing() -> Routing {
@@ -65,11 +66,17 @@ fn make_test_routing() -> Routing {
     }
 }
 
-/// 辅助:调用 resolve_all 并提取候选列表(用共享 counter)。
-fn resolve_with_counter(routing: &Routing, strategy: Strategy, requested: &str, rr: &dashmap::DashMap<i64, std::sync::atomic::AtomicU32>) -> Vec<(String, String, u32)> {
+/// 辅助:调用 resolve_all 并提取候选列表(用共享 counter,可注入固定时间)。
+fn resolve_with_counter(
+    routing: &Routing,
+    strategy: Strategy,
+    requested: &str,
+    rr: &dashmap::DashMap<i64, std::sync::atomic::AtomicU32>,
+    now: Option<chrono::DateTime<Utc>>,
+) -> Vec<(String, String, u32)> {
     let mut r = routing.clone();
     r.group_strategy.insert(1, strategy);
-    let result = r.resolve_all(1, requested, rr, 28800).unwrap();
+    let result = r.resolve_all(1, requested, rr, 28800, now).unwrap();
     result.into_iter().map(|r| (r.upstream_model, r.base_url, r.weight)).collect()
 }
 
@@ -79,7 +86,7 @@ fn resolve_with_counter(routing: &Routing, strategy: Strategy, requested: &str, 
 fn priority_routes_in_descending_weight_order() {
     let rt = make_test_routing();
     let rr = dashmap::DashMap::new();
-    let candidates = resolve_with_counter(&rt, Strategy::Priority, "chat", &rr);
+    let candidates = resolve_with_counter(&rt, Strategy::Priority, "chat", &rr, None);
     // 权重: 50(OpenAI) > 30(DeepSeek) > 20(Anthropic)
     assert_eq!(candidates[0].0, "gpt-4o");
     assert_eq!(candidates[0].2, 50);
@@ -93,7 +100,7 @@ fn priority_routes_in_descending_weight_order() {
 fn priority_all_three_candidates_present() {
     let rt = make_test_routing();
     let rr = dashmap::DashMap::new();
-    let candidates = resolve_with_counter(&rt, Strategy::Priority, "chat", &rr);
+    let candidates = resolve_with_counter(&rt, Strategy::Priority, "chat", &rr, None);
     assert_eq!(candidates.len(), 3);
 }
 
@@ -107,7 +114,7 @@ fn priority_deduplicates_same_upstream() {
     // 用另一个 model_id 指向同一个 provider+model 来测试去重
     rt.models.insert(100, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into() });
     let rr = dashmap::DashMap::new();
-    let candidates = resolve_with_counter(&rt, Strategy::Priority, "chat", &rr);
+    let candidates = resolve_with_counter(&rt, Strategy::Priority, "chat", &rr, None);
     // 去重后应该只有 3 个(OpenAI 只出现一次)
     let openai_count = candidates.iter().filter(|(m, _, _)| m == "gpt-4o").count();
     assert_eq!(openai_count, 1);
@@ -122,7 +129,7 @@ fn weighted_random_covers_all_models() {
     let rr = dashmap::DashMap::new();
     let mut seen = std::collections::HashSet::new();
     for _ in 0..100 {
-        let candidates = resolve_with_counter(&rt, Strategy::WeightedRandom, "chat", &rr);
+        let candidates = resolve_with_counter(&rt, Strategy::WeightedRandom, "chat", &rr, None);
         for (model, _, _) in &candidates {
             seen.insert(model.clone());
         }
@@ -138,7 +145,7 @@ fn weighted_random_first_is_not_always_same() {
     let rr = dashmap::DashMap::new();
     let mut first_models = std::collections::HashSet::new();
     for _ in 0..50 {
-        let candidates = resolve_with_counter(&rt, Strategy::WeightedRandom, "chat", &rr);
+        let candidates = resolve_with_counter(&rt, Strategy::WeightedRandom, "chat", &rr, None);
         first_models.insert(candidates[0].0.clone());
     }
     // 加权随机下,第一个候选不应该总是同一个
@@ -153,7 +160,7 @@ fn round_robin_cycles_through_models() {
     let rr = dashmap::DashMap::new();
     let mut first_models = Vec::new();
     for _ in 0..6 {
-        let candidates = resolve_with_counter(&rt, Strategy::RoundRobin, "chat", &rr);
+        let candidates = resolve_with_counter(&rt, Strategy::RoundRobin, "chat", &rr, None);
         first_models.push(candidates[0].0.clone());
     }
     // 简单轮询应该循环: A, B, C, A, B, C
@@ -170,7 +177,7 @@ fn weighted_round_robin_uses_weights() {
     let rr = dashmap::DashMap::new();
     let mut counts = HashMap::new();
     for _ in 0..300 {
-        let candidates = resolve_with_counter(&rt, Strategy::WeightedRoundRobin, "chat", &rr);
+        let candidates = resolve_with_counter(&rt, Strategy::WeightedRoundRobin, "chat", &rr, None);
         *counts.entry(candidates[0].0.clone()).or_insert(0) += 1;
     }
     // 权重 50:30:20 → 大约 50%:30%:20%
@@ -203,9 +210,10 @@ fn time_rule_overrides_weight() {
         active: true,
     }]);
 
-    // 使用 UTC+8 偏移,周一 10:00 = UTC 02:00
+    // 注入固定时间:2026-08-30 10:00 UTC+8 = 02:00 UTC(周日,weekdays 0-6 命中)
+    let fixed_time = Utc.with_ymd_and_hms(2026, 8, 30, 2, 0, 0).unwrap();
     let rr = dashmap::DashMap::new();
-    let result = rt.resolve_all(1, "chat", &rr, 28800).unwrap();
+    let result = rt.resolve_all(1, "chat", &rr, 28800, Some(fixed_time)).unwrap();
     // 在时段覆盖下,OpenAI 权重变为 100,DeepSeek 变为 1
     // Priority 策略下 OpenAI 应该排第一
     let first = &result[0];
@@ -233,8 +241,9 @@ fn time_rule_disabled_ignored() {
         active: false, // 停用
     }]);
 
+    let fixed_time = Utc.with_ymd_and_hms(2026, 8, 30, 2, 0, 0).unwrap();
     let rr = dashmap::DashMap::new();
-    let result = rt.resolve_all(1, "chat", &rr, 28800).unwrap();
+    let result = rt.resolve_all(1, "chat", &rr, 28800, Some(fixed_time)).unwrap();
     // 停用的规则不应生效,倍率应该是 model 原始值(无时段倍率)
     let first = result.iter().find(|r| r.upstream_model == "gpt-4o").unwrap();
     assert!((first.multiplier - 1.5).abs() < 0.01, "disabled rule should not affect multiplier, got {}", first.multiplier);
@@ -246,7 +255,7 @@ fn time_rule_disabled_ignored() {
 fn resolve_unknown_model_returns_error() {
     let rt = make_test_routing();
     let rr = dashmap::DashMap::new();
-    let result = rt.resolve_all(1, "nonexistent", &rr, 28800);
+    let result = rt.resolve_all(1, "nonexistent", &rr, 28800, None);
     assert!(result.is_err());
 }
 
@@ -254,7 +263,7 @@ fn resolve_unknown_model_returns_error() {
 fn resolve_unknown_group_returns_error() {
     let rt = make_test_routing();
     let rr = dashmap::DashMap::new();
-    let result = rt.resolve_all(999, "chat", &rr, 28800);
+    let result = rt.resolve_all(999, "chat", &rr, 28800, None);
     assert!(result.is_err());
 }
 
@@ -274,8 +283,9 @@ fn multiplier_includes_time_multiplier() {
         active: true,
     }]);
 
+    let fixed_time = Utc.with_ymd_and_hms(2026, 8, 30, 2, 0, 0).unwrap();
     let rr = dashmap::DashMap::new();
-    let result = rt.resolve_all(1, "chat", &rr, 28800).unwrap();
+    let result = rt.resolve_all(1, "chat", &rr, 28800, Some(fixed_time)).unwrap();
     // OpenAI: multiplier=1.5 * time_multiplier=2.0 = 3.0
     let openai = result.iter().find(|r| r.upstream_model == "gpt-4o").unwrap();
     assert!((openai.multiplier - 3.0).abs() < 0.01);
@@ -292,9 +302,9 @@ fn different_public_names_independent_routing() {
     ]);
 
     let rr1 = dashmap::DashMap::new();
-    let chat = rt.resolve_all(1, "chat", &rr1, 28800).unwrap();
+    let chat = rt.resolve_all(1, "chat", &rr1, 28800, None).unwrap();
     let rr2 = dashmap::DashMap::new();
-    let fast = rt.resolve_all(1, "fast", &rr2, 28800).unwrap();
+    let fast = rt.resolve_all(1, "fast", &rr2, 28800, None).unwrap();
 
     assert_eq!(chat.len(), 3); // chat 有 3 个候选
     assert_eq!(fast.len(), 1); // fast 只有 1 个

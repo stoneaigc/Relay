@@ -133,12 +133,14 @@ impl Routing {
     /// 1) 先按该组绑定的负载策略算出候选顺序(第一条就是本次命中的目标,后面是 failover 次序);
     /// 2) 然后按 (kind + base_url + upstream_model) 去重,避免重复打同一个上游。
     /// `rr_counter`: 组级轮询游标(加权轮询 / 简单轮询需要跨请求记住轮到哪),由 AppState 持有。
+    /// `now`: 可选的当前时间(测试注入用);None 则用 Utc::now()。
     pub fn resolve_all(
         &self,
         group_id: i64,
         requested: &str,
         rr_counter: &dashmap::DashMap<i64, std::sync::atomic::AtomicU32>,
         tz_offset_secs: i32,
+        now: Option<chrono::DateTime<Utc>>,
     ) -> Result<Vec<Resolved>, ApiError> {
         let group = self
             .groups
@@ -149,7 +151,7 @@ impl Routing {
             .filter(|v| !v.is_empty())
             .ok_or_else(|| ApiError::ModelNotFound(requested.to_string()))?;
         // 高峰/低谷时段解析:命中则取该时段的倍率系数,并可能覆盖路由权重(B 部分)。
-        let (now_dow, now_min) = now_dow_min(Utc::now(), tz_offset_secs);
+        let (now_dow, now_min) = now_dow_min(now.unwrap_or_else(Utc::now), tz_offset_secs);
         let rule = self.current_rule(group_id, now_dow, now_min);
         let time_multiplier = rule.map(|r| r.multiplier.max(0.05)).unwrap_or(1.0);
         let time_slot = rule.map(|r| r.name.clone());
