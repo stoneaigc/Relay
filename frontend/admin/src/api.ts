@@ -121,6 +121,8 @@ export const api = {
     req(`/admin/api/providers?page=${page || 1}&page_size=${page_size || 20}`),
   providerModels: (name: string): Promise<{ data: { id: number; upstream_model: string; label: string | null }[] }> => req(`/admin/api/providers/${name}/models`),
   deleteProvider: (name: string) => req(`/admin/api/providers/${name}`, { method: "DELETE" }),
+  updateProvider: (name: string, body: { base_url: string; api_key?: string }) =>
+    req(`/admin/api/providers/${name}`, { method: "PUT", body: JSON.stringify(body) }),
 
   models: (): Promise<{ data: ModelRow[] }> => req("/admin/api/models"),
   addModel: (body: { label?: string; kind: string; base_url: string; api_key?: string; upstream_model: string }) =>

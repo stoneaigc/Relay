@@ -684,6 +684,30 @@ pub async fn delete_provider(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// PUT /admin/providers/:name —— 更新供应商 base_url 和 api_key。
+#[derive(Deserialize)]
+pub struct UpdateProvider {
+    pub base_url: String,
+    pub api_key: Option<String>,
+}
+
+pub async fn update_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<UpdateProvider>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if body.base_url.trim().is_empty() {
+        return Err(ApiError::BadRequest("base_url required".into()));
+    }
+    storage::update_provider(&state.db, &name, body.base_url.trim(), body.api_key.as_deref())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 /// POST /admin/providers/exists —— 按 base_url + api_key 查询供应商是否已存在及其已有模型名。
 #[derive(Deserialize)]
 pub struct ProviderExists {

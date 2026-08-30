@@ -353,6 +353,18 @@ pub async fn delete_provider_cascade(pool: &Db, provider_name: &str) -> anyhow::
     Ok(())
 }
 
+/// 更新供应商的 base_url 和 api_key。
+pub async fn update_provider(
+    pool: &Db,
+    name: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> anyhow::Result<()> {
+    q!("UPDATE providers SET base_url = ?, api_key = ? WHERE name = ?")
+        .bind(base_url).bind(api_key).bind(name).execute(pool).await?;
+    Ok(())
+}
+
 /// 列出指定 provider 下的所有模型。
 pub async fn list_models_by_provider(pool: &Db, provider_name: &str) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = q!(

@@ -199,7 +199,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/providers", get(admin::list_providers))
         .route("/providers/exists", post(admin::provider_exists))
         .route("/providers/:name/models", get(admin::list_provider_models))
-        .route("/providers/:name", axum::routing::delete(admin::delete_provider))
+        .route("/providers/:name", axum::routing::put(admin::update_provider).delete(admin::delete_provider))
         .route("/groups", get(admin::list_groups).post(admin::add_group))
         .route("/groups/:id", axum::routing::delete(admin::delete_group))
         .route("/groups/:id/activate", post(admin::activate_group))
