@@ -215,6 +215,10 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN request_id TEXT")
             .execute(pool)
             .await;
+        // 模型防重唯一索引:旧库有重复时创建失败则跳过，幂等由 add_model 查询保证。
+        let _ = q!("CREATE UNIQUE INDEX IF NOT EXISTS uniq_models_provider_model ON models(provider, upstream_model)")
+            .execute(pool)
+            .await;
     }
     Ok(())
 }
@@ -282,11 +286,113 @@ pub async fn upsert_provider(
     Ok(())
 }
 
+/// 按 base_url + api_key 查找已有 provider;不存在则创建。返回 provider name。
+///
+/// 同一个 base_url 用不同 API key 视为不同供应商（可持有不同模型集）。
+pub async fn find_or_create_provider(
+    pool: &Db,
+    kind: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> anyhow::Result<(String, bool)> {
+    // 按 base_url + api_key 精确匹配已有 provider
+    let existing: Option<String> = q!("SELECT name FROM providers WHERE base_url = ? AND api_key IS NOT DISTINCT FROM ?")
+        .bind(base_url).bind(api_key.filter(|k| !k.is_empty()))
+        .fetch_optional(pool).await?.map(|r| r.get("name"));
+    if let Some(name) = existing {
+        return Ok((name, false));
+    }
+    // 不存在则创建
+    let name = format!("prov-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    upsert_provider(pool, &name, kind, base_url, api_key).await?;
+    Ok((name, true))
+}
+
+/// 按 base_url + api_key 精确查找已有 provider。
+pub async fn find_provider_by_credentials(
+    pool: &Db,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let name: Option<String> = q!("SELECT name FROM providers WHERE base_url = ? AND api_key IS NOT DISTINCT FROM ?")
+        .bind(base_url).bind(api_key.filter(|k| !k.is_empty()))
+        .fetch_optional(pool).await?.map(|r| r.get("name"));
+    Ok(name)
+}
+
+/// 列出所有 provider，附带模型数量。支持分页。
+pub async fn list_providers(pool: &Db, page: Option<u32>, page_size: Option<u32>) -> anyhow::Result<(Vec<serde_json::Value>, u64)> {
+    let total: i64 = q!("SELECT COUNT(*) as cnt FROM providers").fetch_one(pool).await?.get("cnt");
+    let limit = page_size.unwrap_or(20).clamp(1, 100) as i64;
+    let current_page = page.unwrap_or(1).max(1);
+    let offset = ((current_page - 1) as i64 * limit).max(0);
+    let rows = q!(
+        "SELECT p.name, p.kind, p.base_url,
+                (SELECT COUNT(*) FROM models m WHERE m.provider = p.name) as model_count
+         FROM providers p ORDER BY p.name LIMIT ? OFFSET ?"
+    ).bind(limit).bind(offset).fetch_all(pool).await?;
+    Ok((rows.iter().map(|r| serde_json::json!({
+        "name": r.get::<String,_>("name"),
+        "kind": r.get::<String,_>("kind"),
+        "base_url": r.get::<String,_>("base_url"),
+        "model_count": r.get::<i64,_>("model_count"),
+    })).collect(), total as u64))
+}
+
+/// 级联删除 provider 及其所有模型和关联路由。
+pub async fn delete_provider_cascade(pool: &Db, provider_name: &str) -> anyhow::Result<()> {
+    // 先删该 provider 下所有模型的路由引用
+    q!("DELETE FROM group_routes WHERE model_id IN (SELECT id FROM models WHERE provider = ?)")
+        .bind(provider_name).execute(pool).await?;
+    // 删模型
+    q!("DELETE FROM models WHERE provider = ?")
+        .bind(provider_name).execute(pool).await?;
+    // 删 provider
+    q!("DELETE FROM providers WHERE name = ?")
+        .bind(provider_name).execute(pool).await?;
+    Ok(())
+}
+
+/// 列出指定 provider 下的所有模型。
+pub async fn list_models_by_provider(pool: &Db, provider_name: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+    let rows = q!(
+        "SELECT m.id, m.upstream_model, m.label
+         FROM models m WHERE m.provider = ? ORDER BY m.id"
+    ).bind(provider_name).fetch_all(pool).await?;
+    Ok(rows.iter().map(|r| serde_json::json!({
+        "id": r.get::<i64,_>("id"),
+        "upstream_model": r.get::<String,_>("upstream_model"),
+        "label": r.get::<Option<String>,_>("label"),
+    })).collect())
+}
+
 pub async fn add_model(pool: &Db, provider: &str, upstream_model: &str, label: Option<&str>) -> anyhow::Result<i64> {
+    let existing: Option<i64> = q!("SELECT id FROM models WHERE provider = ? AND upstream_model = ?")
+        .bind(provider).bind(upstream_model)
+        .fetch_optional(pool).await?
+        .map(|r| r.get("id"));
+    if let Some(id) = existing {
+        return Ok(id);
+    }
     let r = q!("INSERT INTO models (provider, upstream_model, label, created_at) VALUES (?, ?, ?, ?) RETURNING id")
         .bind(provider).bind(upstream_model).bind(label).bind(now_iso())
         .fetch_one(pool).await?;
     Ok(r.get::<i64, _>("id"))
+}
+
+/// 添加模型并报告是否新建（用于批量添加时区分「新增」与「已存在」）。
+pub async fn add_model_returning(pool: &Db, provider: &str, upstream_model: &str, label: Option<&str>) -> anyhow::Result<(i64, bool)> {
+    let existing: Option<i64> = q!("SELECT id FROM models WHERE provider = ? AND upstream_model = ?")
+        .bind(provider).bind(upstream_model)
+        .fetch_optional(pool).await?
+        .map(|r| r.get("id"));
+    if let Some(id) = existing {
+        return Ok((id, false));
+    }
+    let r = q!("INSERT INTO models (provider, upstream_model, label, created_at) VALUES (?, ?, ?, ?) RETURNING id")
+        .bind(provider).bind(upstream_model).bind(label).bind(now_iso())
+        .fetch_one(pool).await?;
+    Ok((r.get::<i64, _>("id"), true))
 }
 
 /// 更新模型:改其上游连接(provider 的 kind/base_url,密钥仅在提供时覆盖)+ 上游模型名/备注。
@@ -320,24 +426,37 @@ pub async fn delete_model_cascade(pool: &Db, id: i64) -> anyhow::Result<()> {
         .bind(id).fetch_optional(pool).await?.map(|r| r.get("provider"));
     q!("DELETE FROM group_routes WHERE model_id = ?").bind(id).execute(pool).await?;
     q!("DELETE FROM models WHERE id = ?").bind(id).execute(pool).await?;
-    if let Some(p) = prov {
-        q!("DELETE FROM providers WHERE name = ?").bind(p).execute(pool).await?;
+    // 只有当 provider 下无其他模型时才删除 provider
+    if let Some(ref p) = prov {
+        let remaining: i64 = q!("SELECT COUNT(*) as cnt FROM models WHERE provider = ?")
+            .bind(p).fetch_one(pool).await?.get("cnt");
+        if remaining == 0 {
+            q!("DELETE FROM providers WHERE name = ?").bind(p).execute(pool).await?;
+        }
     }
     Ok(())
 }
 
 pub async fn list_models(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = q!(
-        "SELECT m.id, m.upstream_model, m.label, p.kind, p.base_url
-         FROM models m LEFT JOIN providers p ON p.name = m.provider ORDER BY m.id DESC")
+        "SELECT m.id, m.upstream_model, m.label, p.name as provider_name, p.kind, p.base_url
+         FROM models m LEFT JOIN providers p ON p.name = m.provider ORDER BY p.name, m.id")
         .fetch_all(pool).await?;
     Ok(rows.iter().map(|r| serde_json::json!({
         "id": r.get::<i64,_>("id"),
         "upstream_model": r.get::<String,_>("upstream_model"),
         "label": r.get::<Option<String>,_>("label"),
+        "provider": r.get::<Option<String>,_>("provider_name"),
         "kind": r.get::<Option<String>,_>("kind"),
         "base_url": r.get::<Option<String>,_>("base_url"),
     })).collect())
+}
+
+/// 某供应商下已存在的模型名集合（前端勾选时用于标记「已添加」）。
+pub async fn list_model_names_by_provider(pool: &Db, provider_name: &str) -> anyhow::Result<Vec<String>> {
+    let rows = q!("SELECT upstream_model FROM models WHERE provider = ?")
+        .bind(provider_name).fetch_all(pool).await?;
+    Ok(rows.iter().map(|r| r.get::<String, _>("upstream_model")).collect())
 }
 
 pub async fn add_group(pool: &Db, name: &str) -> anyhow::Result<i64> {
@@ -1645,4 +1764,212 @@ pub async fn set_settings(pool: &Db, items: &[(String, String)]) -> anyhow::Resu
         set_setting(pool, k, v).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 创建内存 SQLite 数据库并初始化 schema，供测试使用。
+    async fn test_db() -> Db {
+        sqlx::any::install_default_drivers();
+        let _ = BACKEND.set(Backend::Sqlite);
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:?mode=rwc")
+            .await
+            .expect("failed to connect in-memory sqlite");
+        init_schema(&pool).await.expect("init_schema failed");
+        pool
+    }
+
+    // ---- find_or_create_provider ----
+
+    #[tokio::test]
+    async fn find_or_create_provider_creates_new() {
+        let db = test_db().await;
+        let (name, created) = find_or_create_provider(&db, "openai", "https://api.test.com/v1", Some("sk-aaa"))
+            .await.unwrap();
+        assert!(created);
+        assert!(name.starts_with("prov-"));
+    }
+
+    #[tokio::test]
+    async fn find_or_create_provider_reuses_same_credentials() {
+        let db = test_db().await;
+        let (n1, c1) = find_or_create_provider(&db, "openai", "https://api.test.com/v1", Some("sk-aaa"))
+            .await.unwrap();
+        let (n2, c2) = find_or_create_provider(&db, "openai", "https://api.test.com/v1", Some("sk-aaa"))
+            .await.unwrap();
+        assert!(c1);
+        assert!(!c2);
+        assert_eq!(n1, n2);
+    }
+
+    #[tokio::test]
+    async fn find_or_create_provider_different_key_creates_new() {
+        let db = test_db().await;
+        let (n1, _) = find_or_create_provider(&db, "openai", "https://api.test.com/v1", Some("sk-aaa"))
+            .await.unwrap();
+        let (n2, created) = find_or_create_provider(&db, "openai", "https://api.test.com/v1", Some("sk-bbb"))
+            .await.unwrap();
+        assert!(created);
+        assert_ne!(n1, n2);
+    }
+
+    #[tokio::test]
+    async fn find_or_create_provider_both_empty_key() {
+        let db = test_db().await;
+        let (n1, _) = find_or_create_provider(&db, "openai", "https://api.test.com/v1", None)
+            .await.unwrap();
+        let (n2, created) = find_or_create_provider(&db, "openai", "https://api.test.com/v1", None)
+            .await.unwrap();
+        assert!(!created);
+        assert_eq!(n1, n2);
+    }
+
+    // ---- find_provider_by_credentials ----
+
+    #[tokio::test]
+    async fn find_provider_by_credentials_match() {
+        let db = test_db().await;
+        let (name, _) = find_or_create_provider(&db, "openai", "https://api.test.com/v1", Some("sk-aaa"))
+            .await.unwrap();
+        let found = find_provider_by_credentials(&db, "https://api.test.com/v1", Some("sk-aaa"))
+            .await.unwrap();
+        assert_eq!(found.as_deref(), Some(name.as_str()));
+    }
+
+    #[tokio::test]
+    async fn find_provider_by_credentials_no_match_different_key() {
+        let db = test_db().await;
+        let _ = find_or_create_provider(&db, "openai", "https://api.test.com/v1", Some("sk-aaa"))
+            .await.unwrap();
+        let found = find_provider_by_credentials(&db, "https://api.test.com/v1", Some("sk-bbb"))
+            .await.unwrap();
+        assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn find_provider_by_credentials_no_match_different_url() {
+        let db = test_db().await;
+        let _ = find_or_create_provider(&db, "openai", "https://api.test.com/v1", Some("sk-aaa"))
+            .await.unwrap();
+        let found = find_provider_by_credentials(&db, "https://other.com/v1", Some("sk-aaa"))
+            .await.unwrap();
+        assert!(found.is_none());
+    }
+
+    // ---- add_model_returning 幂等性 ----
+
+    #[tokio::test]
+    async fn add_model_returning_dedup() {
+        let db = test_db().await;
+        let (provider, _) = find_or_create_provider(&db, "openai", "https://api.test.com/v1", Some("sk-x"))
+            .await.unwrap();
+        let (_, is_new1) = add_model_returning(&db, &provider, "gpt-4o", None).await.unwrap();
+        let (_, is_new2) = add_model_returning(&db, &provider, "gpt-4o", None).await.unwrap();
+        assert!(is_new1);
+        assert!(!is_new2);
+        // 第三个不同模型
+        let (_, is_new3) = add_model_returning(&db, &provider, "gpt-4o-mini", None).await.unwrap();
+        assert!(is_new3);
+    }
+
+    // ---- list_providers 分页 ----
+
+    #[tokio::test]
+    async fn list_providers_empty() {
+        let db = test_db().await;
+        let (data, total) = list_providers(&db, None, None).await.unwrap();
+        assert_eq!(total, 0);
+        assert!(data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_providers_returns_all_within_page() {
+        let db = test_db().await;
+        // 创建 5 个 provider
+        for i in 0..5 {
+            let _ = find_or_create_provider(&db, "openai", &format!("https://api{i}.test.com/v1"), Some(&format!("sk-{i}")))
+                .await.unwrap();
+        }
+        let (data, total) = list_providers(&db, None, None).await.unwrap();
+        assert_eq!(total, 5);
+        assert_eq!(data.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn list_providers_pagination_page1() {
+        let db = test_db().await;
+        for i in 0..12 {
+            let _ = find_or_create_provider(&db, "openai", &format!("https://api{i}.test.com/v1"), Some(&format!("sk-{i}")))
+                .await.unwrap();
+        }
+        let (data, total) = list_providers(&db, Some(1), Some(5)).await.unwrap();
+        assert_eq!(total, 12);
+        assert_eq!(data.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn list_providers_pagination_page2() {
+        let db = test_db().await;
+        for i in 0..12 {
+            let _ = find_or_create_provider(&db, "openai", &format!("https://api{i}.test.com/v1"), Some(&format!("sk-{i}")))
+                .await.unwrap();
+        }
+        let (data, total) = list_providers(&db, Some(2), Some(5)).await.unwrap();
+        assert_eq!(total, 12);
+        assert_eq!(data.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn list_providers_pagination_last_page_partial() {
+        let db = test_db().await;
+        for i in 0..12 {
+            let _ = find_or_create_provider(&db, "openai", &format!("https://api{i}.test.com/v1"), Some(&format!("sk-{i}")))
+                .await.unwrap();
+        }
+        let (data, total) = list_providers(&db, Some(3), Some(5)).await.unwrap();
+        assert_eq!(total, 12);
+        assert_eq!(data.len(), 2); // 12 = 5+5+2
+    }
+
+    #[tokio::test]
+    async fn list_providers_pagination_beyond_last_page() {
+        let db = test_db().await;
+        for i in 0..3 {
+            let _ = find_or_create_provider(&db, "openai", &format!("https://api{i}.test.com/v1"), Some(&format!("sk-{i}")))
+                .await.unwrap();
+        }
+        let (data, total) = list_providers(&db, Some(10), Some(20)).await.unwrap();
+        assert_eq!(total, 3);
+        assert!(data.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_providers_model_count() {
+        let db = test_db().await;
+        let (p, _) = find_or_create_provider(&db, "openai", "https://api.test.com/v1", Some("sk-x"))
+            .await.unwrap();
+        let _ = add_model(&db, &p, "model-a", None).await.unwrap();
+        let _ = add_model(&db, &p, "model-b", None).await.unwrap();
+        let _ = add_model(&db, &p, "model-c", None).await.unwrap();
+        let (data, _) = list_providers(&db, None, None).await.unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["model_count"], 3);
+    }
+
+    #[tokio::test]
+    async fn list_providers_page_size_clamped() {
+        let db = test_db().await;
+        for i in 0..3 {
+            let _ = find_or_create_provider(&db, "openai", &format!("https://api{i}.test.com/v1"), Some(&format!("sk-{i}")))
+                .await.unwrap();
+        }
+        // page_size=0 应被 clamp 到 1
+        let (data, total) = list_providers(&db, Some(1), Some(0)).await.unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(data.len(), 1);
+    }
 }

@@ -40,6 +40,14 @@ export interface ModelRow {
   kind: string | null;
   base_url: string | null;
   upstream_model: string;
+  provider?: string | null;
+}
+
+export interface ProviderRow {
+  name: string;
+  kind: string;
+  base_url: string;
+  model_count: number;
 }
 
 export interface GroupRow { id: number; name: string; is_active: boolean; strategy: string }
@@ -107,6 +115,12 @@ export const api = {
     return req(`/admin/api/users/${id}/usage${s ? "?" + s : ""}`);
   },
 
+  // ---- 上游供应商(Provider) ----
+  providers: (page?: number, page_size?: number): Promise<{ data: ProviderRow[]; page: number; page_size: number; total: number; total_pages: number }> =>
+    req(`/admin/api/providers?page=${page || 1}&page_size=${page_size || 20}`),
+  providerModels: (name: string): Promise<{ data: { id: number; upstream_model: string; label: string | null }[] }> => req(`/admin/api/providers/${name}/models`),
+  deleteProvider: (name: string) => req(`/admin/api/providers/${name}`, { method: "DELETE" }),
+
   models: (): Promise<{ data: ModelRow[] }> => req("/admin/api/models"),
   addModel: (body: { label?: string; kind: string; base_url: string; api_key?: string; upstream_model: string }) =>
     req("/admin/api/models", { method: "POST", body: JSON.stringify(body) }),
@@ -115,6 +129,12 @@ export const api = {
   deleteModel: (id: number) => req(`/admin/api/models/${id}`, { method: "DELETE" }),
   testModel: (id: number): Promise<{ ok: boolean; latency_ms?: number; error?: string }> =>
     req(`/admin/api/models/${id}/test`, { method: "POST" }),
+  fetchModelList: (body: { kind: string; base_url: string; api_key?: string }): Promise<{ ok: boolean; models?: string[]; error?: string }> =>
+    req("/admin/api/models/fetch-list", { method: "POST", body: JSON.stringify(body) }),
+  addModelsBatch: (body: { kind: string; base_url: string; api_key?: string; models: { upstream_model: string; label?: string }[] }): Promise<{ ok: boolean; provider?: string; provider_created?: boolean; added?: number; skipped?: number }> =>
+    req("/admin/api/models/batch", { method: "POST", body: JSON.stringify(body) }),
+  providerExists: (base_url: string, api_key?: string): Promise<{ exists: boolean; name?: string; models?: string[] }> =>
+    req("/admin/api/providers/exists", { method: "POST", body: JSON.stringify({ base_url, api_key }) }),
 
   groups: (): Promise<{ data: GroupRow[] }> => req("/admin/api/groups"),
   addGroup: (name: string) => req("/admin/api/groups", { method: "POST", body: JSON.stringify({ name }) }),
@@ -133,6 +153,8 @@ export const api = {
   routes: (groupId: number): Promise<{ data: RouteRow[] }> => req(`/admin/api/groups/${groupId}/routes`),
   addRoute: (groupId: number, body: { public_name: string; model_id: number; weight?: number; multiplier?: number }) =>
     req(`/admin/api/groups/${groupId}/routes`, { method: "POST", body: JSON.stringify(body) }),
+  addRoutesBatch: (groupId: number, body: { routes: { public_name: string; model_id: number; weight?: number; multiplier?: number }[] }): Promise<{ ok: boolean; ids?: number[] }> =>
+    req(`/admin/api/groups/${groupId}/routes/batch`, { method: "POST", body: JSON.stringify(body) }),
   updateRoute: (id: number, body: { public_name: string; model_id: number; weight?: number; multiplier?: number }) =>
     req(`/admin/api/routes/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteRoute: (id: number) => req(`/admin/api/routes/${id}`, { method: "DELETE" }),

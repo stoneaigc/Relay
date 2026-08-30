@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
 import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch } from "lucide-react";
-import { api, getToken, setToken, clearToken, UserRow, ModelRow, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload } from "./api";
+import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -34,7 +34,21 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
   return (
     <div className="flex min-h-screen items-center justify-center p-4">
       <Card className="w-full max-w-sm">
-        <CardHeader><CardTitle className="text-xl">Rel<span className="text-primary">ay</span> 管理后台</CardTitle></CardHeader>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-xl">
+            <svg viewBox="0 0 64 64" className="h-7 w-7 shrink-0">
+              <defs><linearGradient id="alg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style={{stopColor:'#6366f1'}}/><stop offset="100%" style={{stopColor:'#8b5cf6'}}/></linearGradient></defs>
+              <rect width="64" height="64" rx="14" fill="url(#alg)"/>
+              <path d="M10 32 L24 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
+              <path d="M18 25 L10 32 L18 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+              <polygon points="32,16 44,24 44,40 32,48 20,40 20,24" fill="none" stroke="white" strokeWidth="3" strokeLinejoin="round"/>
+              <path d="M35 22 L28 33 L34 33 L29 44" stroke="white" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+              <path d="M40 32 L54 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
+              <path d="M46 25 L54 32 L46 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+            </svg>
+            <span>Rel<span className="text-primary">ay</span> 管理后台</span>
+          </CardTitle>
+        </CardHeader>
         <CardContent className="space-y-3">
           <Input placeholder="用户名" value={u} onChange={(e) => setU(e.target.value)} />
           <PasswordInput placeholder="密码" value={p} onChange={(e) => setP(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
@@ -69,7 +83,19 @@ function Console({ onLogout }: { onLogout: () => void }) {
   const sidebar = (
     <>
       <div className="flex items-center justify-between px-4 py-4">
-        <div className="text-lg font-bold">Rel<span className="text-primary">ay</span></div>
+        <div className="flex items-center gap-2 text-lg font-bold">
+          <svg viewBox="0 0 64 64" className="h-7 w-7 shrink-0">
+            <defs><linearGradient id="ag" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style={{stopColor:'#6366f1'}}/><stop offset="100%" style={{stopColor:'#8b5cf6'}}/></linearGradient></defs>
+            <rect width="64" height="64" rx="14" fill="url(#ag)"/>
+            <path d="M10 32 L24 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
+            <path d="M18 25 L10 32 L18 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+            <polygon points="32,16 44,24 44,40 32,48 20,40 20,24" fill="none" stroke="white" strokeWidth="3" strokeLinejoin="round"/>
+            <path d="M35 22 L28 33 L34 33 L29 44" stroke="white" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+            <path d="M40 32 L54 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
+            <path d="M46 25 L54 32 L46 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+          </svg>
+          <span>Rel<span className="text-primary">ay</span></span>
+        </div>
         <button className="md:hidden" onClick={() => setMobileOpen(false)}><X className="h-5 w-5" /></button>
       </div>
       <nav className="flex-1 space-y-1 px-2">
@@ -529,25 +555,69 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
 
 
 function ModelsPanel() {
-  const [models, setModels] = useState<ModelRow[]>([]);
-  const [dlg, setDlg] = useState<{ edit: ModelRow | null } | null>(null);
+  const [providers, setProviders] = useState<ProviderRow[]>([]);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [providerModels, setProviderModels] = useState<Record<string, { id: number; upstream_model: string; label: string | null }[]>>({});
+  const [addDlg, setAddDlg] = useState(false);
+  const [editModel, setEditModel] = useState<ModelRow | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [test, setTest] = useState<Record<number, "loading" | { ok: boolean; msg: string }>>({});
-  const load = async () => { setModels((await api.models()).data); };
-  useEffect(() => { load(); }, []);
-  const del = (m: ModelRow) => setConfirm({
-    title: `删除模型「${m.label || m.upstream_model}」?`,
-    desc: "引用该模型的组内路由会一并删除,使用它的调用将失败。",
-    action: async () => { await api.deleteModel(m.id); load(); },
+  const [page, setPage] = useState(1);
+  const [pageMeta, setPageMeta] = useState({ total: 0, total_pages: 1 });
+
+  const loadProviders = async (p?: number) => {
+    const pg = p ?? page;
+    const r = await api.providers(pg);
+    setProviders(r.data);
+    setPageMeta({ total: r.total, total_pages: r.total_pages });
+    setPage(pg);
+  };
+  useEffect(() => { loadProviders(1); }, []);
+
+  const toggleExpand = async (name: string) => {
+    const next = new Set(expanded);
+    if (next.has(name)) { next.delete(name); }
+    else {
+      next.add(name);
+      if (!providerModels[name]) {
+        const models = (await api.providerModels(name)).data;
+        setProviderModels((prev) => ({ ...prev, [name]: models }));
+      }
+    }
+    setExpanded(next);
+  };
+
+  const delProvider = (p: ProviderRow) => setConfirm({
+    title: `删除上游「${p.name}」?`,
+    desc: `将删除该上游下的 ${p.model_count} 个模型及其所有路由，不可恢复。`,
+    action: async () => { await api.deleteProvider(p.name); loadProviders(); },
   });
+
+  const delModel = (m: { id: number; upstream_model: string }) => setConfirm({
+    title: `删除模型「${m.upstream_model}」?`,
+    desc: "引用该模型的组内路由会一并删除。",
+    action: async () => { await api.deleteModel(m.id); loadProviders(); },
+  });
+
   const runTest = async (id: number) => {
     setTest((t) => ({ ...t, [id]: "loading" }));
     try {
       const r = await api.testModel(id);
       setTest((t) => ({ ...t, [id]: { ok: r.ok, msg: r.ok ? `${r.latency_ms}ms` : (r.error || "失败") } }));
-    } catch (e: any) {
-      setTest((t) => ({ ...t, [id]: { ok: false, msg: e.message } }));
-    }
+    } catch (e: any) { setTest((t) => ({ ...t, [id]: { ok: false, msg: e.message } })); }
+  };
+
+  // 获取 provider 的可读名称
+  const providerDisplayName = (url: string) => {
+    const h = url.replace(/^https?:\/\//, "").split("/")[0];
+    if (h.includes("deepseek")) return "DeepSeek";
+    if (h.includes("openai")) return "OpenAI";
+    if (h.includes("anthropic")) return "Anthropic";
+    if (h.includes("dashscope")) return "通义千问";
+    if (h.includes("bigmodel")) return "智谱 GLM";
+    if (h.includes("moonshot")) return "Moonshot";
+    if (h.includes("localhost") || h.includes("127.0.0.1")) return "本地服务";
+    return h;
   };
 
   return (
@@ -555,160 +625,242 @@ function ModelsPanel() {
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
-            <CardTitle className="text-base">模型({models.length})</CardTitle>
-            <Button size="sm" onClick={() => setDlg({ edit: null })}><Plus className="h-4 w-4" />添加模型</Button>
+            <CardTitle className="text-base">上游供应商({pageMeta.total})</CardTitle>
+            <Button size="sm" onClick={() => setAddDlg(true)}><Plus className="h-4 w-4" />添加上游</Button>
           </div>
         </CardHeader>
-        <CardContent>
-          <Table>
-            <TableHeader><TableRow>
-              <TableHead>备注</TableHead><TableHead>协议</TableHead><TableHead>上游模型</TableHead><TableHead>Base URL</TableHead><TableHead className="text-right">操作</TableHead>
-            </TableRow></TableHeader>
-            <TableBody>
-              {models.map((m) => (
-                <TableRow key={m.id}>
-                  <TableCell>{m.label || <span className="text-muted-foreground">—</span>}</TableCell>
-                  <TableCell><Badge variant="muted">{m.kind}</Badge></TableCell>
-                  <TableCell className="mono">{m.upstream_model}</TableCell>
-                  <TableCell className="mono text-xs">{m.base_url}</TableCell>
-                  <TableCell className="text-right w-[210px]">
-                    <div className="flex items-center justify-end gap-2">
-                      {(() => {
-                        const r = test[m.id];
-                        if (r === "loading") return <span className="min-w-[64px] text-right text-xs text-muted-foreground">校验中…</span>;
-                        if (r) return <span className={cn("min-w-[64px] max-w-[120px] truncate text-right text-xs", r.ok ? "text-success" : "text-destructive")} title={r.msg}>{r.ok ? `✓ ${r.msg}` : `✗ ${r.msg}`}</span>;
-                        return <span className="min-w-[64px]" />;
-                      })()}
-                      <RowActions actions={[
-                        { label: "校验", icon: <Activity className="h-4 w-4" />, onClick: () => runTest(m.id) },
-                        { label: "编辑", icon: <Pencil className="h-4 w-4" />, onClick: () => setDlg({ edit: m }) },
-                        { label: "删除", icon: <Trash2 className="h-4 w-4" />, variant: "destructive", onClick: () => del(m) },
-                      ]} />
+        <CardContent className="space-y-3">
+          {providers.length === 0 && <p className="text-sm text-muted-foreground">暂无上游供应商，点击「添加上游」开始</p>}
+          {providers.map((p) => (
+            <div key={p.name} className="rounded-lg border">
+              {/* Provider 头部 */}
+              <div className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-muted/50" onClick={() => toggleExpand(p.name)}>
+                <div className="flex items-center gap-3">
+                  <Zap className="h-4 w-4 text-primary" />
+                  <div>
+                    <div className="text-sm font-medium">{providerDisplayName(p.base_url)}</div>
+                    <div className="text-xs text-muted-foreground">{p.base_url}</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Badge variant="muted">{p.kind}</Badge>
+                  <span className="text-xs text-muted-foreground">{p.model_count} 个模型</span>
+                  <button className="text-xs text-destructive hover:underline" onClick={(e) => { e.stopPropagation(); delProvider(p); }}>删除</button>
+                </div>
+              </div>
+              {/* 展开的模型列表 */}
+              {expanded.has(p.name) && (
+                <div className="border-t">
+                  {providerModels[p.name]?.length === 0 && (
+                    <p className="px-4 py-2 text-xs text-muted-foreground">该供应商下暂无模型</p>
+                  )}
+                  {providerModels[p.name]?.map((m) => (
+                    <div key={m.id} className="flex items-center justify-between px-4 py-2 border-t first:border-t-0">
+                      <div className="flex items-center gap-3">
+                        <Boxes className="h-3.5 w-3.5 text-muted-foreground" />
+                        <span className="text-sm">{m.label || m.upstream_model}</span>
+                        {m.label && <span className="text-xs text-muted-foreground">{m.upstream_model}</span>}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {(() => {
+                          const r = test[m.id];
+                          if (r === "loading") return <span className="text-xs text-muted-foreground">校验中…</span>;
+                          if (r) return <span className={cn("text-xs", r.ok ? "text-success" : "text-destructive")} title={r.msg}>{r.ok ? `✓ ${r.msg}` : `✗ ${r.msg}`}</span>;
+                          return null;
+                        })()}
+                        <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => runTest(m.id)}><Activity className="h-3 w-3" /></Button>
+                        <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => setEditModel({ id: m.id, label: m.label, kind: p.kind, base_url: p.base_url, upstream_model: m.upstream_model, provider: p.name })}><Pencil className="h-3 w-3" /></Button>
+                        <Button variant="ghost" size="sm" className="h-7 px-2 text-destructive" onClick={() => delModel(m)}><Trash2 className="h-3 w-3" /></Button>
+                      </div>
                     </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+          {pageMeta.total_pages > 1 && (
+            <div className="flex items-center justify-center gap-2 pt-3">
+              <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => loadProviders(page - 1)}>上一页</Button>
+              <span className="text-xs text-muted-foreground">{page}/{pageMeta.total_pages}</span>
+              <Button variant="outline" size="sm" disabled={page >= pageMeta.total_pages} onClick={() => loadProviders(page + 1)}>下一页</Button>
+            </div>
+          )}
         </CardContent>
       </Card>
-      <AddModelDialog dlg={dlg} onClose={() => setDlg(null)} onSaved={load} />
+      <AddProviderDialog open={addDlg} onClose={() => setAddDlg(false)} onSaved={loadProviders} />
+      {editModel && <EditModelDialog model={editModel} onClose={() => setEditModel(null)} onSaved={() => { setEditModel(null); loadProviders(); }} />}
       <ConfirmDialog confirm={confirm} onClose={() => setConfirm(null)} />
     </div>
   );
 }
 
-function AddModelDialog({ dlg, onClose, onSaved }: { dlg: { edit: ModelRow | null } | null; onClose: () => void; onSaved: () => void }) {
-  const open = !!dlg;
-  const edit = dlg?.edit ?? null;
-  const [label, setLabel] = useState("");
+// ---- 添加上游对话框 ----
+function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose: () => void; onSaved: () => void }) {
   const [kind, setKind] = useState("openai");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
-  const [upstream, setUpstream] = useState("");
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
+  const [fetching, setFetching] = useState(false);
   const [err, setErr] = useState("");
-  useEffect(() => {
-    if (open) {
-      setLabel(edit?.label ?? ""); setKind(edit?.kind ?? "openai"); setBaseUrl(edit?.base_url ?? "");
-      setApiKey(""); setUpstream(edit?.upstream_model ?? ""); setErr("");
-    }
-  }, [dlg]);
+  const [submitting, setSubmitting] = useState(false);
 
-  // 主流供应商模板:选一个自动带出协议 + base_url;选"自定义"则完全手填。
-  const PROVIDER_TEMPLATES: Record<string, { kind: string; base_url: string; hint?: string }> = {
-    custom: { kind: "", base_url: "", hint: "手动填写协议、Base URL 与上游模型名" },
-    anthropic: { kind: "anthropic", base_url: "https://api.anthropic.com", hint: "v1/messages,填模型名如 claude-sonnet-4-5" },
-    openai: { kind: "openai", base_url: "https://api.openai.com/v1", hint: "填模型名如 gpt-4o" },
-    deepseek: { kind: "openai", base_url: "https://api.deepseek.com/v1", hint: "填模型名如 deepseek-chat" },
-    qwen: { kind: "openai", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", hint: "阿里通义,填模型名如 qwen-max" },
-    zhipu: { kind: "openai", base_url: "https://open.bigmodel.cn/api/paas/v4", hint: "智谱 GLM,填模型名如 glm-4-plus" },
-    moonshot: { kind: "openai", base_url: "https://api.moonshot.cn/v1", hint: "Kimi,填模型名如 kimi-k2-0905-preview" },
-    qianfan: { kind: "openai", base_url: "https://qianfan.baidubce.com/v2", hint: "百度千帆,填模型名如 ernie-4.0-8k" },
-    hunyuan: { kind: "openai", base_url: "https://api.hunyuan.cloud.tencent.com/v1", hint: "腾讯混元,填模型名如 hunyuan-turbo" },
-    ollama: { kind: "openai", base_url: "http://localhost:11434/v1", hint: "本地 Ollama,填模型名如 llama3" },
+  const TEMPLATES: Record<string, { kind: string; base_url: string }> = {
+    custom: { kind: "", base_url: "" },
+    anthropic: { kind: "anthropic", base_url: "https://api.anthropic.com" },
+    openai: { kind: "openai", base_url: "https://api.openai.com/v1" },
+    deepseek: { kind: "openai", base_url: "https://api.deepseek.com/v1" },
+    qwen: { kind: "openai", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+    zhipu: { kind: "openai", base_url: "https://open.bigmodel.cn/api/paas/v4" },
+    moonshot: { kind: "openai", base_url: "https://api.moonshot.cn/v1" },
+    ollama: { kind: "openai", base_url: "http://localhost:11434/v1" },
   };
-  const [providerAc, setProviderAc] = useState<string>(""); // 当前选中模板(ac 避免与 providers 概念混淆)
+  const [tpl, setTpl] = useState("custom");
   const applyTemplate = (key: string) => {
-    setProviderAc(key);
-    if (key !== "custom") {
-      const t = PROVIDER_TEMPLATES[key];
-      setKind(t.kind);
-      setBaseUrl(t.base_url);
-    }
+    setTpl(key);
+    if (key !== "custom") { const t = TEMPLATES[key]; setKind(t.kind); setBaseUrl(t.base_url); }
   };
-  const suggestUpstream = (key: string): string => {
-    switch (key) {
-      case "anthropic": return "claude-sonnet-4-5";
-      case "openai": return "gpt-4o-mini";
-      case "deepseek": return "deepseek-chat";
-      case "qwen": return "qwen-plus";
-      case "zhipu": return "glm-4-flash";
-      case "moonshot": return "moonshot-v1-8k";
-      case "qianfan": return "ernie-3.5-8k";
-      case "hunyuan": return "hunyuan-turbo";
-      case "ollama": return "llama3";
-      default: return "";
-    }
+
+  const doFetch = async () => {
+    if (!baseUrl.trim()) { setErr("请先填写 Base URL"); return; }
+    setFetching(true); setErr(""); setSelectedModels(new Set());
+    try {
+      const r = await api.fetchModelList({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined });
+      if (r.ok && r.models) setFetchedModels(r.models);
+      else { setErr(r.error || "获取失败"); setFetchedModels([]); }
+    } catch (e: any) { setErr(e.message); setFetchedModels([]); }
+    setFetching(false);
   };
-  const applyTemplateWithModel = (key: string) => {
-    applyTemplate(key);
-    if (key !== "custom" && !edit) setUpstream(suggestUpstream(key));
+
+  const toggle = (m: string) => {
+    setSelectedModels((prev) => { const n = new Set(prev); if (n.has(m)) n.delete(m); else n.add(m); return n; });
+  };
+  const toggleAll = () => {
+    if (selectedModels.size === fetchedModels.length) setSelectedModels(new Set());
+    else setSelectedModels(new Set(fetchedModels));
   };
 
   const submit = async () => {
-    setErr("");
+    setErr(""); setSubmitting(true);
     try {
-      const body = { label: label.trim() || undefined, kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, upstream_model: upstream.trim() };
-      if (edit) await api.updateModel(edit.id, body); else await api.addModel(body);
+      if (selectedModels.size > 0) {
+        const items = [...selectedModels].map((m) => ({ upstream_model: m, label: m }));
+        await api.addModelsBatch({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, models: items });
+      } else {
+        await api.addModel({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, upstream_model: "custom-model" });
+      }
       onSaved(); onClose();
     } catch (e: any) { setErr(e.message); }
+    setSubmitting(false);
   };
+
   const sel = "h-9 w-full rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
+      <DialogContent className={fetchedModels.length > 0 ? "max-w-2xl" : ""}>
         <DialogHeader>
-          <DialogTitle>{edit ? "编辑模型" : "添加三方模型"}</DialogTitle>
-          <DialogDescription>填该模型的上游连接,密钥直接保存,重启不丢。{edit && "(密钥留空则保持不变)"}</DialogDescription>
+          <DialogTitle>添加上游</DialogTitle>
+          <DialogDescription>选择供应商后可探测模型列表并批量添加</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
-          <div><label className="mb-1 block text-xs text-muted-foreground">备注/显示名(可选)</label>
-            <Input placeholder="如 智谱 GLM-4" value={label} onChange={(e) => setLabel(e.target.value)} autoFocus /></div>
-          {!edit && (
-            <div><label className="mb-1 block text-xs text-muted-foreground">供应商模板(选内置自动带出协议与地址,亦可用自定义)</label>
-              <select value={providerAc || "custom"} onChange={(e) => applyTemplateWithModel(e.target.value)} className={sel}>
-                <option value="custom">自定义(手动填写)</option>
-                <option value="anthropic">Anthropic 官方</option>
-                <option value="openai">OpenAI 官方</option>
-                <option value="deepseek">DeepSeek</option>
-                <option value="qwen">通义千问(阿里)</option>
-                <option value="zhipu">智谱 GLM</option>
-                <option value="moonshot">Moonshot Kimi</option>
-                <option value="qianfan">百度千帆</option>
-                <option value="hunyuan">腾讯混元</option>
-                <option value="ollama">Ollama 本地</option>
-              </select>
-              {PROVIDER_TEMPLATES[providerAc || "custom"]?.hint && (
-                <p className="mt-1 text-[11px] text-muted-foreground">{PROVIDER_TEMPLATES[providerAc || "custom"].hint}</p>
-              )}
+          <div><label className="mb-1 block text-xs text-muted-foreground">供应商模板</label>
+            <select value={tpl} onChange={(e) => applyTemplate(e.target.value)} className={sel}>
+              <option value="custom">自定义</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="qwen">通义千问</option>
+              <option value="zhipu">智谱 GLM</option>
+              <option value="moonshot">Moonshot Kimi</option>
+              <option value="ollama">Ollama 本地</option>
+            </select></div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="mb-1 block text-xs text-muted-foreground">协议</label>
+              <select value={kind} onChange={(e) => setKind(e.target.value)} className={sel}>
+                <option value="openai">openai 兼容</option><option value="anthropic">anthropic</option>
+              </select></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">Base URL</label>
+              <Input placeholder="https://api.deepseek.com/v1" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} /></div>
+          </div>
+          <div><label className="mb-1 block text-xs text-muted-foreground">API Key (可选)</label>
+            <Input type="password" placeholder="sk-..." value={apiKey} onChange={(e) => setApiKey(e.target.value)} /></div>
+          <Button type="button" variant="outline" size="sm" onClick={doFetch} disabled={fetching || !baseUrl.trim()} className="w-full">
+            <Search className="h-4 w-4 mr-1" />{fetching ? "探测中..." : "探测模型列表"}
+          </Button>
+          {fetchedModels.length > 0 && (
+            <div className="rounded-lg border bg-card">
+              <div className="flex items-center justify-between border-b px-3 py-2">
+                <span className="text-sm font-medium">勾选模型 ({selectedModels.size}/{fetchedModels.length})</span>
+                <button className="text-xs text-primary hover:underline" onClick={toggleAll}>{selectedModels.size === fetchedModels.length ? "取消全选" : "全选"}</button>
+              </div>
+              <div className="max-h-52 overflow-y-auto">
+                {fetchedModels.map((m) => (
+                  <label key={m} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-accent">
+                    <input type="checkbox" checked={selectedModels.has(m)} onChange={() => toggle(m)} className="h-4 w-4 rounded border-input" />
+                    <span className="flex-1">{m}</span>
+                    {selectedModels.has(m) && <Check className="h-4 w-4 text-primary" />}
+                  </label>
+                ))}
+              </div>
             </div>
           )}
-          <div><label className="mb-1 block text-xs text-muted-foreground">协议</label>
-            <select value={kind} onChange={(e) => setKind(e.target.value)} className={sel}>
-              <option value="openai">openai 兼容</option><option value="anthropic">anthropic</option>
-            </select></div>
-          <div><label className="mb-1 block text-xs text-muted-foreground">Base URL</label>
-            <Input placeholder="如 https://api.deepseek.com/v1" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} /></div>
-          <div><label className="mb-1 block text-xs text-muted-foreground">API 密钥{edit ? "(留空保持不变)" : "(可选,留空则不加鉴权头)"}</label>
-            <Input type="password" placeholder={edit ? "留空保持原密钥" : "sk-...(本地无鉴权服务可留空)"} value={apiKey} onChange={(e) => setApiKey(e.target.value)} /></div>
-          <div><label className="mb-1 block text-xs text-muted-foreground">上游模型名(供应商真实模型名)</label>
-            <Input placeholder={edit ? "" : "如 deepseek-chat"} value={upstream} onChange={(e) => setUpstream(e.target.value)} /></div>
           {err && <p className="text-sm text-destructive">{err}</p>}
         </div>
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>取消</Button>
-          <Button onClick={submit} disabled={!baseUrl.trim() || !upstream.trim()}><Plus className="h-4 w-4" />{edit ? "保存" : "添加"}</Button>
+          <Button onClick={submit} disabled={submitting || (fetchedModels.length > 0 && selectedModels.size === 0)}>
+            {submitting ? "提交中..." : selectedModels.size > 0 ? `添加 (${selectedModels.size} 个模型)` : "添加"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---- 编辑单个模型对话框 ----
+function EditModelDialog({ model, onClose, onSaved }: { model: ModelRow; onClose: () => void; onSaved: () => void }) {
+  const [label, setLabel] = useState(model.label ?? "");
+  const [upstream, setUpstream] = useState(model.upstream_model);
+  const [err, setErr] = useState("");
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  const submit = async () => {
+    setErr("");
+    try {
+      await api.updateModel(model.id, { kind: model.kind || "openai", base_url: model.base_url || "", upstream_model: upstream.trim(), label: label.trim() || undefined });
+      onSaved();
+    } catch (e: any) { setErr(e.message); }
+  };
+
+  const doTest = async () => {
+    setTesting(true); setTestResult(null);
+    try {
+      const r = await api.testModel(model.id);
+      setTestResult({ ok: r.ok, msg: r.ok ? `${r.latency_ms}ms` : (r.error || "失败") });
+    } catch (e: any) { setTestResult({ ok: false, msg: e.message }); }
+    setTesting(false);
+  };
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader><DialogTitle>编辑模型</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <div><label className="mb-1 block text-xs text-muted-foreground">备注</label>
+            <Input value={label} onChange={(e) => setLabel(e.target.value)} /></div>
+          <div><label className="mb-1 block text-xs text-muted-foreground">上游模型名</label>
+            <Input value={upstream} onChange={(e) => setUpstream(e.target.value)} /></div>
+          <Button variant="outline" size="sm" onClick={doTest} disabled={testing} className="w-full">
+            <Activity className="h-4 w-4 mr-1" />{testing ? "测试中..." : "测试连通性"}
+          </Button>
+          {testResult && <p className={`text-xs ${testResult.ok ? "text-green-600" : "text-destructive"}`}>{testResult.ok ? `连通正常 (${testResult.msg})` : testResult.msg}</p>}
+          {err && <p className="text-sm text-destructive">{err}</p>}
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>取消</Button>
+          <Button onClick={submit}>保存</Button>
         </div>
       </DialogContent>
     </Dialog>
@@ -927,47 +1079,175 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
   const [weight, setWeight] = useState("100");
   const [mult, setMult] = useState("1");
   const [err, setErr] = useState("");
+  // 批量模式
+  const [selectedModels, setSelectedModels] = useState<Set<number>>(new Set());
+  const [routeRows, setRouteRows] = useState<Map<number, { public_name: string; weight: string; multiplier: string }>>(new Map());
+  const [submitting, setSubmitting] = useState(false);
   useEffect(() => {
     if (open) {
-      setPublicName(edit?.public_name ?? ""); setModelId(edit?.model_id ?? models[0]?.id ?? "");
-      setWeight(String(edit?.weight ?? 100)); setMult(String(edit?.multiplier ?? 1)); setErr("");
+      if (edit) {
+        setPublicName(edit.public_name); setModelId(edit.model_id);
+        setWeight(String(edit.weight)); setMult(String(edit.multiplier));
+      } else {
+        setPublicName(""); setModelId(models[0]?.id ?? "");
+        setWeight("100"); setMult("1");
+        setSelectedModels(new Set()); setRouteRows(new Map());
+      }
+      setErr("");
     }
   }, [dlg]);
 
+  const toggleModel = (id: number) => {
+    setSelectedModels(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) { next.delete(id); routeRows.delete(id); }
+      else {
+        next.add(id);
+        const m = models.find(x => x.id === id);
+        routeRows.set(id, { public_name: m?.upstream_model || "", weight: "100", multiplier: "1" });
+      }
+      setRouteRows(new Map(routeRows));
+      return next;
+    });
+  };
+
+  const updateRow = (id: number, field: string, value: string) => {
+    const row = routeRows.get(id);
+    if (row) { routeRows.set(id, { ...row, [field]: value }); setRouteRows(new Map(routeRows)); }
+  };
+
+  // 编辑模式:单个提交;批量模式:多条提交
   const submit = async () => {
-    setErr("");
+    setErr(""); setSubmitting(true);
     try {
-      const body = { public_name: publicName.trim(), model_id: Number(modelId), weight: Number(weight) || 100, multiplier: Number(mult) || 1 };
-      if (edit) await api.updateRoute(edit.id, body); else await api.addRoute(groupId, body);
+      if (edit) {
+        await api.updateRoute(edit.id, { public_name: publicName.trim(), model_id: Number(modelId), weight: Number(weight) || 100, multiplier: Number(mult) || 1 });
+      } else if (selectedModels.size > 0) {
+        const routes = [...selectedModels].map(id => {
+          const row = routeRows.get(id);
+          return { public_name: row?.public_name || "", model_id: id, weight: Number(row?.weight) || 100, multiplier: Number(row?.multiplier) || 1 };
+        }).filter(r => r.public_name.trim());
+        if (routes.length === 0) { setErr("请至少填写一个对外模型名"); setSubmitting(false); return; }
+        await api.addRoutesBatch(groupId, { routes });
+      } else {
+        await api.addRoute(groupId, { public_name: publicName.trim(), model_id: Number(modelId), weight: Number(weight) || 100, multiplier: Number(mult) || 1 });
+      }
       onSaved(); onClose();
     } catch (e: any) { setErr(e.message); }
+    setSubmitting(false);
   };
+
+  const batchMode = !edit && selectedModels.size > 0;
   const sel = "h-9 w-full rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
+
+  // 按供应商分组的模型列表
+  const modelGroups = (() => {
+    const seen = new Map<string, { label: string; items: ModelRow[] }>();
+    for (const m of models) {
+      const key = m.base_url || "unknown";
+      if (!seen.has(key)) {
+        let name = key.replace(/^https?:\/\//, "").split("/")[0];
+        if (name.includes("deepseek")) name = "DeepSeek";
+        else if (name.includes("openai")) name = "OpenAI";
+        else if (name.includes("anthropic")) name = "Anthropic";
+        else if (name.includes("dashscope")) name = "通义千问";
+        else if (name.includes("bigmodel")) name = "智谱 GLM";
+        else if (name.includes("moonshot")) name = "Moonshot";
+        else if (name.includes("localhost")) name = "本地(Ollama等)";
+        seen.set(key, { label: name, items: [] });
+      }
+      seen.get(key)!.items.push(m);
+    }
+    return [...seen.values()];
+  })();
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
+      <DialogContent className={batchMode ? "max-w-3xl max-h-[85vh]" : ""}>
         <DialogHeader>
           <DialogTitle>{edit ? "编辑路由" : "添加路由"}</DialogTitle>
-          <DialogDescription>对外模型名 → 实际模型;用户请求对外名,响应里保持这个名字。</DialogDescription>
+          <DialogDescription>对外模型名 → 实际模型;可多选模型批量添加。</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
-          <div><label className="mb-1 block text-xs text-muted-foreground">对外模型名(用户请求用)</label>
-            <Input placeholder="如 deepseek-chat / claude-3-5-sonnet" value={publicName} onChange={(e) => setPublicName(e.target.value)} autoFocus /></div>
-          <div><label className="mb-1 block text-xs text-muted-foreground">实际路由到的模型</label>
-            <select value={modelId} onChange={(e) => setModelId(Number(e.target.value))} className={sel}>
-              {models.map((m) => <option key={m.id} value={m.id}>{(m.label ? m.label + " · " : "") + m.upstream_model + " (" + (m.kind ?? "") + ")"}</option>)}
-            </select>
-            {models.length === 0 && <p className="mt-1 text-xs text-destructive">请先在「模型」里添加模型</p>}</div>
-          <div className="grid grid-cols-2 gap-3">
-            <div><label className="mb-1 block text-xs text-muted-foreground">权重</label><Input value={weight} onChange={(e) => setWeight(e.target.value)} /></div>
-            <div><label className="mb-1 block text-xs text-muted-foreground">倍率</label><Input value={mult} onChange={(e) => setMult(e.target.value)} /></div>
-          </div>
+          {edit ? (
+            /* 编辑模式:单个路由 */
+            <>
+              <div><label className="mb-1 block text-xs text-muted-foreground">对外模型名</label>
+                <Input value={publicName} onChange={(e) => setPublicName(e.target.value)} autoFocus /></div>
+              <div><label className="mb-1 block text-xs text-muted-foreground">选择模型</label>
+                <select value={modelId} onChange={(e) => setModelId(Number(e.target.value))} className={sel}>
+                  {modelGroups.map((g) => (
+                    <optgroup key={g.label} label={g.label}>
+                      {g.items.map((m) => <option key={m.id} value={m.id}>{m.label || m.upstream_model} — {m.upstream_model}</option>)}
+                    </optgroup>
+                  ))}
+                </select></div>
+              <div className="grid grid-cols-2 gap-3">
+                <div><label className="mb-1 block text-xs text-muted-foreground">权重</label><Input value={weight} onChange={(e) => setWeight(e.target.value)} /></div>
+                <div><label className="mb-1 block text-xs text-muted-foreground">倍率</label><Input value={mult} onChange={(e) => setMult(e.target.value)} /></div>
+              </div>
+            </>
+          ) : (
+            /* 新建模式:多选模型 + 每行配置 */
+            <>
+              <div><label className="mb-1 block text-xs text-muted-foreground">选择要添加路由的模型(可多选)</label>
+                <div className="rounded-lg border bg-card">
+                  {modelGroups.map((g) => (
+                    <div key={g.label}>
+                      <div className="border-b bg-muted/50 px-3 py-1 text-xs font-medium text-muted-foreground">{g.label}</div>
+                      {g.items.map((m) => (
+                        <label key={m.id} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-accent">
+                          <input type="checkbox" checked={selectedModels.has(m.id)} onChange={() => toggleModel(m.id)} className="h-4 w-4 rounded border-input" />
+                          <span className="flex-1">{m.label || m.upstream_model}</span>
+                          <span className="text-xs text-muted-foreground">{m.upstream_model}</span>
+                        </label>
+                      ))}
+                    </div>
+                  ))}
+                  {models.length === 0 && <p className="px-3 py-2 text-xs text-destructive">请先在「模型」里添加模型</p>}
+                </div>
+              </div>
+              {/* 每个选中的模型生成一行配置 */}
+              {batchMode && (
+                <div className="space-y-2">
+                  <label className="block text-xs font-medium text-muted-foreground">配置每条路由</label>
+                  <div className="max-h-64 space-y-2 overflow-y-auto rounded-lg border p-3">
+                    {[...selectedModels].map(id => {
+                      const m = models.find(x => x.id === id);
+                      const row = routeRows.get(id);
+                      if (!m || !row) return null;
+                      return (
+                        <div key={id} className="grid grid-cols-[1fr_120px_70px_70px] items-center gap-2 text-sm">
+                          <div>
+                            <div className="text-xs text-muted-foreground">{m.label || m.upstream_model}</div>
+                            <Input value={row.public_name} onChange={(e) => updateRow(id, "public_name", e.target.value)} placeholder="对外模型名" className="h-8 text-xs" />
+                          </div>
+                          <div>
+                            <div className="text-xs text-muted-foreground">权重</div>
+                            <Input value={row.weight} onChange={(e) => updateRow(id, "weight", e.target.value)} className="h-8 text-xs" />
+                          </div>
+                          <div>
+                            <div className="text-xs text-muted-foreground">倍率</div>
+                            <Input value={row.multiplier} onChange={(e) => updateRow(id, "multiplier", e.target.value)} className="h-8 text-xs" />
+                          </div>
+                          <div className="flex items-end pb-1">
+                            <button onClick={() => toggleModel(id)} className="text-xs text-destructive hover:underline">移除</button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
           {err && <p className="text-sm text-destructive">{err}</p>}
         </div>
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>取消</Button>
-          <Button onClick={submit} disabled={!publicName.trim() || modelId === ""}><Plus className="h-4 w-4" />{edit ? "保存" : "添加"}</Button>
+          <Button onClick={submit} disabled={submitting || (!edit && !batchMode && modelId === "") || (batchMode && selectedModels.size === 0)}>
+            <Plus className="h-4 w-4" />{submitting ? "提交中..." : edit ? "保存" : batchMode ? `批量添加 (${selectedModels.size})` : "添加"}
+          </Button>
         </div>
       </DialogContent>
     </Dialog>

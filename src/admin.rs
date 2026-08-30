@@ -631,6 +631,87 @@ pub async fn review_reward(
 }
 
 /// GET /admin/config —— 供应商与路由(供管理端展示)。
+// ---- 上游供应商(Provider) ----
+
+/// GET /admin/providers —— 列出上游供应商及模型数量(分页)。
+pub async fn list_providers(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let page = q.get("page").and_then(|v| v.parse().ok());
+    let page_size = q.get("page_size").and_then(|v| v.parse().ok());
+    let (data, total) = storage::list_providers(&state.db, page, page_size)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let ps = page_size.unwrap_or(20);
+    let pg = page.unwrap_or(1);
+    let total_pages = if total == 0 { 1 } else { ((total as f64) / (ps as f64)).ceil() as u64 };
+    Ok(Json(json!({
+        "data": data,
+        "page": pg,
+        "page_size": ps,
+        "total": total,
+        "total_pages": total_pages,
+    })))
+}
+
+/// GET /admin/providers/:name/models —— 列出指定供应商下的所有模型。
+pub async fn list_provider_models(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let data = storage::list_models_by_provider(&state.db, &name)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "data": data })))
+}
+
+/// DELETE /admin/providers/:name —— 级联删除供应商及其所有模型和路由。
+pub async fn delete_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    storage::delete_provider_cascade(&state.db, &name)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// POST /admin/providers/exists —— 按 base_url + api_key 查询供应商是否已存在及其已有模型名。
+#[derive(Deserialize)]
+pub struct ProviderExists {
+    pub base_url: String,
+    pub api_key: Option<String>,
+}
+
+pub async fn provider_exists(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ProviderExists>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let key = body.api_key.as_deref().filter(|k| !k.is_empty());
+    let found = storage::find_provider_by_credentials(&state.db, body.base_url.trim(), key)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    match found {
+        Some(name) => {
+            let models = storage::list_model_names_by_provider(&state.db, &name)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            Ok(Json(json!({ "exists": true, "name": name, "models": models })))
+        }
+        None => Ok(Json(json!({ "exists": false }))),
+    }
+}
+
 // ---- 模型(三方模型,自带上游连接)----
 
 /// GET /admin/models
@@ -667,8 +748,8 @@ pub async fn add_model(
     if body.base_url.trim().is_empty() || body.upstream_model.trim().is_empty() {
         return Err(ApiError::BadRequest("base_url and upstream_model required".into()));
     }
-    let provider = format!("prov-{}", &uuid::Uuid::new_v4().to_string()[..8]);
-    storage::upsert_provider(&state.db, &provider, &body.kind, &body.base_url, body.api_key.as_deref())
+    // 按 base_url 复用已有 provider，不重复创建
+    let (provider, _) = storage::find_or_create_provider(&state.db, &body.kind, &body.base_url, body.api_key.as_deref())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let id = storage::add_model(&state.db, &provider, &body.upstream_model, body.label.as_deref())
@@ -676,6 +757,51 @@ pub async fn add_model(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;
     Ok(Json(json!({ "ok": true, "id": id })))
+}
+
+#[derive(Deserialize)]
+pub struct AddModelsBatch {
+    pub kind: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub models: Vec<AddModelBatchItem>,
+}
+#[derive(Deserialize)]
+pub struct AddModelBatchItem {
+    pub upstream_model: String,
+    pub label: Option<String>,
+}
+
+/// POST /admin/models/batch —— 批量添加同一供应商下的多个模型。
+pub async fn add_models_batch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<AddModelsBatch>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if !matches!(body.kind.as_str(), "openai" | "anthropic") {
+        return Err(ApiError::BadRequest("kind must be openai|anthropic".into()));
+    }
+    if body.base_url.trim().is_empty() || body.models.is_empty() {
+        return Err(ApiError::BadRequest("base_url and at least one model required".into()));
+    }
+    let (provider, provider_created) = storage::find_or_create_provider(&state.db, &body.kind, &body.base_url, body.api_key.as_deref())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut added = 0usize;
+    let mut skipped = 0usize;
+    for m in &body.models {
+        let (_, is_new) = storage::add_model_returning(&state.db, &provider, &m.upstream_model, m.label.as_deref())
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        if is_new {
+            added += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true, "provider": provider, "provider_created": provider_created, "added": added, "skipped": skipped })))
 }
 
 /// POST /admin/models/:id/test —— 向上游发最小请求校验连通性/密钥/模型名。
@@ -723,6 +849,49 @@ pub async fn test_model(
             let code = r.status().as_u16();
             let body = r.text().await.unwrap_or_default();
             let snippet: String = body.chars().take(200).collect();
+            Ok(Json(json!({ "ok": false, "error": format!("HTTP {code}: {snippet}") })))
+        }
+        Err(e) => Ok(Json(json!({ "ok": false, "error": e.to_string() }))),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct FetchModelListReq {
+    pub kind: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+}
+
+/// POST /admin/models/fetch-list —— 从上游拉取可用模型列表(OpenAI 兼容 /models 端点)。
+pub async fn fetch_model_list(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<FetchModelListReq>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let base = body.base_url.trim().trim_end_matches('/');
+    let url = format!("{}/models", base);
+    let mut req = state.http.get(&url);
+    if let Some(k) = body.api_key.as_deref().filter(|k| !k.is_empty()) {
+        if body.kind == "anthropic" {
+            req = req.header("x-api-key", k);
+        } else {
+            req = req.bearer_auth(k);
+        }
+    }
+    let resp = req.timeout(std::time::Duration::from_secs(15)).send().await;
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            let val: Value = r.json().await.unwrap_or_default();
+            // 兼容 OpenAI 格式: { "data": [{ "id": "gpt-4o", ... }] }
+            let models = val.get("data").and_then(|d| d.as_array()).cloned().unwrap_or_default();
+            let names: Vec<String> = models.iter().filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from)).collect();
+            Ok(Json(json!({ "ok": true, "models": names })))
+        }
+        Ok(r) => {
+            let code = r.status().as_u16();
+            let text = r.text().await.unwrap_or_default();
+            let snippet: String = text.chars().take(300).collect();
             Ok(Json(json!({ "ok": false, "error": format!("HTTP {code}: {snippet}") })))
         }
         Err(e) => Ok(Json(json!({ "ok": false, "error": e.to_string() }))),
@@ -1007,6 +1176,31 @@ pub async fn add_route(
     .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;
     Ok(Json(json!({ "ok": true, "id": id })))
+}
+
+#[derive(Deserialize)]
+pub struct AddRoutesBatch {
+    pub routes: Vec<AddRoute>,
+}
+
+/// POST /admin/groups/:id/routes/batch —— 批量添加路由。
+pub async fn add_routes_batch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(group_id): Path<i64>,
+    Json(body): Json<AddRoutesBatch>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let mut ids = Vec::new();
+    for r in &body.routes {
+        if r.public_name.trim().is_empty() { continue; }
+        let id = storage::add_route(&state.db, group_id, r.public_name.trim(), r.model_id, r.weight.unwrap_or(100), r.multiplier.unwrap_or(1.0))
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        ids.push(id);
+    }
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true, "ids": ids })))
 }
 
 /// PATCH /admin/routes/:id —— 编辑组内路由。
@@ -1367,4 +1561,65 @@ pub async fn metrics_overview(
         obj.remove("upstream_series");
     }
     Ok(Json(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- normalize_page ----
+
+    #[test]
+    fn normalize_page_defaults() {
+        let (page, size, offset) = normalize_page(None, None);
+        assert_eq!(page, 1);
+        assert_eq!(size, 20);
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn normalize_page_clamps_low() {
+        let (page, size, offset) = normalize_page(Some(0), Some(0));
+        assert_eq!(page, 1);   // 0 → 1
+        assert_eq!(size, 1);   // 0 → clamp(1,100) = 1
+        assert_eq!(offset, 0);
+    }
+
+    #[test]
+    fn normalize_page_clamps_high() {
+        let (_, size, _) = normalize_page(None, Some(999));
+        assert_eq!(size, 100); // 超上限 clamp 到 100
+    }
+
+    #[test]
+    fn normalize_page_offset_calc() {
+        let (_, _, offset) = normalize_page(Some(3), Some(10));
+        assert_eq!(offset, 20); // (3-1)*10 = 20
+    }
+
+    // ---- total_pages ----
+
+    #[test]
+    fn total_pages_empty() {
+        assert_eq!(total_pages(0, 20), 0);
+        assert_eq!(total_pages(-1, 20), 0);
+    }
+
+    #[test]
+    fn total_pages_exact_division() {
+        assert_eq!(total_pages(20, 20), 1);
+        assert_eq!(total_pages(40, 20), 2);
+    }
+
+    #[test]
+    fn total_pages_remainder() {
+        assert_eq!(total_pages(21, 20), 2);
+        assert_eq!(total_pages(1, 20), 1);
+        assert_eq!(total_pages(19, 20), 1);
+    }
+
+    #[test]
+    fn total_pages_single_item() {
+        assert_eq!(total_pages(1, 10), 1);
+    }
 }

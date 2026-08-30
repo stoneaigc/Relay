@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS models (
   provider       TEXT NOT NULL,             -- providers.name
   upstream_model TEXT NOT NULL,             -- 供应商上的真实模型名
   label          TEXT,                       -- 可选备注
-  created_at     TEXT NOT NULL
+  created_at     TEXT NOT NULL,
+  UNIQUE (provider, upstream_model)         -- 同一供应商下模型名唯一,防止重复添加
 );
 
 -- 模型组
