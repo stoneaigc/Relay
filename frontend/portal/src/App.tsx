@@ -141,7 +141,19 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
     <div className="flex min-h-screen items-center justify-center p-4">
       <Card className="w-full max-w-sm">
         <CardHeader>
-          <CardTitle className="text-xl">Rel<span className="text-primary">ay</span> 控制台</CardTitle>
+          <CardTitle className="flex items-center gap-2 text-xl">
+            <svg viewBox="0 0 64 64" className="h-7 w-7 shrink-0">
+              <defs><linearGradient id="lg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style={{stopColor:'#6366f1'}}/><stop offset="100%" style={{stopColor:'#8b5cf6'}}/></linearGradient></defs>
+              <rect width="64" height="64" rx="14" fill="url(#lg)"/>
+              <path d="M10 32 L24 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
+              <path d="M18 25 L10 32 L18 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+              <polygon points="32,16 44,24 44,40 32,48 20,40 20,24" fill="none" stroke="white" strokeWidth="3" strokeLinejoin="round"/>
+              <path d="M35 22 L28 33 L34 33 L29 44" stroke="white" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+              <path d="M40 32 L54 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
+              <path d="M46 25 L54 32 L46 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+            </svg>
+            <span>Rel<span className="text-primary">ay</span> 控制台</span>
+          </CardTitle>
           <p className="text-sm text-muted-foreground">{subtitle}</p>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -230,7 +242,19 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const sidebar = (
     <>
       <div className="flex items-center justify-between px-4 py-4">
-        <div className="text-lg font-bold">Rel<span className="text-primary">ay</span></div>
+        <div className="flex items-center gap-2 text-lg font-bold">
+          <svg viewBox="0 0 64 64" className="h-7 w-7 shrink-0">
+            <defs><linearGradient id="pg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style={{stopColor:'#6366f1'}}/><stop offset="100%" style={{stopColor:'#8b5cf6'}}/></linearGradient></defs>
+            <rect width="64" height="64" rx="14" fill="url(#pg)"/>
+            <path d="M10 32 L24 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
+            <path d="M18 25 L10 32 L18 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+            <polygon points="32,16 44,24 44,40 32,48 20,40 20,24" fill="none" stroke="white" strokeWidth="3" strokeLinejoin="round"/>
+            <path d="M35 22 L28 33 L34 33 L29 44" stroke="white" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+            <path d="M40 32 L54 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
+            <path d="M46 25 L54 32 L46 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+          </svg>
+          <span>Rel<span className="text-primary">ay</span></span>
+        </div>
         <button className="md:hidden" onClick={() => setMobileOpen(false)}><X className="h-5 w-5" /></button>
       </div>
       <nav className="flex-1 space-y-1 px-2">
