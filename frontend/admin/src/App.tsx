@@ -13,6 +13,8 @@ import { cn } from "@/lib/utils";
 import PaginationBar from "./PaginationBar";
 import { PasswordInput } from "@/components/ui/password-input";
 import { Toaster } from "sonner";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import { Switch } from "@/components/ui/switch";
 
 export default function App() {
   const [authed, setAuthed] = useState(!!getToken());
@@ -569,17 +571,66 @@ const HEALTH_META: Record<ProviderHealthItem["status"], { label: string; cls: st
   idle:     { label: "无请求", cls: "bg-muted text-muted-foreground", dot: "bg-muted-foreground/60" },
 };
 
-function HealthBadge({ h }: { h?: ProviderHealthItem }) {
+function HealthBadge({ h, name }: { h?: ProviderHealthItem; name?: string }) {
   if (!h) return null;
   const meta = HEALTH_META[h.status] ?? HEALTH_META.idle;
-  const tip = h.status === "idle"
-    ? "统计窗口内无请求"
-    : `统计窗口内 ${h.requests} 次请求 · 成功率 ${(h.success_rate * 100).toFixed(1)}% · 平均 ${Math.round(h.avg_ms)}ms · P95 ${h.p95_ms}ms${h.breaker?.fail_count ? ` · 熔断计数 ${h.breaker.fail_count}/${h.breaker.threshold}` : ""}`;
+  const br = h.breaker;
+  const display = name || h.provider;
+  const stat = "flex items-center justify-between gap-2";
+  const k = "text-muted-foreground";
+  const v = "mono font-medium";
   return (
-    <span title={tip} className={cn("inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium", meta.cls)}>
-      <span className={cn("h-1.5 w-1.5 rounded-full", meta.dot, meta.pulse && "animate-pulse")} />
-      {meta.label}
-    </span>
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={`查看 ${display} 健康详情`}
+          onClick={(e) => e.stopPropagation()}
+          className={cn("inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", meta.cls)}
+        >
+          <span className={cn("h-1.5 w-1.5 rounded-full", meta.dot, meta.pulse && "animate-pulse")} />
+          {meta.label}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-64">
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <span className="mono truncate text-sm font-semibold">{display}</span>
+            <span className={cn("inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-semibold", meta.cls)}>
+              <span className={cn("h-1 w-1 rounded-full", meta.dot, meta.pulse && "animate-pulse")} />
+              {meta.label}
+            </span>
+          </div>
+          {h.status === "idle" ? (
+            <p className="text-xs text-muted-foreground">统计窗口内无请求。</p>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+                <div className={stat}><span className={k}>请求数</span><span className={v}>{h.requests.toLocaleString()}</span></div>
+                <div className={stat}><span className={k}>成功率</span><span className={v}>{(h.success_rate * 100).toFixed(1)}%</span></div>
+                <div className={stat}><span className={k}>平均延迟</span><span className={v}>{Math.round(h.avg_ms)}ms</span></div>
+                <div className={stat}><span className={k}>P95</span><span className={v}>{h.p95_ms}ms</span></div>
+                <div className={stat}><span className={k}>P99</span><span className={v}>{h.p99_ms}ms</span></div>
+                <div className={stat}><span className={k}>不可用/其它</span><span className={v}>{h.fail_unavailable}/{h.fail_other}</span></div>
+              </div>
+              {br && (br.is_broken || br.fail_count > 0) && (
+                <div className={cn("rounded-lg px-2.5 py-2 text-xs", br.is_broken ? "bg-destructive/10 text-destructive" : "bg-muted/60 text-muted-foreground")}>
+                  {br.is_broken ? (
+                    <>
+                      <span className="font-semibold">熔断中</span>
+                      <span className="ml-1">· 半开恢复探测约 {Math.max(1, Math.ceil(br.recover_remaining_ms / 1000))}s 后放行</span>
+                    </>
+                  ) : (
+                    <>熔断计数 <span className="mono font-semibold">{br.fail_count}/{br.threshold}</span> · 连续失败达阈值即熔断</>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+          <p className="text-[10px] leading-relaxed text-muted-foreground">统计窗口内该上游 key 的聚合指标;熔断后自动半开探测恢复。</p>
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -729,7 +780,7 @@ function ModelsPanel() {
                   <div>
                     <div className="flex items-center gap-2 text-sm font-medium">
                       {providerDisplayName(p.base_url)}
-                      <HealthBadge h={health[p.name]} />
+                      <HealthBadge h={health[p.name]} name={providerDisplayName(p.base_url)} />
                     </div>
                     <div className="text-xs text-muted-foreground">{p.base_url}</div>
                   </div>
@@ -2021,6 +2072,12 @@ function SettingsPanel() {
   const [testing, setTesting] = useState<null | "loading" | { ok: boolean; msg: string }>(null);
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
+  // 容错与降级
+  const [fbEnabled, setFbEnabled] = useState(true);
+  const [fbMaxRetries, setFbMaxRetries] = useState(5);
+  const [fbSaving, setFbSaving] = useState(false);
+  const [fbNote, setFbNote] = useState("");
+  const [fbErr, setFbErr] = useState("");
 
   const load = async () => {
     setLoading(true);
@@ -2032,6 +2089,12 @@ function SettingsPanel() {
     } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
   };
   useEffect(() => { load(); }, []);
+
+  useEffect(() => {
+    api.fallbackSettings()
+      .then((r) => { setFbEnabled(r.fallback_enabled); setFbMaxRetries(r.max_retries); })
+      .catch(() => { /* 回退默认值 */ });
+  }, []);
 
   const enabled = host.trim().length > 0;
   const sel = "h-9 w-full rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
@@ -2064,6 +2127,18 @@ function SettingsPanel() {
     } catch (e: any) {
       setTesting({ ok: false, msg: e.message });
     }
+  };
+
+  const saveFallback = async () => {
+    setFbErr(""); setFbNote("");
+    if (fbMaxRetries > 100) { setFbErr("最多尝试候选数不能超过 100"); return; }
+    setFbSaving(true);
+    try {
+      await api.saveFallbackSettings({ fallback_enabled: fbEnabled, max_retries: fbMaxRetries });
+      setFbNote(fbEnabled ? "已保存,即时生效。" : "已保存:降级已关闭,仅使用首个候选。");
+    } catch (e: any) {
+      setFbErr(e.message);
+    } finally { setFbSaving(false); }
   };
 
   return (
@@ -2115,6 +2190,44 @@ function SettingsPanel() {
               </div>
             </>
           )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-base">容错与降级</CardTitle>
+            <Badge variant={fbEnabled ? "success" : "muted"}>{fbEnabled ? "故障自动切换" : "仅首候选"}</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-xs text-muted-foreground">
+            开启后,主候选不可用(401/403/限流/5xx/网络错误)时自动按排序切换到下一个候选供应商,对调用方完全无感;响应头 X-Relay-Upstream 会标明实际命中的供应商。关闭则只使用首个候选,不做降级重试。
+          </p>
+          <div className="flex items-center justify-between gap-4 rounded-xl border bg-muted/30 px-4 py-3">
+            <div className="space-y-0.5">
+              <p className="text-sm font-medium">故障自动切换</p>
+              <p className="text-xs text-muted-foreground">关闭后所有请求只走排序第一的候选。</p>
+            </div>
+            <Switch checked={fbEnabled} onCheckedChange={setFbEnabled} aria-label="切换故障自动切换" />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-xs text-muted-foreground">最多尝试候选数(0 = 不限)</label>
+              <Input
+                type="number" min={0} max={100} disabled={!fbEnabled}
+                className={fbEnabled ? "" : "opacity-50"}
+                value={fbMaxRetries}
+                onChange={(e) => setFbMaxRetries(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+              />
+              <p className="mt-1 text-[11px] text-muted-foreground">按模型路由的候选顺序依次尝试,超过次数即返回最后一次的错误。</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+            <Button onClick={saveFallback} disabled={fbSaving}>{fbSaving ? "保存中…" : "保存配置"}</Button>
+            {fbNote && <span className="text-xs text-success">{fbNote}</span>}
+            {fbErr && <span className="text-xs text-destructive">{fbErr}</span>}
+          </div>
         </CardContent>
       </Card>
     </div>
@@ -3565,6 +3678,8 @@ function RequestLogPanel() {
                 {rows.map((r) => {
                   const isOpen = expanded === r.request_id;
                   const isFail = r.final_status !== 200;
+                  // 命中供应商:取首个成功尝试的 provider,缺省回退 final_kind(旧记录无 provider 字段)
+                  const hitProvider = r.attempts.find((a) => a.status === 200)?.provider || r.final_kind || "";
                   return (
                     <React.Fragment key={r.request_id}>
                       <TableRow
@@ -3588,7 +3703,7 @@ function RequestLogPanel() {
                         <TableCell className="text-xs">
                           {r.final_upstream_model ? (
                             <span className="inline-flex items-center gap-1">
-                              <span className="text-muted-foreground">{r.final_kind}</span>
+                              <span className="text-muted-foreground">{hitProvider}</span>
                               <span>{r.final_upstream_model}</span>
                             </span>
                           ) : (
@@ -3620,6 +3735,7 @@ function RequestLogPanel() {
                                   <thead>
                                     <tr className="border-b text-left text-muted-foreground">
                                       <th className="pb-1 font-normal">#</th>
+                                      <th className="pb-1 font-normal">供应商</th>
                                       <th className="pb-1 font-normal">上游</th>
                                       <th className="pb-1 font-normal">模型</th>
                                       <th className="pb-1 font-normal">权重</th>
@@ -3630,6 +3746,7 @@ function RequestLogPanel() {
                                     {r.candidates.map((c, i) => (
                                       <tr key={i} className="border-b border-dashed last:border-0">
                                         <td className="py-1 text-muted-foreground">{i + 1}</td>
+                                        <td className="py-1 font-medium">{c.provider || "—"}</td>
                                         <td className="py-1">
                                           <span className="text-muted-foreground">{c.kind}</span>
                                           <span className="ml-1 text-muted-foreground/60">{c.base_url.length > 30 ? c.base_url.slice(0, 30) + "…" : c.base_url}</span>
@@ -3652,36 +3769,36 @@ function RequestLogPanel() {
                                   </tbody>
                                 </table>
                               </div>
-                              {/* 实际尝试链 */}
+                              {/* 实际尝试链:降级时间线 */}
                               {r.attempts.length > 0 && (
                                 <div>
-                                  <p className="mb-1 text-xs font-medium text-muted-foreground">实际尝试（failover 链）</p>
-                                  <table className="w-full text-xs">
-                                    <thead>
-                                      <tr className="border-b text-left text-muted-foreground">
-                                        <th className="pb-1 font-normal">上游</th>
-                                        <th className="pb-1 font-normal">模型</th>
-                                        <th className="pb-1 font-normal">状态</th>
-                                        <th className="pb-1 font-normal">延迟</th>
-                                        <th className="pb-1 font-normal">错误</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {r.attempts.map((a, i) => (
-                                        <tr key={i} className="border-b border-dashed last:border-0">
-                                          <td className="py-1"><span className="text-muted-foreground">{a.kind}</span></td>
-                                          <td className="py-1">{a.upstream_model}</td>
-                                          <td className="py-1">
+                                  <p className="mb-2 text-xs font-medium text-muted-foreground">实际尝试（failover 时间线）</p>
+                                  <div className="relative ml-2 space-y-3 border-l border-border pl-4">
+                                    {r.attempts.map((a, i) => {
+                                      const dot = a.status === 200
+                                        ? "bg-success"
+                                        : a.status === -1 || a.status === 503
+                                          ? "bg-warning"
+                                          : "bg-destructive";
+                                      return (
+                                        <div key={i} className="relative">
+                                          <span className={cn("absolute -left-[21px] top-1 h-[9px] w-[9px] rounded-full ring-2 ring-background", dot)} />
+                                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+                                            <span className="font-medium">{a.provider || a.kind}</span>
+                                            <span className="text-muted-foreground">{a.provider ? `${a.kind} · ` : ""}{a.upstream_model}</span>
                                             <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(a.status))}>
                                               {attemptStatusLabel(a.status)}
                                             </span>
-                                          </td>
-                                          <td className="py-1 mono">{a.latency_ms > 0 ? `${a.latency_ms}ms` : "—"}</td>
-                                          <td className="py-1 max-w-[300px] truncate text-muted-foreground">{a.error || "—"}</td>
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
+                                            <span className="mono text-muted-foreground">{a.latency_ms > 0 ? `${a.latency_ms}ms` : ""}</span>
+                                            {a.status === 200 && <span className="text-[10px] font-semibold text-success">✓ 命中</span>}
+                                          </div>
+                                          {a.error && (
+                                            <p className="mt-0.5 max-w-[420px] truncate text-[11px] text-muted-foreground" title={a.error}>{a.error}</p>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
                                 </div>
                               )}
                               {/* Tokens 汇总 */}

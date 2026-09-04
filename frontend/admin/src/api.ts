@@ -229,6 +229,10 @@ export const api = {
   testEmail: (body: EmailSettingsBody & { test_to: string }): Promise<{ ok: boolean; error?: string }> =>
     req("/admin/api/settings/email/test", { method: "POST", body: JSON.stringify(body) }),
 
+  fallbackSettings: (): Promise<FallbackSettingsResp> => req("/admin/api/settings/fallback"),
+  saveFallbackSettings: (body: FallbackSettingsBody) =>
+    req("/admin/api/settings/fallback", { method: "POST", body: JSON.stringify(body) }),
+
   // ---- 上游治理(熔断器 + 并发槽仪表盘) ----
   listUpstreams: (): Promise<UpstreamsResp> => req("/admin/api/upstreams"),
   resetAllBreakers: (): Promise<{ ok: true; cleared: number }> => req("/admin/api/upstreams/reset", { method: "POST" }),
@@ -332,6 +336,15 @@ export interface EmailSettingsResp extends EmailSettingsBody {
   has_password: boolean;
   enabled: boolean;
 }
+
+export interface FallbackSettingsResp {
+  /** failover 总开关:关闭后仅尝试首个候选 */
+  fallback_enabled: boolean;
+  /** 最多尝试的候选数(含首个;0 = 不限) */
+  max_retries: number;
+}
+
+export interface FallbackSettingsBody extends FallbackSettingsResp {}
 
 // ============================================================
 // 上游治理仪表盘
@@ -474,6 +487,8 @@ export interface MetricsDashboardResp {
 
 export interface RequestAttempt {
   kind: string;
+  /** 命中的供应商名(展示用);旧日志可能缺省 */
+  provider?: string;
   base_url: string;
   upstream_model: string;
   weight: number;

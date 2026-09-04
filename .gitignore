@@ -4,6 +4,7 @@
 # 前端
 node_modules/
 frontend/*/dist/
+.npm-cache/
 
 # 运行时状态:SQLite 数据库
 *.db
@@ -22,3 +23,4 @@ config/local.toml
 
 # 工具元数据
 .omc/
+.trae/
