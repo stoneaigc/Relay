@@ -1,4 +1,4 @@
-﻿//! 优先级路由 + 故障转移链 集成测试。
+//! 优先级路由 + 故障转移链 集成测试。
 //! 测试 Routing::resolve_all 在不同策略和场景下的完整行为。
 
 use std::collections::HashMap;
@@ -193,6 +193,8 @@ fn weighted_round_robin_uses_weights() {
 #[test]
 fn time_rule_overrides_weight() {
     let mut rt = make_test_routing();
+    // 夹具默认 WeightedRandom(首个候选是随机的),本测试断言确定性顺序,须改为 Priority。
+    rt.group_strategy.insert(1, Strategy::Priority);
     // 添加时段规则:工作日白天,覆盖 chat 的权重
     let mut weight_map = HashMap::new();
     let mut chat_override = HashMap::new();
