@@ -11,6 +11,9 @@ use crate::storage::Db;
 pub struct RequestAttempt {
     /// 上游协议:openai / anthropic。
     pub kind: String,
+    /// 命中的供应商名(展示用);旧日志无此字段,反序列化时回退空串。
+    #[serde(default)]
+    pub provider: String,
     pub base_url: String,
     /// 上游真实模型名。
     pub upstream_model: String,
@@ -295,12 +298,14 @@ impl RequestLogStore for EsRequestLogStore {
 /// 按 Resolved 构造一个待尝试的 attempt 条目。
 pub fn candidate_attempt(
     kind: ProviderKind,
+    provider: &str,
     base_url: &str,
     upstream_model: &str,
     weight: u32,
 ) -> RequestAttempt {
     RequestAttempt {
         kind: kind_str(kind).to_string(),
+        provider: provider.to_string(),
         base_url: base_url.to_string(),
         upstream_model: upstream_model.to_string(),
         weight,
@@ -318,8 +323,9 @@ mod tests {
 
     #[test]
     fn candidate_attempt_fields() {
-        let a = candidate_attempt(ProviderKind::Openai, "https://api.openai.com", "gpt-4", 200);
+        let a = candidate_attempt(ProviderKind::Openai, "openai-official", "https://api.openai.com", "gpt-4", 200);
         assert_eq!(a.kind, "openai");
+        assert_eq!(a.provider, "openai-official");
         assert_eq!(a.base_url, "https://api.openai.com");
         assert_eq!(a.upstream_model, "gpt-4");
         assert_eq!(a.weight, 200);
@@ -332,6 +338,7 @@ mod tests {
     fn request_attempt_json_roundtrip() {
         let a = RequestAttempt {
             kind: "anthropic".into(),
+            provider: "anthropic-official".into(),
             base_url: "https://api.anthropic.com".into(),
             upstream_model: "claude-3".into(),
             weight: 100,
@@ -347,6 +354,14 @@ mod tests {
     }
 
     #[test]
+    fn request_attempt_old_json_without_provider() {
+        let old = r#"{"kind":"openai","base_url":"http://x","upstream_model":"gpt-4","weight":1,"status":200,"latency_ms":5,"error":""}"#;
+        let de: RequestAttempt = serde_json::from_str(old).unwrap();
+        assert_eq!(de.provider, "");
+        assert_eq!(de.status, 200);
+    }
+
+    #[test]
     fn request_log_json_roundtrip() {
         let log = RequestLog {
             request_id: "req_test123".into(),
@@ -356,6 +371,7 @@ mod tests {
             stream: false,
             candidates: vec![RequestAttempt {
                 kind: "openai".into(),
+                provider: "openrouter".into(),
                 base_url: "http://localhost".into(),
                 upstream_model: "gpt-4".into(),
                 weight: 100,
@@ -365,6 +381,7 @@ mod tests {
             }],
             attempts: vec![RequestAttempt {
                 kind: "openai".into(),
+                provider: "openrouter".into(),
                 base_url: "http://localhost".into(),
                 upstream_model: "gpt-4".into(),
                 weight: 100,

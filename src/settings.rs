@@ -144,3 +144,26 @@ pub fn email_config_from_kv(
     }
     email
 }
+
+/// settings 表里 failover 相关 key 的前缀。
+pub const FALLBACK_PREFIX: &str = "fallback.";
+pub const K_FB_ENABLED: &str = "fallback.enabled";
+pub const K_FB_MAX_RETRIES: &str = "fallback.max_retries";
+
+/// 把 DB 里的 fallback.* 覆盖到内存 Config.defaults(DB 优先于配置文件)。
+/// 解析失败时静默保持原值,与 email.* 行为一致。
+pub fn apply_fallback_settings(cfg: &mut Config, kv: &HashMap<String, String>) {
+    let mut defaults = cfg.defaults.clone();
+
+    if let Some(v) = kv.get(K_FB_ENABLED) {
+        if let Ok(b) = v.parse::<bool>() {
+            defaults.fallback_enabled = b;
+        }
+    }
+    if let Some(v) = kv.get(K_FB_MAX_RETRIES) {
+        if let Ok(n) = v.parse::<u32>() {
+            defaults.max_retries = n;
+        }
+    }
+    cfg.defaults = defaults;
+}

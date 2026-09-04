@@ -29,7 +29,7 @@ pub async fn messages(
     if !resp.status().is_success() {
         let code = resp.status().as_u16();
         let text = resp.text().await.unwrap_or_default();
-        if code == 429 || code >= 500 {
+        if code == 401 || code == 403 || code == 429 || code >= 500 {
             return Err(ApiError::Unavailable(format!("{code}: {text}")));
         }
         return Err(ApiError::Upstream(format!("{code}: {text}")));

@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
     // 首次启动播种默认奖励任务(star / issue / 提建议)。
     storage::seed_reward_tasks_if_empty(&db).await?;
 
-    // 从 DB 加载系统配置(目前仅 email.*),覆盖到内存 Config(DB 优先于配置文件)。
+    // 从 DB 加载系统配置(目前 email.* 与 fallback.*),覆盖到内存 Config(DB 优先于配置文件)。
     {
         let kv = storage::load_settings(&db, settings::EMAIL_PREFIX)
             .await
@@ -93,6 +93,15 @@ async fn main() -> anyhow::Result<()> {
             let secret = cfg.auth.jwt_secret.clone();
             settings::apply_email_settings(&mut cfg, &kv, &secret);
             tracing::info!("loaded {} email settings from DB", kv.len());
+        }
+    }
+    {
+        let kv = storage::load_settings(&db, settings::FALLBACK_PREFIX)
+            .await
+            .map_err(|e| anyhow::anyhow!("load settings: {e}"))?;
+        if !kv.is_empty() {
+            settings::apply_fallback_settings(&mut cfg, &kv);
+            tracing::info!("loaded {} fallback settings from DB", kv.len());
         }
     }
 
@@ -213,6 +222,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/groups/:id/time-rules/:rule_id", axum::routing::delete(admin::delete_time_rule).put(admin::update_time_rule))
         .route("/settings/email", get(admin::get_email_settings).post(admin::save_email_settings))
         .route("/settings/email/test", post(admin::test_email_settings))
+        .route("/settings/fallback", get(admin::get_fallback_settings).post(admin::save_fallback_settings))
         // ---- 上游治理仪表盘 ----
         .route("/upstreams", get(admin::list_upstreams))
         .route("/upstreams/reset", post(admin::reset_all_breakers))

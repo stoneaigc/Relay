@@ -1294,6 +1294,76 @@ pub async fn delete_route(
     Ok(Json(json!({ "ok": true })))
 }
 
+// ---- 系统配置:failover ----
+
+/// GET /admin/settings/fallback -- 回显 failover 配置(DB 优先,否则配置文件值)。
+pub async fn get_fallback_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let kv = storage::load_settings(&state.db, crate::settings::FALLBACK_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let cfg = state.config();
+    let fallback_enabled = kv
+        .get(crate::settings::K_FB_ENABLED)
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(cfg.defaults.fallback_enabled);
+    let max_retries = kv
+        .get(crate::settings::K_FB_MAX_RETRIES)
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(cfg.defaults.max_retries);
+    Ok(Json(json!({
+        "fallback_enabled": fallback_enabled,
+        "max_retries": max_retries,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct FallbackSettingsBody {
+    /// failover 总开关:关闭后仅尝试首个候选。
+    pub fallback_enabled: bool,
+    /// 最多尝试的候选数(含首个;0 = 不限)。
+    #[serde(default)]
+    pub max_retries: u32,
+}
+
+/// 校验 max_retries 合理范围(防误填超大值打挂上游)。
+fn validate_fallback(b: &FallbackSettingsBody) -> Result<(), ApiError> {
+    if b.max_retries > 100 {
+        return Err(ApiError::BadRequest("max_retries 不能超过 100".into()));
+    }
+    Ok(())
+}
+
+/// POST /admin/settings/fallback -- 保存 failover 配置,刷新内存 Config。
+pub async fn save_fallback_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<FallbackSettingsBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    validate_fallback(&body)?;
+
+    let items: Vec<(String, String)> = vec![
+        (crate::settings::K_FB_ENABLED.to_string(), body.fallback_enabled.to_string()),
+        (crate::settings::K_FB_MAX_RETRIES.to_string(), body.max_retries.to_string()),
+    ];
+    storage::set_settings(&state.db, &items)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // 重建内存 Config:从 DB 重读 fallback.* 覆盖当前快照,store() 刷新。
+    let kv = storage::load_settings(&state.db, crate::settings::FALLBACK_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut new_cfg = (**state.config()).clone();
+    crate::settings::apply_fallback_settings(&mut new_cfg, &kv);
+    state.config.store(Arc::new(new_cfg));
+    Ok(Json(json!({ "ok": true })))
+}
+
 // ---- 系统配置:邮箱 ----
 
 /// GET /admin/settings/email -- 回显邮箱配置(授权码不回显,仅返回 has_password)。

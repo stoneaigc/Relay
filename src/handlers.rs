@@ -94,8 +94,26 @@ fn init_candidates(
 ) -> Vec<RequestAttempt> {
     candidates
         .iter()
-        .map(|r| reqlog::candidate_attempt(r.kind, &r.base_url, &r.upstream_model, r.weight))
+        .map(|r| reqlog::candidate_attempt(r.kind, &r.provider, &r.base_url, &r.upstream_model, r.weight))
         .collect()
+}
+
+/// 构造 X-Relay-* 透传头:命中供应商 + 请求 ID,便于客户端排障与命中验证。
+fn relay_headers(provider: &str, request_id: &str) -> [(&'static str, String); 2] {
+    [("x-relay-upstream", sanitize_header_value(provider)), ("x-relay-request-id", request_id.to_string())]
+}
+
+/// HeaderValue 只接受可见 ASCII;供应商名含中文等字符时回退 unknown(明细仍在请求日志)。
+fn sanitize_header_value(v: &str) -> String {
+    if axum::http::HeaderValue::from_str(v).is_ok() { v.to_string() } else { "unknown".to_string() }
+}
+
+fn apply_relay_headers(resp: &mut Response, hdrs: &[(&'static str, String)]) {
+    for (name, val) in hdrs {
+        if let Ok(hv) = axum::http::HeaderValue::from_str(val) {
+            resp.headers_mut().insert(axum::http::header::HeaderName::from_static(name), hv);
+        }
+    }
 }
 
 pub async fn health() -> &'static str {
@@ -198,6 +216,8 @@ pub async fn run_chat(
         }
     };
     let cand_init = init_candidates(&candidates);
+    // failover 策略:fallback 关闭只试首个候选;max_retries 限制尝试候选数(0=不限)。
+    let attempt_cap = state.config.load().defaults.attempt_cap(candidates.len());
     let mut attempts: Vec<RequestAttempt> = Vec::new();
     let run_start = std::time::Instant::now();
     let run_path: &'static str = "chat";
@@ -205,7 +225,7 @@ pub async fn run_chat(
     let mut final_kind: Option<String> = None;
     let mut final_upstream: Option<String> = None;
     let final_status: i32 = 200;
-    for r in &candidates {
+    for r in candidates.iter().take(attempt_cap) {
         let kind = r.kind;
         let (provider_name, base_url, api_key, upstream_model, multiplier) =
             (&r.provider, &r.base_url, r.api_key.as_deref(), &r.upstream_model, r.multiplier);
@@ -215,6 +235,7 @@ pub async fn run_chat(
         if state.breaker_should_skip(&ukey).await {
             attempts.push(RequestAttempt {
                 kind: match kind { ProviderKind::Openai => "openai".to_string(), ProviderKind::Anthropic => "anthropic".to_string() },
+                provider: provider_name.clone(),
                 base_url: base_url.clone(),
                 upstream_model: upstream_model.clone(),
                 weight: r.weight,
@@ -243,6 +264,7 @@ pub async fn run_chat(
                         final_upstream = Some(upstream_model.clone());
                         attempts.push(RequestAttempt {
                             kind: "openai".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -272,6 +294,7 @@ pub async fn run_chat(
                         final_upstream = Some(upstream_model.clone());
                         attempts.push(RequestAttempt {
                             kind: "openai".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -302,6 +325,7 @@ pub async fn run_chat(
                             .await;
                         attempts.push(RequestAttempt {
                             kind: "openai".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -316,6 +340,7 @@ pub async fn run_chat(
                         state.record_metrics_request(Some(&ukey), 400, up_start.elapsed()).await;
                         attempts.push(RequestAttempt {
                             kind: "openai".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -347,6 +372,7 @@ pub async fn run_chat(
                         final_upstream = Some(upstream_model.clone());
                         attempts.push(RequestAttempt {
                             kind: "anthropic".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -376,6 +402,7 @@ pub async fn run_chat(
                         final_upstream = Some(upstream_model.clone());
                         attempts.push(RequestAttempt {
                             kind: "anthropic".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -406,6 +433,7 @@ pub async fn run_chat(
                             .await;
                         attempts.push(RequestAttempt {
                             kind: "anthropic".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -419,6 +447,7 @@ pub async fn run_chat(
                         state.record_metrics_request(Some(&ukey), 400, up_start.elapsed()).await;
                         attempts.push(RequestAttempt {
                             kind: "anthropic".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -468,6 +497,7 @@ async fn anthropic_nonstream_response(
     api_key: Option<&str>,
     trace: RunTrace,
 ) -> Result<Response, ApiError> {
+    let hdrs = relay_headers(&provider_name, &trace.request_id);
     let aresp: Value = resp.json().await.map_err(|e| ApiError::Upstream(e.to_string()))?;
     let input = aresp.pointer("/usage/input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let output = aresp.pointer("/usage/output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
@@ -485,7 +515,9 @@ async fn anthropic_nonstream_response(
     let k = UpstreamKey::new(ProviderKind::Anthropic, base_url, api_key);
     state.record_metrics_tokens(Some(&k), input as u64, output as u64).await;
     trace.emit_success(state, input, output, charged).await;
-    Ok(Json(payload).into_response())
+    let mut out = Json(payload).into_response();
+    apply_relay_headers(&mut out, &hdrs);
+    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -504,6 +536,7 @@ fn anthropic_stream_response(
     trace: RunTrace,
 ) -> Response {
     let user_id = user.id;
+    let hdrs = relay_headers(&provider_name, &trace.request_id);
     let s = async_stream::stream! {
         let _guard = guard;
         let _slot = slot; // 持有上游并发槽直到流结束
@@ -610,11 +643,9 @@ fn anthropic_stream_response(
         trace.emit_success(&state, input, output, charged).await;
     };
 
-    Response::builder()
-        .header("content-type", "text/event-stream")
-        .header("cache-control", "no-cache")
-        .body(Body::from_stream(s))
-        .unwrap()
+    let mut resp = sse_response(s);
+    apply_relay_headers(&mut resp, &hdrs);
+    resp
 }
 
 // ================== Anthropic 入站 /v1/messages ==================
@@ -687,6 +718,8 @@ pub async fn run_messages(
     };
     let request_id = format!("req_{}", &uuid::Uuid::new_v4().to_string()[..24]);
     let cand_init = init_candidates(&candidates);
+    // failover 策略:fallback 关闭只试首个候选;max_retries 限制尝试候选数(0=不限)。
+    let attempt_cap = state.config.load().defaults.attempt_cap(candidates.len());
     let mut attempts: Vec<RequestAttempt> = Vec::new();
     let run_start = std::time::Instant::now();
     let run_path: &'static str = "messages";
@@ -694,7 +727,7 @@ pub async fn run_messages(
     let mut final_kind: Option<String> = None;
     let mut final_upstream: Option<String> = None;
     let final_status: i32 = 200;
-    for r in &candidates {
+    for r in candidates.iter().take(attempt_cap) {
         let kind = r.kind;
         let (provider_name, base_url, api_key, upstream_model, multiplier) =
             (&r.provider, &r.base_url, r.api_key.as_deref(), &r.upstream_model, r.multiplier);
@@ -704,6 +737,7 @@ pub async fn run_messages(
         if state.breaker_should_skip(&ukey).await {
             attempts.push(RequestAttempt {
                 kind: match kind { ProviderKind::Openai => "openai".to_string(), ProviderKind::Anthropic => "anthropic".to_string() },
+                provider: provider_name.clone(),
                 base_url: base_url.clone(),
                 upstream_model: upstream_model.clone(),
                 weight: r.weight,
@@ -731,6 +765,7 @@ pub async fn run_messages(
                         final_upstream = Some(upstream_model.clone());
                         attempts.push(RequestAttempt {
                             kind: "anthropic".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -754,6 +789,7 @@ pub async fn run_messages(
                         final_upstream = Some(upstream_model.clone());
                         attempts.push(RequestAttempt {
                             kind: "anthropic".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -778,6 +814,7 @@ pub async fn run_messages(
                             .await;
                         attempts.push(RequestAttempt {
                             kind: "anthropic".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -791,6 +828,7 @@ pub async fn run_messages(
                         state.record_metrics_request(Some(&ukey), 400, up_start.elapsed()).await;
                         attempts.push(RequestAttempt {
                             kind: "anthropic".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -821,6 +859,7 @@ pub async fn run_messages(
                         final_upstream = Some(upstream_model.clone());
                         attempts.push(RequestAttempt {
                             kind: "openai".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -844,6 +883,7 @@ pub async fn run_messages(
                         final_upstream = Some(upstream_model.clone());
                         attempts.push(RequestAttempt {
                             kind: "openai".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -868,6 +908,7 @@ pub async fn run_messages(
                             .await;
                         attempts.push(RequestAttempt {
                             kind: "openai".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -881,6 +922,7 @@ pub async fn run_messages(
                         state.record_metrics_request(Some(&ukey), 400, up_start.elapsed()).await;
                         attempts.push(RequestAttempt {
                             kind: "openai".into(),
+                            provider: provider_name.clone(),
                             base_url: base_url.clone(),
                             upstream_model: upstream_model.clone(),
                             weight: r.weight,
@@ -953,12 +995,15 @@ async fn anthropic_passthrough_nonstream(
     api_key: Option<&str>,
     trace: RunTrace,
 ) -> Result<Response, ApiError> {
+    let hdrs = relay_headers(&provider_name, &trace.request_id);
     let mut payload: Value = resp.json().await.map_err(|e| ApiError::Upstream(e.to_string()))?;
     let input = payload.pointer("/usage/input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let output = payload.pointer("/usage/output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     payload["model"] = json!(model);
     anth_charge(state, &user, input, output, multiplier, model, provider_name, upstream_model, ProviderKind::Anthropic, base_url, api_key, Some(trace.request_id.clone()), trace).await;
-    Ok(Json(payload).into_response())
+    let mut out = Json(payload).into_response();
+    apply_relay_headers(&mut out, &hdrs);
+    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -970,6 +1015,7 @@ fn anthropic_passthrough_stream(
     api_key: Option<String>,
     trace: RunTrace,
 ) -> Response {
+    let hdrs = relay_headers(&provider_name, &trace.request_id);
     let s = async_stream::stream! {
         let _guard = guard;
         let _slot = slot;
@@ -999,7 +1045,9 @@ fn anthropic_passthrough_stream(
         }
         anth_charge(&state, &user, input, output, multiplier, model, provider_name, upstream_model, ProviderKind::Anthropic, &base_url, api_key.as_deref(), Some(trace.request_id.clone()), trace).await;
     };
-    sse_response(s)
+    let mut resp = sse_response(s);
+    apply_relay_headers(&mut resp, &hdrs);
+    resp
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1012,12 +1060,15 @@ async fn messages_openai_nonstream(
     api_key: Option<&str>,
     trace: RunTrace,
 ) -> Result<Response, ApiError> {
+    let hdrs = relay_headers(&provider_name, &trace.request_id);
     let oai: Value = resp.json().await.map_err(|e| ApiError::Upstream(e.to_string()))?;
     let input = oai.pointer("/usage/prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let output = oai.pointer("/usage/completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let payload = crate::translate::openai_to_anthropic_response(&oai, &model);
     anth_charge(state, &user, input, output, multiplier, model, provider_name, upstream_model, kind, base_url, api_key, Some(trace.request_id.clone()), trace).await;
-    Ok(Json(payload).into_response())
+    let mut out = Json(payload).into_response();
+    apply_relay_headers(&mut out, &hdrs);
+    Ok(out)
 }
 
 /// OpenAI 上游 SSE → Anthropic 事件流(状态机)。
@@ -1031,6 +1082,7 @@ fn messages_openai_stream(
     api_key: Option<String>,
     trace: RunTrace,
 ) -> Response {
+    let hdrs = relay_headers(&provider_name, &trace.request_id);
     let s = async_stream::stream! {
         let _guard = guard;
         let _slot = slot;
@@ -1112,7 +1164,9 @@ fn messages_openai_stream(
         }
         anth_charge(&state, &user, input, output, multiplier, model, provider_name, upstream_model, kind, &base_url, api_key.as_deref(), Some(trace.request_id.clone()), trace).await;
     };
-    sse_response(s)
+    let mut resp = sse_response(s);
+    apply_relay_headers(&mut resp, &hdrs);
+    resp
 }
 
 fn a_event(event: &str, data: Value) -> Bytes {
@@ -1157,6 +1211,7 @@ fn stream_response(
     trace: RunTrace,
 ) -> Response {
     let user_id = user.id;
+    let hdrs = relay_headers(&provider_name, &trace.request_id);
     let s = async_stream::stream! {
         // guard 在 stream 生命周期内持有,流结束(或客户端断开导致 drop)才释放并发名额。
         let _guard = guard;
@@ -1205,11 +1260,9 @@ fn stream_response(
         trace.emit_success(&state, input, output, charged).await;
     };
 
-    Response::builder()
-        .header("content-type", "text/event-stream")
-        .header("cache-control", "no-cache")
-        .body(Body::from_stream(s))
-        .unwrap()
+    let mut resp = sse_response(s);
+    apply_relay_headers(&mut resp, &hdrs);
+    resp
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1227,6 +1280,7 @@ async fn non_stream_response(
     api_key: Option<&str>,
     trace: RunTrace,
 ) -> Result<Response, ApiError> {
+    let hdrs = relay_headers(&provider_name, &trace.request_id);
     let mut payload: Value = resp
         .json()
         .await
@@ -1268,7 +1322,9 @@ async fn non_stream_response(
     state.record_metrics_tokens(Some(&k), input as u64, output as u64).await;
     trace.emit_success(state, input, output, charged).await;
 
-    Ok(Json(payload).into_response())
+    let mut out = Json(payload).into_response();
+    apply_relay_headers(&mut out, &hdrs);
+    Ok(out)
 }
 
 /// 字节级把 `"model":"<upstream>"` 改写成对外名(ASCII 模式,避免 UTF-8 破坏)。

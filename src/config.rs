@@ -213,9 +213,31 @@ pub struct Defaults {
     /// 单个上游连接(一个 key)的默认最大在途并发。0 表示不限。
     #[serde(default = "default_upstream_concurrency")]
     pub upstream_concurrency: u32,
+    /// failover 总开关:关闭后仅尝试首个候选,不可用直接报错。
+    #[serde(default = "default_fallback_enabled")]
+    pub fallback_enabled: bool,
+    /// failover 最多尝试的候选数(含首个;0 = 不限)。
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+}
+
+impl Defaults {
+    /// 本次请求允许尝试的候选上限。
+    pub fn attempt_cap(&self, candidates: usize) -> usize {
+        if !self.fallback_enabled {
+            return candidates.min(1);
+        }
+        if self.max_retries == 0 {
+            candidates
+        } else {
+            candidates.min(self.max_retries as usize)
+        }
+    }
 }
 
 fn default_upstream_concurrency() -> u32 { 32 }
+fn default_fallback_enabled() -> bool { true }
+fn default_max_retries() -> u32 { 5 }
 
 impl Default for Defaults {
     fn default() -> Self {
@@ -227,6 +249,8 @@ impl Default for Defaults {
             rpm_limit: default_rpm(),
             tpm_limit: default_tpm(),
             upstream_concurrency: default_upstream_concurrency(),
+            fallback_enabled: default_fallback_enabled(),
+            max_retries: default_max_retries(),
         }
     }
 }
@@ -269,5 +293,32 @@ impl Config {
             .merge(Env::prefixed("RELAY_").split("__"))
             .extract()?;
         Ok(cfg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attempt_cap_defaults_limit_to_five() {
+        let d = Defaults::default();
+        assert!(d.fallback_enabled);
+        assert_eq!(d.max_retries, 5);
+        assert_eq!(d.attempt_cap(2), 2);
+        assert_eq!(d.attempt_cap(20), 5);
+    }
+
+    #[test]
+    fn attempt_cap_disabled_means_first_only() {
+        let d = Defaults { fallback_enabled: false, ..Defaults::default() };
+        assert_eq!(d.attempt_cap(0), 0);
+        assert_eq!(d.attempt_cap(7), 1);
+    }
+
+    #[test]
+    fn attempt_cap_zero_retries_means_unlimited() {
+        let d = Defaults { max_retries: 0, ..Defaults::default() };
+        assert_eq!(d.attempt_cap(20), 20);
     }
 }
