@@ -966,6 +966,34 @@ pub async fn delete_model(
     Ok(Json(json!({ "ok": true })))
 }
 
+#[derive(Deserialize)]
+pub struct BatchDeleteModels {
+    pub ids: Vec<i64>,
+}
+
+/// POST /admin/models/batch-delete —— 批量删除模型(级联删除路由,被删空的供应商一并删除)。
+pub async fn delete_models_batch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<BatchDeleteModels>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if body.ids.is_empty() {
+        return Err(ApiError::BadRequest("ids required".into()));
+    }
+    let mut deleted = 0usize;
+    for id in &body.ids {
+        if storage::delete_model_cascade(&state.db, *id)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+        {
+            deleted += 1;
+        }
+    }
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true, "deleted": deleted })))
+}
+
 // ---- 模型组 ----
 
 /// GET /admin/groups
@@ -1412,6 +1440,26 @@ pub async fn test_email_settings(
         Ok(()) => Ok(Json(json!({ "ok": true }))),
         Err(e) => Ok(Json(json!({ "ok": false, "error": e.to_string() }))),
     }
+}
+
+// ============================================================
+// 供应商健康总览(模型页徽标数据源)
+// ============================================================
+
+#[derive(Deserialize)]
+pub struct HealthQuery {
+    #[serde(default)]
+    pub range_secs: Option<u64>,
+}
+
+/// GET /admin/providers/health?range_secs=3600 —— 供应商健康状态(内存指标+熔断快照,重启后从零累积)。
+pub async fn providers_health(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<HealthQuery>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    Ok(Json(state.provider_health(q.range_secs).await))
 }
 
 // ============================================================

@@ -439,21 +439,20 @@ pub async fn update_model(
     Ok(())
 }
 
-/// 删除模型 + 它的上游连接 + 引用它的组内路由。
-pub async fn delete_model_cascade(pool: &Db, id: i64) -> anyhow::Result<()> {
+/// 删除模型 + 它的上游连接 + 引用它的组内路由。返回是否真实删除(模型不存在返回 false)。
+pub async fn delete_model_cascade(pool: &Db, id: i64) -> anyhow::Result<bool> {
     let prov: Option<String> = q!("SELECT provider FROM models WHERE id = ?")
         .bind(id).fetch_optional(pool).await?.map(|r| r.get("provider"));
+    let Some(ref p) = prov else { return Ok(false); };
     q!("DELETE FROM group_routes WHERE model_id = ?").bind(id).execute(pool).await?;
     q!("DELETE FROM models WHERE id = ?").bind(id).execute(pool).await?;
     // 只有当 provider 下无其他模型时才删除 provider
-    if let Some(ref p) = prov {
-        let remaining: i64 = q!("SELECT COUNT(*) as cnt FROM models WHERE provider = ?")
-            .bind(p).fetch_one(pool).await?.get("cnt");
-        if remaining == 0 {
-            q!("DELETE FROM providers WHERE name = ?").bind(p).execute(pool).await?;
-        }
+    let remaining: i64 = q!("SELECT COUNT(*) as cnt FROM models WHERE provider = ?")
+        .bind(p).fetch_one(pool).await?.get("cnt");
+    if remaining == 0 {
+        q!("DELETE FROM providers WHERE name = ?").bind(p).execute(pool).await?;
     }
-    Ok(())
+    Ok(true)
 }
 
 pub async fn list_models(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {

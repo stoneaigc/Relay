@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
 import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch } from "lucide-react";
-import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload } from "./api";
+import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -554,6 +554,28 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
 }
 
 
+const HEALTH_META: Record<ProviderHealthItem["status"], { label: string; cls: string; dot: string; pulse?: boolean }> = {
+  ok:       { label: "健康",   cls: "bg-success/10 text-success", dot: "bg-success" },
+  degraded: { label: "有失败", cls: "bg-amber-500/10 text-amber-700 ring-1 ring-amber-500/20", dot: "bg-amber-500" },
+  down:     { label: "异常",   cls: "bg-destructive/10 text-destructive ring-1 ring-destructive/20", dot: "bg-destructive" },
+  broken:   { label: "熔断中", cls: "bg-destructive/10 text-destructive ring-1 ring-destructive/20", dot: "bg-destructive", pulse: true },
+  idle:     { label: "无请求", cls: "bg-muted text-muted-foreground", dot: "bg-muted-foreground/60" },
+};
+
+function HealthBadge({ h }: { h?: ProviderHealthItem }) {
+  if (!h) return null;
+  const meta = HEALTH_META[h.status] ?? HEALTH_META.idle;
+  const tip = h.status === "idle"
+    ? "统计窗口内无请求"
+    : `统计窗口内 ${h.requests} 次请求 · 成功率 ${(h.success_rate * 100).toFixed(1)}% · 平均 ${Math.round(h.avg_ms)}ms · P95 ${h.p95_ms}ms${h.breaker?.fail_count ? ` · 熔断计数 ${h.breaker.fail_count}/${h.breaker.threshold}` : ""}`;
+  return (
+    <span title={tip} className={cn("inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium", meta.cls)}>
+      <span className={cn("h-1.5 w-1.5 rounded-full", meta.dot, meta.pulse && "animate-pulse")} />
+      {meta.label}
+    </span>
+  );
+}
+
 function ModelsPanel() {
   const [providers, setProviders] = useState<ProviderRow[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -566,6 +588,8 @@ function ModelsPanel() {
   const [page, setPage] = useState(1);
   const [pageMeta, setPageMeta] = useState({ total: 0, total_pages: 1 });
   const [providerSearch, setProviderSearch] = useState("");
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [health, setHealth] = useState<Record<string, ProviderHealthItem>>({});
 
   const loadProviders = async (p?: number) => {
     const pg = p ?? page;
@@ -575,6 +599,24 @@ function ModelsPanel() {
     setPage(pg);
   };
   useEffect(() => { loadProviders(1); }, []);
+
+  // 供应商健康徽标:30s 轮询;失败不打断主列表
+  const loadHealth = async () => {
+    try {
+      const r = await api.providerHealth();
+      setHealth(Object.fromEntries(r.items.map((it) => [it.provider, it])));
+    } catch { /* 忽略 */ }
+  };
+  useEffect(() => {
+    loadHealth();
+    const t = setInterval(loadHealth, 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  const refreshProviderModels = async (name: string) => {
+    const models = (await api.providerModels(name)).data;
+    setProviderModels((prev) => ({ ...prev, [name]: models }));
+  };
 
   const toggleExpand = async (name: string) => {
     const next = new Set(expanded);
@@ -595,11 +637,45 @@ function ModelsPanel() {
     action: async () => { await api.deleteProvider(p.name); loadProviders(); },
   });
 
-  const delModel = (m: { id: number; upstream_model: string }) => setConfirm({
+  const delModel = (provider: string, m: { id: number; upstream_model: string }) => setConfirm({
     title: `删除模型「${m.upstream_model}」?`,
     desc: "引用该模型的组内路由会一并删除。",
-    action: async () => { await api.deleteModel(m.id); loadProviders(); },
+    action: async () => {
+      await api.deleteModel(m.id);
+      setSelected((s) => { const n = new Set(s); n.delete(m.id); return n; });
+      await loadProviders();
+      if (expanded.has(provider)) await refreshProviderModels(provider);
+    },
   });
+
+  const toggleSelect = (id: number, checked: boolean) =>
+    setSelected((s) => { const n = new Set(s); if (checked) n.add(id); else n.delete(id); return n; });
+
+  const toggleSelectAll = (name: string, checked: boolean) => {
+    const ids = (providerModels[name] || []).map((m) => m.id);
+    setSelected((s) => {
+      const n = new Set(s);
+      ids.forEach((id) => (checked ? n.add(id) : n.delete(id)));
+      return n;
+    });
+  };
+
+  const selectedInProvider = (name: string) =>
+    (providerModels[name] || []).filter((m) => selected.has(m.id));
+
+  const delSelected = (name: string, ms: { id: number; upstream_model: string }[]) => {
+    const ids = ms.map((m) => m.id);
+    setConfirm({
+      title: `批量删除 ${ids.length} 个模型?`,
+      desc: `将删除：${ms.map((m) => m.upstream_model).join("、")}。引用它们的组内路由会一并删除，若供应商下模型被删空则供应商也会一并删除，不可恢复。`,
+      action: async () => {
+        await api.deleteModelsBatch(ids);
+        setSelected((s) => { const n = new Set(s); ids.forEach((id) => n.delete(id)); return n; });
+        await loadProviders();
+        if (expanded.has(name)) await refreshProviderModels(name);
+      },
+    });
+  };
 
   const runTest = async (id: number) => {
     setTest((t) => ({ ...t, [id]: "loading" }));
@@ -644,7 +720,10 @@ function ModelsPanel() {
                 <div className="flex items-center gap-3">
                   <Zap className="h-4 w-4 text-primary" />
                   <div>
-                    <div className="text-sm font-medium">{providerDisplayName(p.base_url)}</div>
+                    <div className="flex items-center gap-2 text-sm font-medium">
+                      {providerDisplayName(p.base_url)}
+                      <HealthBadge h={health[p.name]} />
+                    </div>
                     <div className="text-xs text-muted-foreground">{p.base_url}</div>
                   </div>
                 </div>
@@ -661,9 +740,26 @@ function ModelsPanel() {
                   {providerModels[p.name]?.length === 0 && (
                     <p className="px-4 py-2 text-xs text-muted-foreground">该供应商下暂无模型</p>
                   )}
+                  {(providerModels[p.name]?.length ?? 0) > 0 && (
+                    <div className="flex items-center justify-between px-4 py-2 bg-muted/30">
+                      <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                        <input type="checkbox" className="h-4 w-4 rounded border-input"
+                          checked={selectedInProvider(p.name).length === (providerModels[p.name]?.length ?? 0)}
+                          onChange={(e) => toggleSelectAll(p.name, e.target.checked)} />
+                        全选
+                      </label>
+                      {selectedInProvider(p.name).length > 0 && (
+                        <Button variant="destructive" size="sm" className="h-7 text-xs" onClick={() => delSelected(p.name, selectedInProvider(p.name))}>
+                          <Trash2 className="h-3 w-3" />删除所选({selectedInProvider(p.name).length})
+                        </Button>
+                      )}
+                    </div>
+                  )}
                   {providerModels[p.name]?.map((m) => (
                     <div key={m.id} className="flex items-center justify-between px-4 py-2 border-t first:border-t-0">
                       <div className="flex items-center gap-3">
+                        <input type="checkbox" className="h-4 w-4 rounded border-input"
+                          checked={selected.has(m.id)} onChange={(e) => toggleSelect(m.id, e.target.checked)} />
                         <Boxes className="h-3.5 w-3.5 text-muted-foreground" />
                         <span className="text-sm">{m.label || m.upstream_model}</span>
                         {m.label && <span className="text-xs text-muted-foreground">{m.upstream_model}</span>}
@@ -677,7 +773,7 @@ function ModelsPanel() {
                         })()}
                         <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => runTest(m.id)}><Activity className="h-3 w-3" /></Button>
                         <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => setEditModel({ id: m.id, label: m.label, kind: p.kind, base_url: p.base_url, upstream_model: m.upstream_model, provider: p.name })}><Pencil className="h-3 w-3" /></Button>
-                        <Button variant="ghost" size="sm" className="h-7 px-2 text-destructive" onClick={() => delModel(m)}><Trash2 className="h-3 w-3" /></Button>
+                        <Button variant="ghost" size="sm" className="h-7 px-2 text-destructive" onClick={() => delModel(p.name, m)}><Trash2 className="h-3 w-3" /></Button>
                       </div>
                     </div>
                   ))}

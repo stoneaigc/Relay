@@ -193,10 +193,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/models", get(admin::list_models).post(admin::add_model))
         .route("/models/fetch-list", post(admin::fetch_model_list))
         .route("/models/batch", post(admin::add_models_batch))
+        .route("/models/batch-delete", post(admin::delete_models_batch))
         .route("/models/:id", axum::routing::delete(admin::delete_model).patch(admin::update_model))
         .route("/models/:id/test", post(admin::test_model))
         // ---- 上游供应商(Provider) ----
         .route("/providers", get(admin::list_providers))
+        .route("/providers/health", get(admin::providers_health))
         .route("/providers/exists", post(admin::provider_exists))
         .route("/providers/:name/models", get(admin::list_provider_models))
         .route("/providers/:name", axum::routing::put(admin::update_provider).delete(admin::delete_provider))

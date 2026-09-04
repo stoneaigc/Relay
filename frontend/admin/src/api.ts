@@ -51,6 +51,37 @@ export interface ProviderRow {
   model_count: number;
 }
 
+export type ProviderHealthStatus = "ok" | "degraded" | "down" | "broken" | "idle";
+
+export interface ProviderHealthItem {
+  provider: string;
+  kind: string;
+  base_url: string;
+  key_fingerprint: string;
+  requests: number;
+  success: number;
+  fail_unavailable: number;
+  fail_other: number;
+  success_rate: number;
+  avg_ms: number;
+  p95_ms: number;
+  p99_ms: number;
+  status: ProviderHealthStatus;
+  breaker: {
+    fail_count: number;
+    threshold: number;
+    is_broken: boolean;
+    recover_remaining_ms: number;
+    window_secs: number;
+  } | null;
+}
+
+export interface ProviderHealthResp {
+  range_secs: number;
+  sampled_at: number;
+  items: ProviderHealthItem[];
+}
+
 export interface GroupRow { id: number; name: string; is_active: boolean; strategy: string }
 
 export interface TimeRuleRow {
@@ -130,6 +161,8 @@ export const api = {
   updateModel: (id: number, body: { kind: string; base_url: string; api_key?: string; upstream_model: string; label?: string }) =>
     req(`/admin/api/models/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteModel: (id: number) => req(`/admin/api/models/${id}`, { method: "DELETE" }),
+  deleteModelsBatch: (ids: number[]): Promise<{ ok: boolean; deleted: number }> =>
+    req("/admin/api/models/batch-delete", { method: "POST", body: JSON.stringify({ ids }) }),
   testModel: (id: number): Promise<{ ok: boolean; latency_ms?: number; error?: string }> =>
     req(`/admin/api/models/${id}/test`, { method: "POST" }),
   fetchModelList: (body: { kind: string; base_url: string; api_key?: string }): Promise<{ ok: boolean; models?: string[]; error?: string }> =>
@@ -138,6 +171,8 @@ export const api = {
     req("/admin/api/models/batch", { method: "POST", body: JSON.stringify(body) }),
   providerExists: (base_url: string, api_key?: string): Promise<{ exists: boolean; name?: string; models?: string[] }> =>
     req("/admin/api/providers/exists", { method: "POST", body: JSON.stringify({ base_url, api_key }) }),
+  providerHealth: (rangeSecs = 3600): Promise<ProviderHealthResp> =>
+    req(`/admin/api/providers/health?range_secs=${rangeSecs}`),
 
   groups: (): Promise<{ data: GroupRow[] }> => req("/admin/api/groups"),
   addGroup: (name: string) => req("/admin/api/groups", { method: "POST", body: JSON.stringify({ name }) }),

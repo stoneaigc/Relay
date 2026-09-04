@@ -797,6 +797,37 @@ impl MetricsStore {
     }
 }
 
+/// 从 TimeBuckets 聚合指定窗口:返回 (合并总量, 原始 series)。use_sec=true 走秒桶,否则走分钟桶。
+async fn aggregate_timebuckets(
+    buckets: Arc<AsyncMutex<TimeBuckets>>,
+    since_min: u64,
+    since_sec: u64,
+    use_sec: bool,
+) -> (MetricsBucket, Vec<(u64, MetricsBucket)>) {
+    let g = buckets.lock().await;
+    let mut total = MetricsBucket::default();
+    let series: Vec<(u64, MetricsBucket)> = if use_sec {
+        g.secs
+            .iter()
+            .filter(|(ts, _)| *ts >= since_sec)
+            .map(|(ts, b)| {
+                total.merge(b);
+                (*ts, b.clone())
+            })
+            .collect()
+    } else {
+        g.mins
+            .iter()
+            .filter(|(ts, _)| *ts >= since_min)
+            .map(|(ts, b)| {
+                total.merge(b);
+                (*ts, b.clone())
+            })
+            .collect()
+    };
+    (total, series)
+}
+
 // 给 AppState 加 record_metrics / query_metrics
 impl AppState {
     /// 观测一次请求结果。任何情况绝不抛异常。
@@ -893,39 +924,8 @@ impl AppState {
 
         let top_n = top_n_upstream.unwrap_or(20).clamp(1, 100);
 
-        // 辅助:从 TimeBuckets 取聚合
-        async fn aggregate(
-            buckets: Arc<AsyncMutex<TimeBuckets>>,
-            since_min: u64,
-            since_sec: u64,
-            use_sec: bool,
-        ) -> (MetricsBucket, Vec<(u64, MetricsBucket)>) {
-            let g = buckets.lock().await;
-            let mut total = MetricsBucket::default();
-            let series: Vec<(u64, MetricsBucket)> = if use_sec {
-                g.secs
-                    .iter()
-                    .filter(|(ts, _)| *ts >= since_sec)
-                    .map(|(ts, b)| {
-                        total.merge(b);
-                        (*ts, b.clone())
-                    })
-                    .collect()
-            } else {
-                g.mins
-                    .iter()
-                    .filter(|(ts, _)| *ts >= since_min)
-                    .map(|(ts, b)| {
-                        total.merge(b);
-                        (*ts, b.clone())
-                    })
-                    .collect()
-            };
-            (total, series)
-        }
-
         // 1) 全局汇总+时序
-        let (global_total, global_series) = aggregate(
+        let (global_total, global_series) = aggregate_timebuckets(
             self.metrics.get_bucket(None),
             since_minute_bucket,
             since_sec_bucket,
@@ -946,7 +946,7 @@ impl AppState {
 
         let mut per_up = Vec::new();
         for up_key in candidate_keys {
-            let (total, _) = aggregate(
+            let (total, _) = aggregate_timebuckets(
                 self.metrics.get_bucket(Some(up_key.clone())),
                 since_minute_bucket,
                 since_sec_bucket,
@@ -1051,6 +1051,102 @@ impl AppState {
             },
             "series": series_values,
             "upstreams": per_up_truncated,
+        })
+    }
+
+    /// 供应商健康总览(模型页徽标数据源):按内存路由表逐个供应商聚合窗口内指标 + 熔断快照。
+    /// 全部读内存(MetricsStore 分钟桶 + Breaker),无 SQL;进程重启后统计从零累积。
+    /// - `range_secs`:统计窗口,默认 1h,范围 [60s, 48h]。
+    pub async fn provider_health(&self, range_secs: Option<u64>) -> Value {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let range = range_secs.unwrap_or(3600).clamp(60, METRIC_MIN_WINDOW as u64 * 60);
+        let since_min = now.saturating_sub(range) / 60 * 60;
+
+        let routing = self.routing.load();
+        let mut items: Vec<(u8, Value)> = Vec::new(); // (状态优先级, item),数值小者排前
+        for (name, conn) in routing.providers.iter() {
+            let key = UpstreamKey::new(conn.kind, &conn.base_url, conn.api_key.as_deref());
+            let (total, _) = aggregate_timebuckets(
+                self.metrics.get_bucket(Some(key.clone())),
+                since_min,
+                0,
+                false,
+            )
+            .await;
+
+            // 熔断快照:先 clone Arc 并释放 DashMap 读守卫,再 await 内部锁,避免锁交叉
+            let breaker_snap = match self.upstream_breakers.get(&key) {
+                Some(e) => {
+                    let b = e.value().clone();
+                    drop(e);
+                    let snap = b.lock().await.snapshot();
+                    snap
+                }
+                None => Breaker::default().snapshot(),
+            };
+            let is_broken = breaker_snap.pointer("/is_broken").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            let ok_rate = if total.req == 0 { 0.0 } else { (total.success as f64) / (total.req as f64) };
+            // 状态推导:broken(熔断中) > down(窗口内全失败) > degraded(有失败) > ok(全成功) > idle(无请求)
+            let status = if is_broken {
+                "broken"
+            } else if total.req == 0 {
+                "idle"
+            } else if total.success == 0 {
+                "down"
+            } else if total.success < total.req {
+                "degraded"
+            } else {
+                "ok"
+            };
+            let prio: u8 = match status {
+                "broken" => 0,
+                "down" => 1,
+                "degraded" => 2,
+                "ok" => 3,
+                _ => 4,
+            };
+
+            let fp_hex = key
+                .key_fingerprint
+                .map(|f| format!("{:016x}", f))
+                .unwrap_or_default();
+            let item = json!({
+                "provider": name,
+                "kind": match key.kind {
+                    ProviderKind::Openai => "openai",
+                    ProviderKind::Anthropic => "anthropic",
+                },
+                "base_url": key.base_url,
+                "key_fingerprint": fp_hex,
+                "requests": total.req,
+                "success": total.success,
+                "fail_unavailable": total.fail_unavail,
+                "fail_other": total.req.saturating_sub(total.success).saturating_sub(total.fail_unavail),
+                "success_rate": ok_rate,
+                "avg_ms": total.avg_ms(),
+                "p95_ms": total.p(0.95),
+                "p99_ms": total.p(0.99),
+                "status": status,
+                "breaker": breaker_snap,
+            });
+            items.push((prio, item));
+        }
+        // 排序:状态差者靠前(熔断/异常先看到),同级按供应商名
+        items.sort_by(|a, b| {
+            a.0.cmp(&b.0).then_with(|| {
+                let na = a.1.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+                let nb = b.1.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+                na.cmp(nb)
+            })
+        });
+        let items: Vec<Value> = items.into_iter().map(|(_, v)| v).collect();
+
+        json!({
+            "range_secs": range,
+            "sampled_at": now,
+            "items": items,
         })
     }
 }
@@ -1205,5 +1301,128 @@ mod tests {
         b.recover_at = Some(Instant::now() - std::time::Duration::from_secs(1));
         assert!(b.maybe_half_open());
         assert!(b.is_available());
+    }
+
+    // ---- provider_health 状态机推导 + 排序 ----
+
+    #[tokio::test]
+    async fn provider_health_status_machine() {
+        use std::collections::HashMap;
+        use std::sync::Mutex as StdMutex;
+
+        use crate::cache::Cache;
+        use crate::reqlog::SqliteRequestLogStore;
+        use crate::routing::{ProviderConn, Routing};
+
+        sqlx::any::install_default_drivers();
+        let db = crate::storage::Db::connect("sqlite::memory:").await.unwrap();
+        let db2 = db.clone();
+        // Config 只有 server.bind / database 必填,其余全有默认,直接反序列化最小配置
+        let cfg: crate::config::Config = serde_json::from_str(
+            r#"{"server":{"bind":"127.0.0.1:0"},"database":{}}"#,
+        )
+        .unwrap();
+
+        let conn = |kind, base_url: &str, api_key: Option<&str>| ProviderConn {
+            kind,
+            base_url: base_url.to_string(),
+            api_key: api_key.map(|s| s.to_string()),
+            concurrency: None,
+        };
+        let routing = Routing {
+            providers: HashMap::from([
+                ("prov-a".to_string(), conn(ProviderKind::Openai, "http://a", Some("ka"))),
+                ("prov-b".to_string(), conn(ProviderKind::Anthropic, "http://b", None)),
+            ]),
+            models: HashMap::new(),
+            group_names: HashMap::new(),
+            group_strategy: HashMap::new(),
+            time_rules: HashMap::new(),
+            groups: HashMap::new(),
+        };
+
+        let (usage_tx, _usage_rx) = mpsc::channel(16);
+        let (log_tx, _log_rx) = mpsc::channel(16);
+        let state = Arc::new(AppState {
+            config: ArcSwap::from_pointee(cfg),
+            routing: ArcSwap::from_pointee(routing),
+            keys: DashMap::new(),
+            users: DashMap::new(),
+            http: reqwest::Client::new(),
+            db,
+            usage_tx,
+            cache: Cache::Memory(StdMutex::new(HashMap::new())),
+            upstream_slots: DashMap::new(),
+            upstream_breakers: DashMap::new(),
+            round_robin: DashMap::new(),
+            tz_offset_secs: 28800,
+            audit_failures: AsyncMutex::new(VecDeque::new()),
+            metrics: MetricsStore::default(),
+            request_log: Arc::new(SqliteRequestLogStore::new(db2)),
+            request_log_tx: log_tx,
+        });
+
+        let key_a = UpstreamKey::new(ProviderKind::Openai, "http://a", Some("ka"));
+        let key_b = UpstreamKey::new(ProviderKind::Anthropic, "http://b", None);
+
+        // 1) 无请求 → 两个供应商都 idle;同级按名称排序
+        let out = state.provider_health(Some(3600)).await;
+        let items = out["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["provider"], "prov-a");
+        assert_eq!(items[0]["status"], "idle");
+        assert_eq!(items[1]["provider"], "prov-b");
+        assert_eq!(items[1]["status"], "idle");
+
+        // 2) prov-a: 2 成功 + 1 失败 → degraded;prov-b 仍 idle
+        state.record_metrics(Some(&key_a), 200, Duration::from_millis(100), 0, 0).await;
+        state.record_metrics(Some(&key_a), 200, Duration::from_millis(200), 0, 0).await;
+        state.record_metrics(Some(&key_a), 500, Duration::from_millis(50), 0, 0).await;
+        let out = state.provider_health(Some(3600)).await;
+        let items = out["items"].as_array().unwrap();
+        let a = items.iter().find(|it| it["provider"] == "prov-a").unwrap();
+        let b = items.iter().find(|it| it["provider"] == "prov-b").unwrap();
+        assert_eq!(a["status"], "degraded");
+        assert_eq!(a["requests"], 3);
+        assert_eq!(a["success"], 2);
+        assert_eq!(a["fail_other"], 1);
+        assert_eq!(b["status"], "idle");
+
+        // 3) prov-b: 全部失败 → down;且 down(degraded 之前的状态)排前面
+        state.record_metrics(Some(&key_b), 502, Duration::ZERO, 0, 0).await;
+        state.record_metrics(Some(&key_b), METRIC_STATUS_UNAVAILABLE, Duration::ZERO, 0, 0).await;
+        let out = state.provider_health(Some(3600)).await;
+        let items = out["items"].as_array().unwrap();
+        assert_eq!(items[0]["provider"], "prov-b");
+        assert_eq!(items[0]["status"], "down");
+        assert_eq!(items[0]["requests"], 2);
+        assert_eq!(items[0]["success"], 0);
+        assert_eq!(items[0]["fail_unavailable"], 1);
+        assert_eq!(items[0]["fail_other"], 1);
+        assert_eq!(items[1]["provider"], "prov-a");
+        assert_eq!(items[1]["status"], "degraded");
+
+        // 4) prov-b 熔断器连续 3 次不可用 → broken(置顶),带恢复倒计时
+        state
+            .upstream_breakers
+            .insert(key_b.clone(), Arc::new(AsyncMutex::new(Breaker::default())));
+        {
+            let e = state.upstream_breakers.get(&key_b).unwrap();
+            let breaker = e.value().clone();
+            drop(e);
+            let mut g = breaker.lock().await;
+            g.record_unavailable();
+            g.record_unavailable();
+            g.record_unavailable();
+        }
+        let out = state.provider_health(Some(3600)).await;
+        let items = out["items"].as_array().unwrap();
+        assert_eq!(items[0]["provider"], "prov-b");
+        assert_eq!(items[0]["status"], "broken");
+        assert_eq!(items[0]["breaker"]["is_broken"], true);
+        assert_eq!(items[0]["breaker"]["fail_count"], BREAKER_FAILS);
+        assert!(items[0]["breaker"]["recover_remaining_ms"].as_u64().unwrap() > 0);
+        assert_eq!(items[1]["provider"], "prov-a");
+        assert_eq!(items[1]["status"], "degraded");
     }
 }
