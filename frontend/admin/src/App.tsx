@@ -12,14 +12,21 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { cn } from "@/lib/utils";
 import PaginationBar from "./PaginationBar";
 import { PasswordInput } from "@/components/ui/password-input";
+import { Toaster } from "sonner";
 
 export default function App() {
   const [authed, setAuthed] = useState(!!getToken());
-  if (!authed) return <Login onSuccess={() => setAuthed(true)} />;
   return (
-    <BrowserRouter basename="/admin">
-      <Console onLogout={() => { clearToken(); setAuthed(false); }} />
-    </BrowserRouter>
+    <>
+      <Toaster position="top-center" richColors />
+      {!authed ? (
+        <Login onSuccess={() => setAuthed(true)} />
+      ) : (
+        <BrowserRouter basename="/admin">
+          <Console onLogout={() => { clearToken(); setAuthed(false); }} />
+        </BrowserRouter>
+      )}
+    </>
   );
 }
 
@@ -556,7 +563,7 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
 
 const HEALTH_META: Record<ProviderHealthItem["status"], { label: string; cls: string; dot: string; pulse?: boolean }> = {
   ok:       { label: "健康",   cls: "bg-success/10 text-success", dot: "bg-success" },
-  degraded: { label: "有失败", cls: "bg-amber-500/10 text-amber-700 ring-1 ring-amber-500/20", dot: "bg-amber-500" },
+  degraded: { label: "有失败", cls: "bg-warning/10 text-warning-foreground ring-1 ring-warning/20", dot: "bg-warning" },
   down:     { label: "异常",   cls: "bg-destructive/10 text-destructive ring-1 ring-destructive/20", dot: "bg-destructive" },
   broken:   { label: "熔断中", cls: "bg-destructive/10 text-destructive ring-1 ring-destructive/20", dot: "bg-destructive", pulse: true },
   idle:     { label: "无请求", cls: "bg-muted text-muted-foreground", dot: "bg-muted-foreground/60" },

@@ -19,6 +19,8 @@
   --color-destructive: #dc2626;
   --color-destructive-foreground: #ffffff;
   --color-success: #16a34a;
+  --color-warning: #f59e0b;
+  --color-warning-foreground: #b45309;
   --color-border: #e7e8ec;
   --color-input: #e1e3e8;
   --color-ring: #c7cad1;
