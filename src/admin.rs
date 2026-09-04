@@ -29,6 +29,11 @@ fn admin_guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
     jwt::from_headers(&cfg.auth.jwt_secret, headers, "admin").map(|_| ())
 }
 
+/// 价格合法性:可空;有值时必须是有限非负数($/1M tokens)。
+fn price_ok(p: Option<f64>) -> bool {
+    p.map(|v| v.is_finite() && v >= 0.0).unwrap_or(true)
+}
+
 /// 统一分页查询参数:page(默认1,>=1)、page_size(默认20,clamp到1..=100)。
 #[derive(Deserialize, Default)]
 pub struct PageQuery {
@@ -757,6 +762,8 @@ pub struct AddModel {
     pub base_url: String,
     pub api_key: Option<String>,
     pub upstream_model: String, // 供应商上的真实模型名
+    pub input_price: Option<f64>,  // 输入单价 $/1M tokens
+    pub output_price: Option<f64>, // 输出单价 $/1M tokens
 }
 
 /// POST /admin/models —— 添加三方模型(自动建好它的上游连接)。
@@ -772,11 +779,14 @@ pub async fn add_model(
     if body.base_url.trim().is_empty() || body.upstream_model.trim().is_empty() {
         return Err(ApiError::BadRequest("base_url and upstream_model required".into()));
     }
+    if !price_ok(body.input_price) || !price_ok(body.output_price) {
+        return Err(ApiError::BadRequest("prices must be finite and >= 0".into()));
+    }
     // 按 base_url 复用已有 provider，不重复创建
     let (provider, _) = storage::find_or_create_provider(&state.db, &body.kind, &body.base_url, body.api_key.as_deref())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let id = storage::add_model(&state.db, &provider, &body.upstream_model, body.label.as_deref())
+    let id = storage::add_model(&state.db, &provider, &body.upstream_model, body.label.as_deref(), body.input_price, body.output_price)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;
@@ -794,6 +804,8 @@ pub struct AddModelsBatch {
 pub struct AddModelBatchItem {
     pub upstream_model: String,
     pub label: Option<String>,
+    pub input_price: Option<f64>,  // 输入单价 $/1M tokens
+    pub output_price: Option<f64>, // 输出单价 $/1M tokens
 }
 
 /// POST /admin/models/batch —— 批量添加同一供应商下的多个模型。
@@ -809,13 +821,16 @@ pub async fn add_models_batch(
     if body.base_url.trim().is_empty() || body.models.is_empty() {
         return Err(ApiError::BadRequest("base_url and at least one model required".into()));
     }
+    if body.models.iter().any(|m| !price_ok(m.input_price) || !price_ok(m.output_price)) {
+        return Err(ApiError::BadRequest("prices must be finite and >= 0".into()));
+    }
     let (provider, provider_created) = storage::find_or_create_provider(&state.db, &body.kind, &body.base_url, body.api_key.as_deref())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let mut added = 0usize;
     let mut skipped = 0usize;
     for m in &body.models {
-        let (_, is_new) = storage::add_model_returning(&state.db, &provider, &m.upstream_model, m.label.as_deref())
+        let (_, is_new) = storage::add_model_returning(&state.db, &provider, &m.upstream_model, m.label.as_deref(), m.input_price, m.output_price)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
         if is_new {
@@ -922,6 +937,14 @@ pub async fn fetch_model_list(
     }
 }
 
+/// 价格字段三态:缺失=不改动 / null=清除定价 / 数字=设置单价($/1M tokens)。
+fn deser_opt_f64<'de, D>(d: D) -> Result<Option<Option<f64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<f64>::deserialize(d)?))
+}
+
 #[derive(Deserialize)]
 pub struct UpdateModel {
     pub kind: String,
@@ -929,6 +952,10 @@ pub struct UpdateModel {
     pub api_key: Option<String>, // 留空=保持原密钥
     pub upstream_model: String,
     pub label: Option<String>,
+    #[serde(default, deserialize_with = "deser_opt_f64")]
+    pub input_price: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "deser_opt_f64")]
+    pub output_price: Option<Option<f64>>,
 }
 
 /// PATCH /admin/models/:id —— 编辑模型。
@@ -945,7 +972,10 @@ pub async fn update_model(
     if body.base_url.trim().is_empty() || body.upstream_model.trim().is_empty() {
         return Err(ApiError::BadRequest("base_url and upstream_model required".into()));
     }
-    storage::update_model(&state.db, id, &body.kind, &body.base_url, body.api_key.as_deref(), &body.upstream_model, body.label.as_deref())
+    if !price_ok(body.input_price.flatten()) || !price_ok(body.output_price.flatten()) {
+        return Err(ApiError::BadRequest("prices must be finite and >= 0".into()));
+    }
+    storage::update_model(&state.db, id, &body.kind, &body.base_url, body.api_key.as_deref(), &body.upstream_model, body.label.as_deref(), body.input_price, body.output_price)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;

@@ -7,6 +7,7 @@ mod error;
 mod handlers;
 mod jwt;
 mod portal;
+mod pricing;
 mod providers;
 mod reqlog;
 pub mod routing;

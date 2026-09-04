@@ -82,6 +82,8 @@ CREATE TABLE IF NOT EXISTS models (
   provider       TEXT NOT NULL,
   upstream_model TEXT NOT NULL,
   label          TEXT,
+  input_price    DOUBLE PRECISION,          -- 输入单价 $/1M tokens(NULL=未定价)
+  output_price   DOUBLE PRECISION,          -- 输出单价 $/1M tokens(NULL=未定价)
   created_at     TEXT NOT NULL,
   UNIQUE (provider, upstream_model)
 );

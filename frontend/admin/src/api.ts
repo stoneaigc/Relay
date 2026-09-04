@@ -42,6 +42,8 @@ export interface ModelRow {
   upstream_model: string;
   provider?: string | null;
   api_key?: string | null;
+  input_price: number | null;
+  output_price: number | null;
 }
 
 export interface ProviderRow {
@@ -49,6 +51,15 @@ export interface ProviderRow {
   kind: string;
   base_url: string;
   model_count: number;
+}
+
+/** 供应商展开列表里的模型行（含价格，$/1M tokens）。 */
+export interface ProviderModelRow {
+  id: number;
+  upstream_model: string;
+  label: string | null;
+  input_price: number | null;
+  output_price: number | null;
 }
 
 export type ProviderHealthStatus = "ok" | "degraded" | "down" | "broken" | "idle";
@@ -150,7 +161,7 @@ export const api = {
   // ---- 上游供应商(Provider) ----
   providers: (page?: number, page_size?: number): Promise<{ data: ProviderRow[]; page: number; page_size: number; total: number; total_pages: number }> =>
     req(`/admin/api/providers?page=${page || 1}&page_size=${page_size || 20}`),
-  providerModels: (name: string): Promise<{ data: { id: number; upstream_model: string; label: string | null }[] }> => req(`/admin/api/providers/${name}/models`),
+  providerModels: (name: string): Promise<{ data: ProviderModelRow[] }> => req(`/admin/api/providers/${name}/models`),
   deleteProvider: (name: string) => req(`/admin/api/providers/${name}`, { method: "DELETE" }),
   updateProvider: (name: string, body: { base_url: string; api_key?: string }) =>
     req(`/admin/api/providers/${name}`, { method: "PUT", body: JSON.stringify(body) }),
@@ -158,7 +169,7 @@ export const api = {
   models: (): Promise<{ data: ModelRow[] }> => req("/admin/api/models"),
   addModel: (body: { label?: string; kind: string; base_url: string; api_key?: string; upstream_model: string }) =>
     req("/admin/api/models", { method: "POST", body: JSON.stringify(body) }),
-  updateModel: (id: number, body: { kind: string; base_url: string; api_key?: string; upstream_model: string; label?: string }) =>
+  updateModel: (id: number, body: { kind: string; base_url: string; api_key?: string; upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null }) =>
     req(`/admin/api/models/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteModel: (id: number) => req(`/admin/api/models/${id}`, { method: "DELETE" }),
   deleteModelsBatch: (ids: number[]): Promise<{ ok: boolean; deleted: number }> =>

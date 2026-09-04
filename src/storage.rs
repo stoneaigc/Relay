@@ -190,6 +190,13 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE reward_claims ALTER COLUMN kind DROP NOT NULL")
             .execute(pool)
             .await;
+        // 模型价格表($/1M tokens,可空=未定价)。
+        let _ = q!("ALTER TABLE models ADD COLUMN IF NOT EXISTS input_price DOUBLE PRECISION")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE models ADD COLUMN IF NOT EXISTS output_price DOUBLE PRECISION")
+            .execute(pool)
+            .await;
     } else {
         let _ = q!("ALTER TABLE reward_claims ADD COLUMN task_id INTEGER").execute(pool).await;
         let _ = q!("ALTER TABLE users ADD COLUMN bill_multiplier REAL NOT NULL DEFAULT 1.0")
@@ -215,6 +222,9 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN request_id TEXT")
             .execute(pool)
             .await;
+        // 模型价格表($/1M tokens,可空=未定价)。
+        let _ = q!("ALTER TABLE models ADD COLUMN input_price REAL").execute(pool).await;
+        let _ = q!("ALTER TABLE models ADD COLUMN output_price REAL").execute(pool).await;
         // 模型防重唯一索引:旧库有重复时创建失败则跳过，幂等由 add_model 查询保证。
         let _ = q!("CREATE UNIQUE INDEX IF NOT EXISTS uniq_models_provider_model ON models(provider, upstream_model)")
             .execute(pool)
@@ -375,17 +385,26 @@ pub async fn update_provider(
 /// 列出指定 provider 下的所有模型。
 pub async fn list_models_by_provider(pool: &Db, provider_name: &str) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = q!(
-        "SELECT m.id, m.upstream_model, m.label
+        "SELECT m.id, m.upstream_model, m.label, m.input_price, m.output_price
          FROM models m WHERE m.provider = ? ORDER BY m.id"
     ).bind(provider_name).fetch_all(pool).await?;
     Ok(rows.iter().map(|r| serde_json::json!({
         "id": r.get::<i64,_>("id"),
         "upstream_model": r.get::<String,_>("upstream_model"),
         "label": r.get::<Option<String>,_>("label"),
+        "input_price": r.get::<Option<f64>,_>("input_price"),
+        "output_price": r.get::<Option<f64>,_>("output_price"),
     })).collect())
 }
 
-pub async fn add_model(pool: &Db, provider: &str, upstream_model: &str, label: Option<&str>) -> anyhow::Result<i64> {
+pub async fn add_model(
+    pool: &Db,
+    provider: &str,
+    upstream_model: &str,
+    label: Option<&str>,
+    input_price: Option<f64>,
+    output_price: Option<f64>,
+) -> anyhow::Result<i64> {
     let existing: Option<i64> = q!("SELECT id FROM models WHERE provider = ? AND upstream_model = ?")
         .bind(provider).bind(upstream_model)
         .fetch_optional(pool).await?
@@ -393,14 +412,21 @@ pub async fn add_model(pool: &Db, provider: &str, upstream_model: &str, label: O
     if let Some(id) = existing {
         return Ok(id);
     }
-    let r = q!("INSERT INTO models (provider, upstream_model, label, created_at) VALUES (?, ?, ?, ?) RETURNING id")
-        .bind(provider).bind(upstream_model).bind(label).bind(now_iso())
+    let r = q!("INSERT INTO models (provider, upstream_model, label, input_price, output_price, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id")
+        .bind(provider).bind(upstream_model).bind(label).bind(input_price).bind(output_price).bind(now_iso())
         .fetch_one(pool).await?;
     Ok(r.get::<i64, _>("id"))
 }
 
 /// 添加模型并报告是否新建（用于批量添加时区分「新增」与「已存在」）。
-pub async fn add_model_returning(pool: &Db, provider: &str, upstream_model: &str, label: Option<&str>) -> anyhow::Result<(i64, bool)> {
+pub async fn add_model_returning(
+    pool: &Db,
+    provider: &str,
+    upstream_model: &str,
+    label: Option<&str>,
+    input_price: Option<f64>,
+    output_price: Option<f64>,
+) -> anyhow::Result<(i64, bool)> {
     let existing: Option<i64> = q!("SELECT id FROM models WHERE provider = ? AND upstream_model = ?")
         .bind(provider).bind(upstream_model)
         .fetch_optional(pool).await?
@@ -408,13 +434,14 @@ pub async fn add_model_returning(pool: &Db, provider: &str, upstream_model: &str
     if let Some(id) = existing {
         return Ok((id, false));
     }
-    let r = q!("INSERT INTO models (provider, upstream_model, label, created_at) VALUES (?, ?, ?, ?) RETURNING id")
-        .bind(provider).bind(upstream_model).bind(label).bind(now_iso())
+    let r = q!("INSERT INTO models (provider, upstream_model, label, input_price, output_price, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id")
+        .bind(provider).bind(upstream_model).bind(label).bind(input_price).bind(output_price).bind(now_iso())
         .fetch_one(pool).await?;
     Ok((r.get::<i64, _>("id"), true))
 }
 
 /// 更新模型:改其上游连接(provider 的 kind/base_url,密钥仅在提供时覆盖)+ 上游模型名/备注。
+/// 价格为三态:`None`=不改动 / `Some(None)`=清除定价 / `Some(Some(v))`=设置单价。
 pub async fn update_model(
     pool: &Db,
     id: i64,
@@ -423,6 +450,8 @@ pub async fn update_model(
     api_key: Option<&str>,
     upstream_model: &str,
     label: Option<&str>,
+    input_price: Option<Option<f64>>,
+    output_price: Option<Option<f64>>,
 ) -> anyhow::Result<()> {
     let prov: Option<String> = q!("SELECT provider FROM models WHERE id = ?")
         .bind(id).fetch_optional(pool).await?.map(|r| r.get("provider"));
@@ -436,6 +465,13 @@ pub async fn update_model(
     }
     q!("UPDATE models SET upstream_model = ?, label = ? WHERE id = ?")
         .bind(upstream_model).bind(label).bind(id).execute(pool).await?;
+    // 价格三态更新：缺失不改动，None 清除，Some 设置
+    if let Some(v) = input_price {
+        q!("UPDATE models SET input_price = ? WHERE id = ?").bind(v).bind(id).execute(pool).await?;
+    }
+    if let Some(v) = output_price {
+        q!("UPDATE models SET output_price = ? WHERE id = ?").bind(v).bind(id).execute(pool).await?;
+    }
     Ok(())
 }
 
@@ -457,13 +493,15 @@ pub async fn delete_model_cascade(pool: &Db, id: i64) -> anyhow::Result<bool> {
 
 pub async fn list_models(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = q!(
-        "SELECT m.id, m.upstream_model, m.label, p.name as provider_name, p.kind, p.base_url, p.api_key
+        "SELECT m.id, m.upstream_model, m.label, m.input_price, m.output_price, p.name as provider_name, p.kind, p.base_url, p.api_key
          FROM models m LEFT JOIN providers p ON p.name = m.provider ORDER BY p.name, m.id")
         .fetch_all(pool).await?;
     Ok(rows.iter().map(|r| serde_json::json!({
         "id": r.get::<i64,_>("id"),
         "upstream_model": r.get::<String,_>("upstream_model"),
         "label": r.get::<Option<String>,_>("label"),
+        "input_price": r.get::<Option<f64>,_>("input_price"),
+        "output_price": r.get::<Option<f64>,_>("output_price"),
         "provider": r.get::<Option<String>,_>("provider_name"),
         "kind": r.get::<Option<String>,_>("kind"),
         "base_url": r.get::<Option<String>,_>("base_url"),
@@ -1886,13 +1924,34 @@ mod tests {
         let db = test_db().await;
         let (provider, _) = find_or_create_provider(&db, "openai", "https://api.test.com/v1", Some("sk-x"))
             .await.unwrap();
-        let (_, is_new1) = add_model_returning(&db, &provider, "gpt-4o", None).await.unwrap();
-        let (_, is_new2) = add_model_returning(&db, &provider, "gpt-4o", None).await.unwrap();
+        let (_, is_new1) = add_model_returning(&db, &provider, "gpt-4o", None, None, None).await.unwrap();
+        let (_, is_new2) = add_model_returning(&db, &provider, "gpt-4o", None, None, None).await.unwrap();
         assert!(is_new1);
         assert!(!is_new2);
         // 第三个不同模型
-        let (_, is_new3) = add_model_returning(&db, &provider, "gpt-4o-mini", None).await.unwrap();
+        let (_, is_new3) = add_model_returning(&db, &provider, "gpt-4o-mini", None, None, None).await.unwrap();
         assert!(is_new3);
+    }
+
+    // ---- 模型价格 CRUD ----
+
+    #[tokio::test]
+    async fn model_price_roundtrip() {
+        let db = test_db().await;
+        let (provider, _) = find_or_create_provider(&db, "openai", "https://api.test.com/v1", Some("sk-x"))
+            .await.unwrap();
+        let id = add_model(&db, &provider, "gpt-4o", None, Some(2.5), Some(10.0)).await.unwrap();
+        let models = list_models_by_provider(&db, &provider).await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["input_price"], 2.5);
+        assert_eq!(models[0]["output_price"], 10.0);
+
+        // 三态更新:输入价改为 3.0,输出价清除定价
+        update_model(&db, id, "openai", "https://api.test.com/v1", None, "gpt-4o", None, Some(Some(3.0)), Some(None))
+            .await.unwrap();
+        let models = list_models_by_provider(&db, &provider).await.unwrap();
+        assert_eq!(models[0]["input_price"], 3.0);
+        assert_eq!(models[0]["output_price"], serde_json::Value::Null);
     }
 
     // ---- list_providers 分页 ----
@@ -1971,9 +2030,9 @@ mod tests {
         let db = test_db().await;
         let (p, _) = find_or_create_provider(&db, "openai", "https://api.test.com/v1", Some("sk-x"))
             .await.unwrap();
-        let _ = add_model(&db, &p, "model-a", None).await.unwrap();
-        let _ = add_model(&db, &p, "model-b", None).await.unwrap();
-        let _ = add_model(&db, &p, "model-c", None).await.unwrap();
+        let _ = add_model(&db, &p, "model-a", None, None, None).await.unwrap();
+        let _ = add_model(&db, &p, "model-b", None, None, None).await.unwrap();
+        let _ = add_model(&db, &p, "model-c", None, None, None).await.unwrap();
         let (data, _) = list_providers(&db, None, None).await.unwrap();
         assert_eq!(data.len(), 1);
         assert_eq!(data[0]["model_count"], 3);

@@ -82,6 +82,8 @@ CREATE TABLE IF NOT EXISTS models (
   provider       TEXT NOT NULL,             -- providers.name
   upstream_model TEXT NOT NULL,             -- 供应商上的真实模型名
   label          TEXT,                       -- 可选备注
+  input_price    REAL,                       -- 输入单价 $/1M tokens(NULL=未定价,回退内置默认价表)
+  output_price   REAL,                       -- 输出单价 $/1M tokens(NULL=未定价)
   created_at     TEXT NOT NULL,
   UNIQUE (provider, upstream_model)         -- 同一供应商下模型名唯一,防止重复添加
 );

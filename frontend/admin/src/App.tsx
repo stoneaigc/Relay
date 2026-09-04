@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
-import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch } from "lucide-react";
-import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload } from "./api";
+import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign } from "lucide-react";
+import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -637,10 +637,11 @@ function HealthBadge({ h, name }: { h?: ProviderHealthItem; name?: string }) {
 function ModelsPanel() {
   const [providers, setProviders] = useState<ProviderRow[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  const [providerModels, setProviderModels] = useState<Record<string, { id: number; upstream_model: string; label: string | null }[]>>({});
+  const [providerModels, setProviderModels] = useState<Record<string, ProviderModelRow[]>>({});
   const [addDlg, setAddDlg] = useState(false);
   const [editProvider, setEditProvider] = useState<ProviderRow | null>(null);
   const [editModel, setEditModel] = useState<ModelRow | null>(null);
+  const [priceTarget, setPriceTarget] = useState<{ p: ProviderRow; m: ProviderModelRow } | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [test, setTest] = useState<Record<number, "loading" | { ok: boolean; msg: string }>>({});
   const [page, setPage] = useState(1);
@@ -821,6 +822,11 @@ function ModelsPanel() {
                         <Boxes className="h-3.5 w-3.5 text-muted-foreground" />
                         <span className="text-sm">{m.label || m.upstream_model}</span>
                         {m.label && <span className="text-xs text-muted-foreground">{m.upstream_model}</span>}
+                        {m.input_price != null && m.output_price != null ? (
+                          <span className="font-mono text-xs text-muted-foreground" title="每 1M tokens 输入/输出单价">${m.input_price.toFixed(2)} / ${m.output_price.toFixed(2)}</span>
+                        ) : (
+                          <span className="text-xs text-muted-foreground/60" title="未手动定价时按内置默认价表计费">未定价</span>
+                        )}
                       </div>
                       <div className="flex items-center gap-2">
                         {(() => {
@@ -830,7 +836,8 @@ function ModelsPanel() {
                           return null;
                         })()}
                         <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => runTest(m.id)}><Activity className="h-3 w-3" /></Button>
-                        <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => setEditModel({ id: m.id, label: m.label, kind: p.kind, base_url: p.base_url, upstream_model: m.upstream_model, provider: p.name })}><Pencil className="h-3 w-3" /></Button>
+                        <Button variant="ghost" size="sm" className="h-7 px-2" title="价格" onClick={() => setPriceTarget({ p, m })}><DollarSign className="h-3 w-3" /></Button>
+                        <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => setEditModel({ id: m.id, label: m.label, kind: p.kind, base_url: p.base_url, upstream_model: m.upstream_model, provider: p.name, input_price: m.input_price, output_price: m.output_price })}><Pencil className="h-3 w-3" /></Button>
                         <Button variant="ghost" size="sm" className="h-7 px-2 text-destructive" onClick={() => delModel(p.name, m)}><Trash2 className="h-3 w-3" /></Button>
                       </div>
                     </div>
@@ -851,6 +858,7 @@ function ModelsPanel() {
       <AddProviderDialog open={addDlg} onClose={() => setAddDlg(false)} onSaved={loadProviders} />
       {editProvider && <EditProviderDialog provider={editProvider} onClose={() => setEditProvider(null)} onSaved={() => { setEditProvider(null); loadProviders(); }} />}
       {editModel && <EditModelDialog model={editModel} onClose={() => setEditModel(null)} onSaved={() => { setEditModel(null); loadProviders(); }} />}
+      {priceTarget && <PricingDialog provider={priceTarget.p} model={priceTarget.m} onClose={() => setPriceTarget(null)} onSaved={() => { setPriceTarget(null); if (expanded.has(priceTarget.p.name)) refreshProviderModels(priceTarget.p.name); }} />}
       <ConfirmDialog confirm={confirm} onClose={() => setConfirm(null)} />
     </div>
   );
@@ -1059,6 +1067,72 @@ function EditModelDialog({ model, onClose, onSaved }: { model: ModelRow; onClose
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>取消</Button>
           <Button onClick={submit}>保存</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---- 模型定价对话框 ----
+function PricingDialog({ provider, model, onClose, onSaved }: { provider: ProviderRow; model: ProviderModelRow; onClose: () => void; onSaved: () => void }) {
+  const [inputPrice, setInputPrice] = useState(model.input_price != null ? String(model.input_price) : "");
+  const [outputPrice, setOutputPrice] = useState(model.output_price != null ? String(model.output_price) : "");
+  const [err, setErr] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  // 空串=清除定价(null);其余解析为数字,非法返回 "invalid"
+  const parsePrice = (s: string): number | null | "invalid" => {
+    const t = s.trim();
+    if (!t) return null;
+    const v = Number(t);
+    return isFinite(v) && v >= 0 ? v : "invalid";
+  };
+
+  const submit = async () => {
+    const i = parsePrice(inputPrice);
+    const o = parsePrice(outputPrice);
+    if (i === "invalid" || o === "invalid") { setErr("单价必须是 ≥ 0 的数字"); return; }
+    setErr(""); setSubmitting(true);
+    try {
+      await api.updateModel(model.id, {
+        kind: provider.kind, base_url: provider.base_url,
+        upstream_model: model.upstream_model, label: model.label ?? undefined,
+        input_price: i, output_price: o,
+      });
+      onSaved();
+    } catch (e: any) { setErr(e.message); setSubmitting(false); }
+  };
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>模型定价</DialogTitle>
+          <DialogDescription>为「{model.upstream_model}」设置单价，按每 1M tokens 计费</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="mb-1 block text-xs text-muted-foreground">输入单价 ($/1M tokens)</label>
+              <div className="relative">
+                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">$</span>
+                <Input className="pl-6" type="number" min="0" step="0.01" placeholder="未定价" value={inputPrice} onChange={(e) => setInputPrice(e.target.value)} />
+              </div>
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-muted-foreground">输出单价 ($/1M tokens)</label>
+              <div className="relative">
+                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">$</span>
+                <Input className="pl-6" type="number" min="0" step="0.01" placeholder="未定价" value={outputPrice} onChange={(e) => setOutputPrice(e.target.value)} />
+              </div>
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">留空表示清除定价；未手动定价的模型按内置默认价表计费（仅对已知模型生效）。</p>
+          {err && <p className="text-sm text-destructive">{err}</p>}
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>取消</Button>
+          <Button onClick={submit} disabled={submitting}>{submitting ? "保存中..." : "保存"}</Button>
         </div>
       </DialogContent>
     </Dialog>
