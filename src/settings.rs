@@ -202,3 +202,43 @@ pub fn apply_cache_settings(cfg: &mut Config, kv: &HashMap<String, String>) {
     }
     cfg.cache_semantic = cs;
 }
+
+/// settings 表里 L2 embedding 供应商相关 key 的前缀。
+pub const EMB_PREFIX: &str = "embedding.";
+pub const K_EMB_ENABLED: &str = "embedding.enabled";
+pub const K_EMB_BASE_URL: &str = "embedding.base_url";
+pub const K_EMB_API_KEY_ENC: &str = "embedding.api_key_enc";
+pub const K_EMB_MODEL: &str = "embedding.model";
+
+/// 把 DB 里的 embedding.* 覆盖到内存 Config.embedding(DB 优先于配置文件)。
+/// api_key 以 email.password_enc 同款 AES-256-GCM 加密存放,解密失败按未配置处理。
+pub fn apply_embedding_settings(cfg: &mut Config, kv: &HashMap<String, String>, secret: &str) {
+    let mut ec = cfg.embedding.clone();
+
+    if let Some(v) = kv.get(K_EMB_ENABLED) {
+        if let Ok(b) = v.parse::<bool>() {
+            ec.enabled = b;
+        }
+    }
+    if let Some(v) = kv.get(K_EMB_BASE_URL) {
+        ec.base_url = v.trim_end_matches('/').to_string();
+    }
+    if let Some(v) = kv.get(K_EMB_MODEL) {
+        ec.model = v.clone();
+    }
+    if let Some(v) = kv.get(K_EMB_API_KEY_ENC) {
+        match decrypt(secret, v) {
+            Ok(k) => ec.api_key = k,
+            Err(e) => {
+                tracing::warn!("解密 embedding.api_key_enc 失败,按未配置处理: {e}");
+                ec.api_key = String::new();
+            }
+        }
+    }
+    cfg.embedding = ec;
+}
+
+/// 供管理后台 GET 时判断「是否已设置 api_key」。
+pub fn has_embedding_key(kv: &HashMap<String, String>) -> bool {
+    kv.get(K_EMB_API_KEY_ENC).map(|s| !s.is_empty()).unwrap_or(false)
+}

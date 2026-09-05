@@ -256,6 +256,15 @@ export const api = {
   saveCacheSettings: (body: CacheSettingsBody) =>
     req("/admin/api/settings/cache", { method: "POST", body: JSON.stringify(body) }),
 
+  // ---- L2 语义缓存 embedding 供应商 ----
+  embeddingSettings: (): Promise<EmbeddingSettingsResp> => req("/admin/api/settings/embedding"),
+  saveEmbeddingSettings: (body: EmbeddingSettingsBody) =>
+    req("/admin/api/settings/embedding", { method: "POST", body: JSON.stringify(body) }),
+  testEmbedding: (
+    body: EmbeddingSettingsBody & { test_text?: string },
+  ): Promise<{ ok: boolean; dim?: number; error?: string }> =>
+    req("/admin/api/settings/embedding/test", { method: "POST", body: JSON.stringify(body) }),
+
   // ---- 上游治理(熔断器 + 并发槽仪表盘) ----
   listUpstreams: (): Promise<UpstreamsResp> => req("/admin/api/upstreams"),
   resetAllBreakers: (): Promise<{ ok: true; cleared: number }> => req("/admin/api/upstreams/reset", { method: "POST" }),
@@ -410,6 +419,24 @@ export interface CacheSettingsResp {
 }
 
 export interface CacheSettingsBody extends CacheSettingsResp {}
+
+export interface EmbeddingSettingsResp {
+  enabled: boolean;
+  /** OpenAI 兼容接口基础地址,如 https://api.openai.com/v1 */
+  base_url: string;
+  /** embedding 模型名,如 text-embedding-3-small */
+  model: string;
+  /** 是否已配置 api_key(不回显明文) */
+  has_key: boolean;
+}
+
+export interface EmbeddingSettingsBody {
+  enabled: boolean;
+  base_url: string;
+  model: string;
+  /** api_key;留空/不传 = 保持已存值 */
+  api_key?: string | null;
+}
 
 // ============================================================
 // 上游治理仪表盘

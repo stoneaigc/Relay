@@ -1556,14 +1556,180 @@ pub async fn cache_hits(
     Ok(Json(json!({ "hits": hits })))
 }
 
-/// POST /admin/cache/clear -- 清空缓存与统计。
+/// POST /admin/cache/clear -- 清空缓存与统计(含 L2 向量表)。
 pub async fn cache_clear(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
     state.semantic_cache.clear();
+    // L2 语义向量与缓存条目同生命周期,一并清理。
+    if let Err(e) = crate::storage::clear_cache_vectors(&state.db).await {
+        tracing::warn!("清理 L2 向量失败(不影响缓存清空): {e}");
+    }
     Ok(Json(json!({ "ok": true })))
+}
+
+// ---- 系统配置:embedding(L2 语义缓存供应商) ----
+
+/// GET /admin/settings/embedding -- 回显 embedding 配置(api_key 不回显,仅返回 has_key)。
+pub async fn get_embedding_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let kv = storage::load_settings(&state.db, crate::settings::EMB_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let cfg = state.config();
+    let ec = &cfg.embedding;
+    // DB 有则取 DB,否则取配置文件值(回显当前生效配置)。
+    let enabled = kv
+        .get(crate::settings::K_EMB_ENABLED)
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(ec.enabled);
+    let base_url = kv
+        .get(crate::settings::K_EMB_BASE_URL)
+        .cloned()
+        .unwrap_or_else(|| ec.base_url.clone());
+    let model = kv
+        .get(crate::settings::K_EMB_MODEL)
+        .cloned()
+        .unwrap_or_else(|| ec.model.clone());
+    let has_key = crate::settings::has_embedding_key(&kv) || !ec.api_key.is_empty();
+    Ok(Json(json!({
+        "enabled": enabled,
+        "base_url": base_url,
+        "model": model,
+        "has_key": has_key,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct EmbeddingSettingsBody {
+    /// L2 语义层总开关。
+    pub enabled: bool,
+    /// OpenAI 兼容接口基础地址,如 https://api.openai.com/v1。
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model: String,
+    /// api_key;留空=保持不变。
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+/// 校验 embedding 配置:开启时 base_url 与 model 必填,base_url 需为 http(s)。
+fn validate_embedding(b: &EmbeddingSettingsBody) -> Result<(), ApiError> {
+    if b.enabled {
+        if b.base_url.trim().is_empty() {
+            return Err(ApiError::BadRequest("开启语义缓存需填写 base_url".into()));
+        }
+        if b.model.trim().is_empty() {
+            return Err(ApiError::BadRequest("开启语义缓存需填写 embedding 模型名".into()));
+        }
+    }
+    if !b.base_url.trim().is_empty()
+        && !b.base_url.trim().starts_with("http://")
+        && !b.base_url.trim().starts_with("https://")
+    {
+        return Err(ApiError::BadRequest("base_url 需以 http:// 或 https:// 开头".into()));
+    }
+    Ok(())
+}
+
+/// POST /admin/settings/embedding -- 保存 embedding 配置(api_key 加密入库),刷新内存 Config。
+pub async fn save_embedding_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<EmbeddingSettingsBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    validate_embedding(&body)?;
+
+    let secret = state.config().auth.jwt_secret.clone();
+    let mut items: Vec<(String, String)> = vec![
+        (crate::settings::K_EMB_ENABLED.to_string(), body.enabled.to_string()),
+        (
+            crate::settings::K_EMB_BASE_URL.to_string(),
+            body.base_url.trim().trim_end_matches('/').to_string(),
+        ),
+        (crate::settings::K_EMB_MODEL.to_string(), body.model.trim().to_string()),
+    ];
+    // api_key 非空才写(加密);留空=保持原值。
+    if let Some(k) = body.api_key.as_deref().filter(|s| !s.is_empty()) {
+        let enc = crate::settings::encrypt(&secret, k)
+            .map_err(|e| ApiError::Internal(format!("加密失败: {e}")))?;
+        items.push((crate::settings::K_EMB_API_KEY_ENC.to_string(), enc));
+    }
+
+    storage::set_settings(&state.db, &items)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // 重建内存 Config:从 DB 重读 embedding.* 覆盖当前快照,store() 刷新。
+    let kv = storage::load_settings(&state.db, crate::settings::EMB_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut new_cfg = (**state.config()).clone();
+    crate::settings::apply_embedding_settings(&mut new_cfg, &kv, &secret);
+    state.config.store(Arc::new(new_cfg));
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct TestEmbeddingBody {
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model: String,
+    /// api_key;留空时若库里有则用库里的(支持「不改 key 只测当前配置」)。
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// 测试文本;默认用一句中文验证中文向量化。
+    #[serde(default)]
+    pub test_text: Option<String>,
+}
+
+/// POST /admin/settings/embedding/test -- 用表单配置调一次 embeddings 接口,不落库。
+pub async fn test_embedding(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TestEmbeddingBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if body.base_url.trim().is_empty() {
+        return Err(ApiError::BadRequest("base_url 不能为空".into()));
+    }
+    if body.model.trim().is_empty() {
+        return Err(ApiError::BadRequest("model 不能为空".into()));
+    }
+
+    // api_key 留空时回退库里已存的(解密),便于「不改 key 只测连通」。
+    let api_key = match body.api_key.as_deref().filter(|s| !s.is_empty()) {
+        Some(k) => k.to_string(),
+        None => {
+            let kv = storage::load_settings(&state.db, crate::settings::EMB_PREFIX)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            let secret = state.config().auth.jwt_secret.clone();
+            kv.get(crate::settings::K_EMB_API_KEY_ENC)
+                .and_then(|enc| crate::settings::decrypt(&secret, enc).ok())
+                .unwrap_or_default()
+        }
+    };
+
+    let text = body
+        .test_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("这是一条语义缓存连通性测试文本");
+    let base_url = body.base_url.trim().trim_end_matches('/');
+    match crate::embedding::embed(&state.http, base_url, &api_key, body.model.trim(), text).await {
+        Ok(vec) => Ok(Json(json!({ "ok": true, "dim": vec.len() }))),
+        Err(e) => Ok(Json(json!({ "ok": false, "error": e.to_string() }))),
+    }
 }
 
 // ---- 系统配置:邮箱 ----

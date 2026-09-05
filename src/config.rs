@@ -21,6 +21,9 @@ pub struct Config {
     /// 语义缓存(响应缓存):L1 精确哈希 + TTL,L2 embedding 预留。
     #[serde(default)]
     pub cache_semantic: CacheSemanticConfig,
+    /// L2 embedding 供应商(OpenAI 兼容 /embeddings);未配置时语义缓存自动只跑 L1。
+    #[serde(default)]
+    pub embedding: EmbeddingConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
 }
@@ -104,6 +107,41 @@ fn default_cs_enabled() -> bool { true }
 fn default_cs_ttl() -> u64 { 3600 }
 fn default_cs_threshold() -> f64 { 0.8 }
 fn default_cs_multi_turn() -> usize { 3 }
+
+/// L2 embedding 供应商配置(OpenAI 兼容接口通吃):POST {base_url}/embeddings。
+#[derive(Debug, Clone, Deserialize)]
+pub struct EmbeddingConfig {
+    /// L2 开关:关闭或 base_url 为空时语义缓存只跑 L1 精确哈希。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 供应商基础地址(如 https://api.openai.com/v1),不带尾斜杠。
+    #[serde(default)]
+    pub base_url: String,
+    /// Bearer 密钥(本地供应商可为空)。
+    #[serde(default)]
+    pub api_key: String,
+    /// embedding 模型名(如 text-embedding-3-small)。
+    #[serde(default)]
+    pub model: String,
+}
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+        }
+    }
+}
+
+impl EmbeddingConfig {
+    /// 是否已具备调用条件(开关开启且 base_url/model 齐备)。
+    pub fn usable(&self) -> bool {
+        self.enabled && !self.base_url.is_empty() && !self.model.is_empty()
+    }
+}
 
 impl Default for CacheSemanticConfig {
     fn default() -> Self {

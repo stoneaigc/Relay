@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
-import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
-import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database } from "lucide-react";
-import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheHitRow } from "./api";
+import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
+import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles } from "lucide-react";
+import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheHitRow, EmbeddingSettingsResp } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -2196,16 +2196,22 @@ function fmtTsShort(ts: number) {
 }
 
 function CachePanel() {
+  const navigate = useNavigate();
   const [stats, setStats] = useState<CacheStatsResp | null>(null);
   const [hits, setHits] = useState<CacheHitRow[]>([]);
+  const [emb, setEmb] = useState<EmbeddingSettingsResp | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   const load = async () => {
     setRefreshing(true);
     try {
-      const [s, h] = await Promise.all([api.cacheStats(), api.cacheHits(50)]);
-      setStats(s); setHits(h.hits);
+      const [s, h, e] = await Promise.all([
+        api.cacheStats(),
+        api.cacheHits(50),
+        api.embeddingSettings().catch(() => null),
+      ]);
+      setStats(s); setHits(h.hits); setEmb(e);
     } catch { /* 静默,下轮自动重试 */ } finally { setRefreshing(false); }
   };
   useEffect(() => { load(); }, []);
@@ -2278,6 +2284,27 @@ function CachePanel() {
         </Card>
       </div>
 
+      {emb && (!emb.enabled || !emb.has_key) && (
+        <div className="flex flex-col gap-3 rounded-xl border border-indigo-500/20 bg-gradient-to-r from-indigo-500/10 via-indigo-500/5 to-transparent px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-indigo-500/15 text-indigo-600">
+              <Sparkles className="h-4 w-4" />
+            </div>
+            <div>
+              <p className="text-sm font-medium">升级为语义级缓存命中</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                当前仅相同请求可精确命中。配置一个 OpenAI 兼容的 embedding 供应商后,意思相近的请求也能免费回放。
+              </p>
+            </div>
+          </div>
+          <Button size="sm" variant="outline"
+            className="shrink-0 border-indigo-500/40 text-indigo-600 hover:bg-indigo-500/10 hover:text-indigo-600"
+            onClick={() => navigate("/settings")}>
+            配置 embedding 供应商<ExternalLink className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
+
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
@@ -2302,7 +2329,7 @@ function CachePanel() {
             <p className="text-sm text-muted-foreground">暂无命中记录 — 缓存命中后会出现在这里(每 10 秒自动刷新)。</p>
           ) : (
             <Table>
-              <TableHeader><TableRow><TableHead>时间</TableHead><TableHead>命中类型</TableHead><TableHead>模型</TableHead><TableHead>供应商</TableHead><TableHead className="text-right">节省 tokens</TableHead></TableRow></TableHeader>
+              <TableHeader><TableRow><TableHead>时间</TableHead><TableHead>命中类型</TableHead><TableHead>相似度</TableHead><TableHead>模型</TableHead><TableHead>供应商</TableHead><TableHead className="text-right">节省 tokens</TableHead></TableRow></TableHeader>
               <TableBody>
                 {hits.map((h, i) => (
                   <TableRow key={i}>
@@ -2311,9 +2338,14 @@ function CachePanel() {
                       {h.hit_type === "exact" ? (
                         <Badge variant="success" className="text-[10px]">精确</Badge>
                       ) : (
-                        <Badge className="bg-indigo-500/10 text-indigo-600 ring-1 ring-indigo-500/20 text-[10px]">
-                          语义{h.similarity != null ? ` · ${(h.similarity * 100).toFixed(0)}%` : ""}
-                        </Badge>
+                        <Badge className="bg-indigo-500/10 text-indigo-600 ring-1 ring-indigo-500/20 text-[10px]">语义</Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="mono text-xs">
+                      {h.hit_type === "semantic" && h.similarity != null ? (
+                        <span className="text-indigo-600">{(h.similarity * 100).toFixed(1)}%</span>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
                       )}
                     </TableCell>
                     <TableCell className="mono">{h.model}</TableCell>
@@ -2365,6 +2397,16 @@ function SettingsPanel() {
   const [cacheSaving, setCacheSaving] = useState(false);
   const [cacheNote, setCacheNote] = useState("");
   const [cacheErr, setCacheErr] = useState("");
+  // L2 语义向量(embedding 供应商)
+  const [embEnabled, setEmbEnabled] = useState(false);
+  const [embBaseUrl, setEmbBaseUrl] = useState("");
+  const [embModel, setEmbModel] = useState("");
+  const [embKey, setEmbKey] = useState("");
+  const [embHasKey, setEmbHasKey] = useState(false);
+  const [embSaving, setEmbSaving] = useState(false);
+  const [embNote, setEmbNote] = useState("");
+  const [embErr, setEmbErr] = useState("");
+  const [embTesting, setEmbTesting] = useState<null | "loading" | { ok: boolean; msg: string }>(null);
 
   const load = async () => {
     setLoading(true);
@@ -2385,6 +2427,12 @@ function SettingsPanel() {
       .then((r) => {
         setCacheEnabled(r.enabled); setCacheTtl(r.ttl_secs);
         setCacheThreshold(r.similarity_threshold); setCacheMultiTurn(r.multi_turn_max);
+      })
+      .catch(() => { /* 回退默认值 */ });
+    api.embeddingSettings()
+      .then((r) => {
+        setEmbEnabled(r.enabled); setEmbBaseUrl(r.base_url); setEmbModel(r.model);
+        setEmbHasKey(r.has_key); setEmbKey("");
       })
       .catch(() => { /* 回退默认值 */ });
   }, []);
@@ -2449,6 +2497,37 @@ function SettingsPanel() {
     } catch (e: any) {
       setCacheErr(e.message);
     } finally { setCacheSaving(false); }
+  };
+
+  const saveEmbedding = async () => {
+    setEmbErr(""); setEmbNote("");
+    if (embEnabled) {
+      if (!embBaseUrl.trim()) { setEmbErr("开启语义向量需填写 API 基础地址"); return; }
+      if (!embModel.trim()) { setEmbErr("开启语义向量需填写模型名"); return; }
+    }
+    setEmbSaving(true);
+    try {
+      const body: any = { enabled: embEnabled, base_url: embBaseUrl.trim(), model: embModel.trim() };
+      if (embKey) body.api_key = embKey;
+      await api.saveEmbeddingSettings(body);
+      setEmbHasKey(!!embKey || embHasKey);
+      setEmbKey("");
+      setEmbNote(embEnabled ? "已保存,即时生效。" : "已保存:语义向量已关闭,仅精确哈希命中。");
+    } catch (e: any) {
+      setEmbErr(e.message);
+    } finally { setEmbSaving(false); }
+  };
+
+  const testEmbeddingConn = async () => {
+    setEmbErr(""); setEmbNote(""); setEmbTesting("loading");
+    try {
+      const body: any = { enabled: embEnabled, base_url: embBaseUrl.trim(), model: embModel.trim() };
+      if (embKey) body.api_key = embKey;
+      const r = await api.testEmbedding(body);
+      setEmbTesting(r.ok ? { ok: true, msg: `连通成功,向量维度 ${r.dim}。` } : { ok: false, msg: r.error || "失败" });
+    } catch (e: any) {
+      setEmbTesting({ ok: false, msg: e.message });
+    }
   };
 
   return (
@@ -2566,7 +2645,7 @@ function SettingsPanel() {
                 onChange={(e) => setCacheThreshold(Number(e.target.value))}
                 disabled={!cacheEnabled} aria-label="语义相似度阈值"
                 className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary disabled:cursor-not-allowed disabled:opacity-50" />
-              <p className="mt-1 text-[11px] text-muted-foreground">值越高要求越严格(需更接近原文才命中);批 D 接入语义向量后对语义命中生效,当前精确命中不受影响。</p>
+              <p className="mt-1 text-[11px] text-muted-foreground">值越高要求越严格(需更接近原文才命中);对语义命中生效(需在下方配置 embedding 供应商),精确命中不受影响。</p>
             </div>
             <div>
               <label className="mb-1 block text-xs text-muted-foreground">缓存有效期 TTL(秒)</label>
@@ -2589,6 +2668,55 @@ function SettingsPanel() {
             <Button onClick={saveCache} disabled={cacheSaving}>{cacheSaving ? "保存中…" : "保存配置"}</Button>
             {cacheNote && <span className="text-xs text-success">{cacheNote}</span>}
             {cacheErr && <span className="text-xs text-destructive">{cacheErr}</span>}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-base">语义向量(embedding)</CardTitle>
+            <Badge variant={embEnabled && embHasKey ? "success" : "muted"}>
+              {embEnabled ? (embHasKey ? "✓ 已启用" : "⚠ 缺少 API Key") : "未启用"}
+            </Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-xs text-muted-foreground">
+            配置 OpenAI 兼容的 /embeddings 接口后,语义缓存从「精确哈希命中」升级为「语义相似命中」:意思相近的请求(相似度达到上方阈值)也免费回放。请求文本会发送至该供应商做向量化(仅用于本地相似度计算);任何失败都会自动降级为精确命中,不影响转发。
+          </p>
+          <div className="flex items-center justify-between gap-4 rounded-xl border bg-muted/30 px-4 py-3">
+            <div className="space-y-0.5">
+              <p className="text-sm font-medium">启用语义向量</p>
+              <p className="text-xs text-muted-foreground">关闭后语义缓存仅做精确哈希命中。</p>
+            </div>
+            <Switch checked={embEnabled} onCheckedChange={setEmbEnabled} aria-label="切换语义向量" />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div><label className="mb-1 block text-xs text-muted-foreground">API 基础地址 base_url</label>
+              <Input placeholder="如 https://api.openai.com/v1" disabled={!embEnabled} className={embEnabled ? "" : "opacity-50"}
+                value={embBaseUrl} onChange={(e) => setEmbBaseUrl(e.target.value)} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">Embedding 模型</label>
+              <Input placeholder="如 text-embedding-3-small" disabled={!embEnabled} className={embEnabled ? "" : "opacity-50"}
+                value={embModel} onChange={(e) => setEmbModel(e.target.value)} /></div>
+            <div className="sm:col-span-2"><label className="mb-1 block text-xs text-muted-foreground">API Key{embHasKey ? "(已设置,留空保持不变)" : ""}</label>
+              <Input type="password" placeholder={embHasKey ? "留空保持不变" : "sk-..."} disabled={!embEnabled}
+                className={embEnabled ? "" : "opacity-50"}
+                value={embKey} onChange={(e) => setEmbKey(e.target.value)} /></div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+            <Button onClick={saveEmbedding} disabled={embSaving}>{embSaving ? "保存中…" : "保存配置"}</Button>
+            <Button variant="outline" onClick={testEmbeddingConn}
+              disabled={embTesting === "loading" || !embBaseUrl.trim() || !embModel.trim()}>
+              <Zap className="h-4 w-4" />{embTesting === "loading" ? "测试中…" : "测试连接"}
+            </Button>
+            {embTesting && embTesting !== "loading" && (
+              <span className={cn("text-xs", embTesting.ok ? "text-success" : "text-destructive")} title={embTesting.msg}>
+                {embTesting.ok ? "✓ " : "✗ "}{embTesting.msg}
+              </span>
+            )}
+            {embNote && <span className="text-xs text-success">{embNote}</span>}
+            {embErr && <span className="text-xs text-destructive">{embErr}</span>}
           </div>
         </CardContent>
       </Card>

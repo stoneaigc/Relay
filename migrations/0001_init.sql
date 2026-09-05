@@ -162,3 +162,13 @@ CREATE TABLE IF NOT EXISTS time_rules (
   created_at  TEXT NOT NULL
 );
 
+-- 语义缓存 L2:请求文本的 embedding 向量(按 model+provider 隔离,暴力余弦扫描)。
+CREATE TABLE IF NOT EXISTS cache_vectors (
+  cache_key  TEXT PRIMARY KEY,              -- 对应内存缓存的 key(L2 命中后回查 L1 取响应体)
+  model      TEXT NOT NULL,                 -- 公开模型名(隔离维度)
+  provider   TEXT NOT NULL,                 -- 供应商名(隔离维度)
+  embedding  TEXT NOT NULL,                 -- f32 向量 base64(little-endian 字节)
+  created_at INTEGER NOT NULL               -- unix 秒(用于按龄清理)
+);
+CREATE INDEX IF NOT EXISTS idx_cache_vectors_scope ON cache_vectors(model, provider);
+

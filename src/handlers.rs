@@ -235,6 +235,13 @@ pub async fn run_chat(
         cs.enabled && crate::semantic_cache::eligible(&req, cs.multi_turn_max)
     };
     let mut cache_missed = false;
+    // L2 语义查找只做一次(首个未命中 candidate);输入文本循环外抽取一次复用。
+    let mut l2_tried = false;
+    let cache_embed_text = if cache_ok {
+        crate::embedding::embed_text(&req)
+    } else {
+        None
+    };
     let mut attempts: Vec<RequestAttempt> = Vec::new();
     let run_start = std::time::Instant::now();
     let run_path: &'static str = "chat";
@@ -255,6 +262,11 @@ pub async fn run_chat(
         } else {
             None
         };
+        let embed_meta = cache_key.as_ref().map(|_| CacheEmbedMeta {
+            model: model.clone(),
+            provider: provider_name.clone(),
+            embed_text: cache_embed_text.clone(),
+        });
         if let Some(key) = cache_key.as_ref() {
             if let Some(entry) = state.semantic_cache.get(key) {
                 state.semantic_cache.record_hit(crate::semantic_cache::HitRecord {
@@ -283,6 +295,42 @@ pub async fn run_chat(
                 };
                 trace.emit_success(&state, 0, 0, 0).await;
                 return Ok(crate::semantic_cache::replay_response(entry, provider_name, &request_id));
+            }
+            // L2 语义查找:相似度达阈值即免费回放(embedding 失败自动降级 miss)。
+            if !l2_tried {
+                l2_tried = true;
+                if let Some(text) = cache_embed_text.as_ref() {
+                    if let Some((entry, sim)) =
+                        semantic_lookup(&state, &model, provider_name, text).await
+                    {
+                        state.semantic_cache.record_hit(crate::semantic_cache::HitRecord {
+                            ts: crate::semantic_cache::now_secs(),
+                            hit_type: "semantic".into(),
+                            similarity: Some(sim),
+                            model: model.clone(),
+                            provider: provider_name.clone(),
+                            tokens_saved: (entry.input_tokens + entry.output_tokens) as u64,
+                        });
+                        state
+                            .record_metrics_request(None, crate::state::METRIC_STATUS_OK, req_start.elapsed())
+                            .await;
+                        let trace = RunTrace {
+                            request_id: request_id.clone(),
+                            user_id: user_id_str.clone(),
+                            path: run_path,
+                            requested_model: model.clone(),
+                            stream,
+                            candidates: cand_init.clone(),
+                            attempts: Vec::new(),
+                            final_kind: Some("cache".into()),
+                            final_upstream_model: Some(upstream_model.clone()),
+                            final_status: 200,
+                            latency_ms: run_start.elapsed().as_millis() as u32,
+                        };
+                        trace.emit_success(&state, 0, 0, 0).await;
+                        return Ok(crate::semantic_cache::replay_response(entry, provider_name, &request_id));
+                    }
+                }
             }
             if !cache_missed {
                 cache_missed = true;
@@ -345,7 +393,7 @@ pub async fn run_chat(
                             final_status,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(cache_wrap(state.clone(), stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream));
+                        return Ok(cache_wrap(state.clone(), stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -375,7 +423,7 @@ pub async fn run_chat(
                             final_status,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return non_stream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, kind, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream));
+                        return non_stream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, kind, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
@@ -453,7 +501,7 @@ pub async fn run_chat(
                             final_status,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(cache_wrap(state.clone(), anthropic_stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream));
+                        return Ok(cache_wrap(state.clone(), anthropic_stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -483,7 +531,7 @@ pub async fn run_chat(
                             final_status,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return anthropic_nonstream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream));
+                        return anthropic_nonstream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
@@ -797,6 +845,13 @@ pub async fn run_messages(
         cs.enabled && crate::semantic_cache::eligible(&req, cs.multi_turn_max)
     };
     let mut cache_missed = false;
+    // L2 语义查找只做一次(首个未命中 candidate);输入文本循环外抽取一次复用。
+    let mut l2_tried = false;
+    let cache_embed_text = if cache_ok {
+        crate::embedding::embed_text(&req)
+    } else {
+        None
+    };
     let mut attempts: Vec<RequestAttempt> = Vec::new();
     let run_start = std::time::Instant::now();
     let run_path: &'static str = "messages";
@@ -817,6 +872,11 @@ pub async fn run_messages(
         } else {
             None
         };
+        let embed_meta = cache_key.as_ref().map(|_| CacheEmbedMeta {
+            model: model.clone(),
+            provider: provider_name.clone(),
+            embed_text: cache_embed_text.clone(),
+        });
         if let Some(key) = cache_key.as_ref() {
             if let Some(entry) = state.semantic_cache.get(key) {
                 state.semantic_cache.record_hit(crate::semantic_cache::HitRecord {
@@ -845,6 +905,42 @@ pub async fn run_messages(
                 };
                 trace.emit_success(&state, 0, 0, 0).await;
                 return Ok(crate::semantic_cache::replay_response(entry, provider_name, &request_id));
+            }
+            // L2 语义查找:相似度达阈值即免费回放(embedding 失败自动降级 miss)。
+            if !l2_tried {
+                l2_tried = true;
+                if let Some(text) = cache_embed_text.as_ref() {
+                    if let Some((entry, sim)) =
+                        semantic_lookup(&state, &model, provider_name, text).await
+                    {
+                        state.semantic_cache.record_hit(crate::semantic_cache::HitRecord {
+                            ts: crate::semantic_cache::now_secs(),
+                            hit_type: "semantic".into(),
+                            similarity: Some(sim),
+                            model: model.clone(),
+                            provider: provider_name.clone(),
+                            tokens_saved: (entry.input_tokens + entry.output_tokens) as u64,
+                        });
+                        state
+                            .record_metrics_request(None, crate::state::METRIC_STATUS_OK, req_start.elapsed())
+                            .await;
+                        let trace = RunTrace {
+                            request_id: request_id.clone(),
+                            user_id: user_id_str.clone(),
+                            path: run_path,
+                            requested_model: model.clone(),
+                            stream,
+                            candidates: cand_init.clone(),
+                            attempts: Vec::new(),
+                            final_kind: Some("cache".into()),
+                            final_upstream_model: Some(upstream_model.clone()),
+                            final_status: 200,
+                            latency_ms: run_start.elapsed().as_millis() as u32,
+                        };
+                        trace.emit_success(&state, 0, 0, 0).await;
+                        return Ok(crate::semantic_cache::replay_response(entry, provider_name, &request_id));
+                    }
+                }
             }
             if !cache_missed {
                 cache_missed = true;
@@ -900,7 +996,7 @@ pub async fn run_messages(
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
                             final_status, latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(cache_wrap(state.clone(), anthropic_passthrough_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream));
+                        return Ok(cache_wrap(state.clone(), anthropic_passthrough_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -924,7 +1020,7 @@ pub async fn run_messages(
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
                             final_status, latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return anthropic_passthrough_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream));
+                        return anthropic_passthrough_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
@@ -994,7 +1090,7 @@ pub async fn run_messages(
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
                             final_status, latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(cache_wrap(state.clone(), messages_openai_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), kind, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream));
+                        return Ok(cache_wrap(state.clone(), messages_openai_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), kind, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -1018,7 +1114,7 @@ pub async fn run_messages(
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
                             final_status, latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return messages_openai_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, kind, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream));
+                        return messages_openai_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, kind, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
@@ -1304,18 +1400,62 @@ where
         .unwrap()
 }
 
+/// cache_wrap 写回元数据:model/provider 为向量隔离维度,embed_text 用于 L2 向量生成。
+#[derive(Clone)]
+struct CacheEmbedMeta {
+    model: String,
+    provider: String,
+    embed_text: Option<String>,
+}
+
+/// L2 语义查找:L1 未命中时 embed 请求文本,与 cache_vectors 暴力余弦,
+/// 相似度达阈值取最优者回查 L1 拿响应体。任何失败返回 None(静默降级为 miss),
+/// embedding 供应商未配置时直接 None —— 语义缓存自动只跑 L1。
+async fn semantic_lookup(
+    state: &Arc<AppState>,
+    model: &str,
+    provider: &str,
+    req_text: &str,
+) -> Option<(crate::semantic_cache::Entry, f64)> {
+    let ec = state.config.load().embedding.clone();
+    if !ec.usable() {
+        return None;
+    }
+    let query = crate::embedding::embed(&state.http, &ec.base_url, &ec.api_key, &ec.model, req_text)
+        .await
+        .ok()?;
+    let rows = crate::storage::load_scope_vectors(&state.db, model, provider)
+        .await
+        .ok()?;
+    let thr = state.config.load().cache_semantic.similarity_threshold;
+    let mut best: Option<(String, f64)> = None;
+    for (key, vec) in rows {
+        let sim = crate::embedding::cosine(&query, &vec) as f64;
+        if sim >= thr && best.as_ref().map_or(true, |(_, bs)| sim > *bs) {
+            best = Some((key, sim));
+        }
+    }
+    let (key, sim) = best?;
+    // 回查 L1:对应条目已被 TTL/容量淘汰则视为 miss(向量随龄清理,短暂不一致可接受)。
+    let entry = state.semantic_cache.get(&key)?;
+    Some((entry, sim))
+}
+
 /// 语义缓存写回包装:透传原响应,同时旁路累积响应体;
 /// 流完整结束(客户端未中断)才提取 usage 并写入缓存;命中回放走 replay_response。
+/// 写回后若 embedding 已配置且带 embed_text,则顺路生成向量入库(L2)。
 fn cache_wrap(
     state: Arc<AppState>,
     resp: Response,
     cache_key: Option<String>,
     is_stream: bool,
+    meta: Option<CacheEmbedMeta>,
 ) -> Response {
     let Some(key) = cache_key else {
         return resp;
     };
-    let ttl = state.config.load().cache_semantic.ttl_secs;
+    let cfg_snap = (**state.config.load()).clone();
+    let ttl = cfg_snap.cache_semantic.ttl_secs;
     let (parts, body) = resp.into_parts();
     let content_type = parts
         .headers
@@ -1345,13 +1485,35 @@ fn cache_wrap(
             let (input_tokens, output_tokens) =
                 crate::semantic_cache::extract_usage(&body_bytes, is_stream);
             let now = crate::semantic_cache::now_secs();
-            state.semantic_cache.store(key, crate::semantic_cache::Entry {
+            state.semantic_cache.store(key.clone(), crate::semantic_cache::Entry {
                 content_type,
                 body: body_bytes,
                 input_tokens,
                 output_tokens,
                 expires_at: now + ttl,
             });
+            // L2 向量写回:embedding 配置就绪才生成;任何失败静默跳过(纯旁路增强)。
+            if let Some(m) = meta {
+                if let Some(text) = m.embed_text {
+                    if cfg_snap.embedding.usable() {
+                        if let Ok(vec) = crate::embedding::embed(
+                            &state.http,
+                            &cfg_snap.embedding.base_url,
+                            &cfg_snap.embedding.api_key,
+                            &cfg_snap.embedding.model,
+                            &text,
+                        )
+                        .await
+                        {
+                            let emb = crate::embedding::encode_vec_b64(&vec);
+                            let _ = crate::storage::save_cache_vector(
+                                &state.db, &key, &m.model, &m.provider, &emb, now, ttl,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
         }
     };
     let mut resp = Response::from_parts(parts, Body::from_stream(s));

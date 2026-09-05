@@ -3,6 +3,7 @@ mod auth;
 mod cache;
 pub mod config;
 mod email;
+mod embedding;
 mod error;
 mod handlers;
 mod jwt;
@@ -113,6 +114,16 @@ async fn main() -> anyhow::Result<()> {
         if !kv.is_empty() {
             settings::apply_cache_settings(&mut cfg, &kv);
             tracing::info!("loaded {} cache settings from DB", kv.len());
+        }
+    }
+    {
+        let kv = storage::load_settings(&db, settings::EMB_PREFIX)
+            .await
+            .map_err(|e| anyhow::anyhow!("load settings: {e}"))?;
+        if !kv.is_empty() {
+            let secret = cfg.auth.jwt_secret.clone();
+            settings::apply_embedding_settings(&mut cfg, &kv, &secret);
+            tracing::info!("loaded {} embedding settings from DB", kv.len());
         }
     }
 
@@ -240,6 +251,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/cache/stats", get(admin::cache_stats))
         .route("/cache/hits", get(admin::cache_hits))
         .route("/cache/clear", post(admin::cache_clear))
+        .route("/settings/embedding", get(admin::get_embedding_settings).post(admin::save_embedding_settings))
+        .route("/settings/embedding/test", post(admin::test_embedding))
         // ---- 上游治理仪表盘 ----
         .route("/upstreams", get(admin::list_upstreams))
         .route("/upstreams/reset", post(admin::reset_all_breakers))

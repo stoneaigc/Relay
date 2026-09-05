@@ -1883,6 +1883,74 @@ pub async fn set_settings(pool: &Db, items: &[(String, String)]) -> anyhow::Resu
     Ok(())
 }
 
+// ---- 语义缓存 L2 向量(cache_vectors 表)----
+
+/// upsert 一条缓存向量;顺带按龄清理陈旧行(TTL 的 2 倍,给 L2 命中后回查 L1 留缓冲)。
+pub async fn save_cache_vector(
+    pool: &Db,
+    cache_key: &str,
+    model: &str,
+    provider: &str,
+    embedding_b64: &str,
+    now: u64,
+    ttl_secs: u64,
+) -> anyhow::Result<()> {
+    q!(
+        "INSERT INTO cache_vectors (cache_key, model, provider, embedding, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(cache_key) DO UPDATE SET
+           model = excluded.model, provider = excluded.provider,
+           embedding = excluded.embedding, created_at = excluded.created_at",
+    )
+    .bind(cache_key)
+    .bind(model)
+    .bind(provider)
+    .bind(embedding_b64)
+    .bind(now as i64)
+    .execute(pool)
+    .await?;
+    let stale_before = now.saturating_sub(ttl_secs.saturating_mul(2)) as i64;
+    let _ = q!("DELETE FROM cache_vectors WHERE created_at < ?")
+        .bind(stale_before)
+        .execute(pool)
+        .await;
+    Ok(())
+}
+
+/// 拉取同 model+provider 范围内的全部向量(暴力余弦扫描用)。
+/// 返回 (cache_key, 向量);脏数据(base64 非法)直接跳过。
+pub async fn load_scope_vectors(
+    pool: &Db,
+    model: &str,
+    provider: &str,
+) -> anyhow::Result<Vec<(String, Vec<f32>)>> {
+    let rows = q!(
+        "SELECT cache_key, embedding FROM cache_vectors
+         WHERE model = ? AND provider = ?
+         ORDER BY created_at DESC LIMIT ?"
+    )
+    .bind(model)
+    .bind(provider)
+    .bind(crate::embedding::SCAN_LIMIT)
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let key: String = r.get("cache_key");
+        let emb: String = r.get("embedding");
+        if let Some(v) = crate::embedding::decode_vec_b64(&emb) {
+            out.push((key, v));
+        }
+    }
+    Ok(out)
+}
+
+/// 清空全部缓存向量(随「清空语义缓存」联动)。
+pub async fn clear_cache_vectors(pool: &Db) -> anyhow::Result<()> {
+    q!("DELETE FROM cache_vectors").execute(pool).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1901,6 +1969,50 @@ mod tests {
     }
 
     // ---- find_or_create_provider ----
+
+    // ---- cache_vectors(L2 向量)----
+
+    #[tokio::test]
+    async fn cache_vectors_save_scope_clear() {
+        let db = test_db().await;
+        let v1 = vec![1.0f32, 0.0, 0.0];
+        let v2 = vec![0.0f32, 1.0, 0.0];
+        save_cache_vector(&db, "k1", "m", "prov", &crate::embedding::encode_vec_b64(&v1), 1000, 3600)
+            .await
+            .unwrap();
+        save_cache_vector(&db, "k2", "m", "prov", &crate::embedding::encode_vec_b64(&v2), 1001, 3600)
+            .await
+            .unwrap();
+        // 按 model+provider 隔离
+        assert!(load_scope_vectors(&db, "m", "other").await.unwrap().is_empty());
+        let rows = load_scope_vectors(&db, "m", "prov").await.unwrap();
+        assert_eq!(rows.len(), 2);
+        // 暴力余弦:v1 与 k1 完全匹配
+        let best = rows
+            .iter()
+            .map(|(k, v)| (k.as_str(), crate::embedding::cosine(&v1, v)))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap();
+        assert_eq!(best.0, "k1");
+        assert!((best.1 - 1.0).abs() < 1e-6);
+        // upsert 覆盖同 key
+        save_cache_vector(&db, "k1", "m", "prov", &crate::embedding::encode_vec_b64(&v2), 1002, 3600)
+            .await
+            .unwrap();
+        let rows = load_scope_vectors(&db, "m", "prov").await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.iter().find(|(k, _)| k == "k1").unwrap().1, v2);
+        // 按龄清理:2×TTL 之外的行被清掉(1000/1002 < 9000-7200)
+        save_cache_vector(&db, "k3", "m", "prov", &crate::embedding::encode_vec_b64(&v1), 9000, 3600)
+            .await
+            .unwrap();
+        let rows = load_scope_vectors(&db, "m", "prov").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "k3");
+        // 清空
+        clear_cache_vectors(&db).await.unwrap();
+        assert!(load_scope_vectors(&db, "m", "prov").await.unwrap().is_empty());
+    }
 
     #[tokio::test]
     async fn find_or_create_provider_creates_new() {
