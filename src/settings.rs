@@ -167,3 +167,38 @@ pub fn apply_fallback_settings(cfg: &mut Config, kv: &HashMap<String, String>) {
     }
     cfg.defaults = defaults;
 }
+
+/// settings 表里语义缓存相关 key 的前缀。
+pub const CACHE_PREFIX: &str = "cache.";
+pub const K_CACHE_ENABLED: &str = "cache.enabled";
+pub const K_CACHE_TTL: &str = "cache.ttl_secs";
+pub const K_CACHE_THRESHOLD: &str = "cache.similarity_threshold";
+pub const K_CACHE_MULTI_TURN: &str = "cache.multi_turn_max";
+
+/// 把 DB 里的 cache.* 覆盖到内存 Config.cache_semantic(DB 优先于配置文件)。
+/// 解析失败时静默保持原值,与 fallback.* 行为一致。
+pub fn apply_cache_settings(cfg: &mut Config, kv: &HashMap<String, String>) {
+    let mut cs = cfg.cache_semantic.clone();
+
+    if let Some(v) = kv.get(K_CACHE_ENABLED) {
+        if let Ok(b) = v.parse::<bool>() {
+            cs.enabled = b;
+        }
+    }
+    if let Some(v) = kv.get(K_CACHE_TTL) {
+        if let Ok(n) = v.parse::<u64>() {
+            cs.ttl_secs = n;
+        }
+    }
+    if let Some(v) = kv.get(K_CACHE_THRESHOLD) {
+        if let Ok(f) = v.parse::<f64>() {
+            cs.similarity_threshold = f;
+        }
+    }
+    if let Some(v) = kv.get(K_CACHE_MULTI_TURN) {
+        if let Ok(n) = v.parse::<usize>() {
+            cs.multi_turn_max = n;
+        }
+    }
+    cfg.cache_semantic = cs;
+}

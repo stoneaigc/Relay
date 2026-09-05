@@ -18,6 +18,9 @@ pub struct Config {
     pub email: EmailConfig,
     #[serde(default)]
     pub cache: CacheConfig,
+    /// 语义缓存(响应缓存):L1 精确哈希 + TTL,L2 embedding 预留。
+    #[serde(default)]
+    pub cache_semantic: CacheSemanticConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
 }
@@ -76,6 +79,39 @@ impl Default for CacheConfig {
             port: None,
             password: String::new(),
             db: None,
+        }
+    }
+}
+
+/// 语义缓存(响应缓存)配置:进程内 DashMap + TTL;L2 embedding 预留。
+#[derive(Debug, Clone, Deserialize)]
+pub struct CacheSemanticConfig {
+    /// 总开关。
+    #[serde(default = "default_cs_enabled")]
+    pub enabled: bool,
+    /// 缓存条目 TTL(秒)。
+    #[serde(default = "default_cs_ttl")]
+    pub ttl_secs: u64,
+    /// 语义相似度阈值(L2 命中使用;L1 精确哈希不使用,先行落位以便热切换)。
+    #[serde(default = "default_cs_threshold")]
+    pub similarity_threshold: f64,
+    /// 超过该消息条数的多轮对话跳过缓存。
+    #[serde(default = "default_cs_multi_turn")]
+    pub multi_turn_max: usize,
+}
+
+fn default_cs_enabled() -> bool { true }
+fn default_cs_ttl() -> u64 { 3600 }
+fn default_cs_threshold() -> f64 { 0.8 }
+fn default_cs_multi_turn() -> usize { 3 }
+
+impl Default for CacheSemanticConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_cs_enabled(),
+            ttl_secs: default_cs_ttl(),
+            similarity_threshold: default_cs_threshold(),
+            multi_turn_max: default_cs_multi_turn(),
         }
     }
 }

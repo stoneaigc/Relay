@@ -247,6 +247,15 @@ export const api = {
   saveFallbackSettings: (body: FallbackSettingsBody) =>
     req("/admin/api/settings/fallback", { method: "POST", body: JSON.stringify(body) }),
 
+  // ---- 语义缓存 ----
+  cacheStats: (): Promise<CacheStatsResp> => req("/admin/api/cache/stats"),
+  cacheHits: (limit?: number): Promise<{ hits: CacheHitRow[] }> =>
+    req(`/admin/api/cache/hits${typeof limit === "number" ? `?limit=${limit}` : ""}`),
+  clearCache: (): Promise<{ ok: boolean }> => req("/admin/api/cache/clear", { method: "POST" }),
+  cacheSettings: (): Promise<CacheSettingsResp> => req("/admin/api/settings/cache"),
+  saveCacheSettings: (body: CacheSettingsBody) =>
+    req("/admin/api/settings/cache", { method: "POST", body: JSON.stringify(body) }),
+
   // ---- 上游治理(熔断器 + 并发槽仪表盘) ----
   listUpstreams: (): Promise<UpstreamsResp> => req("/admin/api/upstreams"),
   resetAllBreakers: (): Promise<{ ok: true; cleared: number }> => req("/admin/api/upstreams/reset", { method: "POST" }),
@@ -359,6 +368,48 @@ export interface FallbackSettingsResp {
 }
 
 export interface FallbackSettingsBody extends FallbackSettingsResp {}
+
+// ============================================================
+// 语义缓存
+// ============================================================
+
+/** 5 分钟一桶的命中/未命中趋势(共 12 桶,oldest → newest) */
+export interface CacheTrendPoint { ts: number; hits: number; misses: number }
+
+export interface CacheStatsResp {
+  hits: number;
+  misses: number;
+  /** 命中率 0~1,3 位小数 */
+  hit_rate: number;
+  /** 累计节省的 tokens(输入+输出) */
+  tokens_saved: number;
+  /** 当前缓存条数 */
+  entries: number;
+  trend: CacheTrendPoint[];
+}
+
+export interface CacheHitRow {
+  ts: number;
+  /** exact = 精确哈希命中;semantic = 语义相似命中(批 D) */
+  hit_type: string;
+  /** 语义命中时的相似度(0~1),精确命中为 null */
+  similarity: number | null;
+  model: string;
+  provider: string;
+  tokens_saved: number;
+}
+
+export interface CacheSettingsResp {
+  enabled: boolean;
+  /** 缓存有效期(秒) */
+  ttl_secs: number;
+  /** 语义相似度阈值 0.5~0.95 */
+  similarity_threshold: number;
+  /** 消息条数超过该值的多轮对话跳过缓存 */
+  multi_turn_max: number;
+}
+
+export interface CacheSettingsBody extends CacheSettingsResp {}
 
 // ============================================================
 // 上游治理仪表盘

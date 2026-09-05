@@ -11,6 +11,7 @@ mod pricing;
 mod providers;
 mod reqlog;
 pub mod routing;
+mod semantic_cache;
 mod settings;
 mod state;
 mod storage;
@@ -105,6 +106,15 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("loaded {} fallback settings from DB", kv.len());
         }
     }
+    {
+        let kv = storage::load_settings(&db, settings::CACHE_PREFIX)
+            .await
+            .map_err(|e| anyhow::anyhow!("load settings: {e}"))?;
+        if !kv.is_empty() {
+            settings::apply_cache_settings(&mut cfg, &kv);
+            tracing::info!("loaded {} cache settings from DB", kv.len());
+        }
+    }
 
     // 冷启动:全量加载用户与 Key 到内存。
     let keys = DashMap::new();
@@ -144,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         usage_tx,
         cache,
+        semantic_cache: crate::semantic_cache::SemanticCache::new(),
         upstream_slots: DashMap::new(),
         upstream_breakers: DashMap::new(),
         round_robin: DashMap::new(),
@@ -224,6 +235,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/settings/email", get(admin::get_email_settings).post(admin::save_email_settings))
         .route("/settings/email/test", post(admin::test_email_settings))
         .route("/settings/fallback", get(admin::get_fallback_settings).post(admin::save_fallback_settings))
+        // ---- 语义缓存 ----
+        .route("/settings/cache", get(admin::get_cache_settings).post(admin::save_cache_settings))
+        .route("/cache/stats", get(admin::cache_stats))
+        .route("/cache/hits", get(admin::cache_hits))
+        .route("/cache/clear", post(admin::cache_clear))
         // ---- 上游治理仪表盘 ----
         .route("/upstreams", get(admin::list_upstreams))
         .route("/upstreams/reset", post(admin::reset_all_breakers))
@@ -305,6 +321,7 @@ async fn background_task(
             _ = tick.tick() => {
                 flush_dirty(&state).await;
                 calibrate_budgets(&state).await;
+                state.semantic_cache.sweep();
             }
         }
     }

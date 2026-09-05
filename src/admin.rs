@@ -1438,6 +1438,134 @@ pub async fn save_fallback_settings(
     Ok(Json(json!({ "ok": true })))
 }
 
+// ---- 系统配置:语义缓存 ----
+
+/// GET /admin/settings/cache -- 回显语义缓存配置(DB 优先,否则配置文件值)。
+pub async fn get_cache_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let kv = storage::load_settings(&state.db, crate::settings::CACHE_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let cfg = state.config();
+    let cs = &cfg.cache_semantic;
+    let enabled = kv
+        .get(crate::settings::K_CACHE_ENABLED)
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(cs.enabled);
+    let ttl_secs = kv
+        .get(crate::settings::K_CACHE_TTL)
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(cs.ttl_secs);
+    let similarity_threshold = kv
+        .get(crate::settings::K_CACHE_THRESHOLD)
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(cs.similarity_threshold);
+    let multi_turn_max = kv
+        .get(crate::settings::K_CACHE_MULTI_TURN)
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(cs.multi_turn_max);
+    Ok(Json(json!({
+        "enabled": enabled,
+        "ttl_secs": ttl_secs,
+        "similarity_threshold": similarity_threshold,
+        "multi_turn_max": multi_turn_max,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct CacheSettingsBody {
+    /// 缓存总开关:关闭后不命中也不写入。
+    pub enabled: bool,
+    /// 条目 TTL(秒)。
+    pub ttl_secs: u64,
+    /// 语义相似度阈值(L2 embedding 预留,L1 仅存储与展示)。
+    pub similarity_threshold: f64,
+    /// 消息条数超过该值的多轮对话跳过缓存。
+    pub multi_turn_max: usize,
+}
+
+/// 校验缓存配置合理范围。
+fn validate_cache(b: &CacheSettingsBody) -> Result<(), ApiError> {
+    if b.ttl_secs == 0 || b.ttl_secs > 604_800 {
+        return Err(ApiError::BadRequest("TTL 需在 1~604800 秒(7 天)之间".into()));
+    }
+    if !(0.5..=0.95).contains(&b.similarity_threshold) {
+        return Err(ApiError::BadRequest("相似度阈值需在 0.5~0.95 之间".into()));
+    }
+    if b.multi_turn_max == 0 || b.multi_turn_max > 100 {
+        return Err(ApiError::BadRequest("多轮阈值需在 1~100 之间".into()));
+    }
+    Ok(())
+}
+
+/// POST /admin/settings/cache -- 保存语义缓存配置,刷新内存 Config。
+pub async fn save_cache_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<CacheSettingsBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    validate_cache(&body)?;
+
+    let items: Vec<(String, String)> = vec![
+        (crate::settings::K_CACHE_ENABLED.to_string(), body.enabled.to_string()),
+        (crate::settings::K_CACHE_TTL.to_string(), body.ttl_secs.to_string()),
+        (crate::settings::K_CACHE_THRESHOLD.to_string(), body.similarity_threshold.to_string()),
+        (crate::settings::K_CACHE_MULTI_TURN.to_string(), body.multi_turn_max.to_string()),
+    ];
+    storage::set_settings(&state.db, &items)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // 重建内存 Config:从 DB 重读 cache.* 覆盖当前快照,store() 刷新。
+    let kv = storage::load_settings(&state.db, crate::settings::CACHE_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut new_cfg = (**state.config()).clone();
+    crate::settings::apply_cache_settings(&mut new_cfg, &kv);
+    state.config.store(Arc::new(new_cfg));
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// GET /admin/cache/stats -- 缓存统计快照(命中率/节省 tokens/条数/趋势)。
+pub async fn cache_stats(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    Ok(Json(state.semantic_cache.stats_snapshot()))
+}
+
+#[derive(Deserialize)]
+pub struct CacheHitsQuery {
+    pub limit: Option<u32>,
+}
+
+/// GET /admin/cache/hits?limit=50 -- 最近命中记录(新→旧)。
+pub async fn cache_hits(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<CacheHitsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let limit = q.limit.unwrap_or(50).clamp(1, 200) as usize;
+    let hits = state.semantic_cache.recent_hits(limit);
+    Ok(Json(json!({ "hits": hits })))
+}
+
+/// POST /admin/cache/clear -- 清空缓存与统计。
+pub async fn cache_clear(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    state.semantic_cache.clear();
+    Ok(Json(json!({ "ok": true })))
+}
+
 // ---- 系统配置:邮箱 ----
 
 /// GET /admin/settings/email -- 回显邮箱配置(授权码不回显,仅返回 has_password)。

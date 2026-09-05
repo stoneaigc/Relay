@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
-import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign } from "lucide-react";
-import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload } from "./api";
+import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database } from "lucide-react";
+import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheHitRow } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -80,6 +80,7 @@ const NAV: { path: string; label: string; icon: any }[] = [
   { path: "/rewards", label: "奖励审核", icon: Gift },
   { path: "/reward-tasks", label: "奖励设置", icon: Star },
   { path: "/usage", label: "全局用量", icon: BarChart3 },
+  { path: "/cache", label: "缓存", icon: Database },
   { path: "/settings", label: "设置", icon: Settings },
 ];
 
@@ -156,6 +157,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
                 <Route path="/rewards" element={<RewardsPanel />} />
                 <Route path="/reward-tasks" element={<RewardTasksPanel />} />
                 <Route path="/usage" element={<UsagePanel />} />
+                <Route path="/cache" element={<CachePanel />} />
                 <Route path="/settings" element={<SettingsPanel />} />
               </Routes>
             </div>
@@ -2183,6 +2185,153 @@ function UsagePanel() {
   );
 }
 
+// ============================================================
+// 语义缓存(命中率趋势 / 节省 tokens / 最近命中)
+// ============================================================
+
+function fmtTsShort(ts: number) {
+  return new Date(ts * 1000).toLocaleString("zh-CN", {
+    month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+  });
+}
+
+function CachePanel() {
+  const [stats, setStats] = useState<CacheStatsResp | null>(null);
+  const [hits, setHits] = useState<CacheHitRow[]>([]);
+  const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const load = async () => {
+    setRefreshing(true);
+    try {
+      const [s, h] = await Promise.all([api.cacheStats(), api.cacheHits(50)]);
+      setStats(s); setHits(h.hits);
+    } catch { /* 静默,下轮自动重试 */ } finally { setRefreshing(false); }
+  };
+  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    const t = setInterval(load, 10000);
+    return () => clearInterval(t);
+  }, []);
+
+  const total = (stats?.hits ?? 0) + (stats?.misses ?? 0);
+  const ratePct = total > 0 ? Math.round((stats?.hit_rate ?? 0) * 1000) / 10 : 0;
+  const trend = stats?.trend ?? [];
+  const maxBucket = Math.max(...trend.map((b) => b.hits + b.misses), 1);
+
+  return (
+    <div className="space-y-5">
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <TrendingUp className="h-3.5 w-3.5" />缓存命中率
+            </div>
+            <div className="mono mt-1 text-2xl font-bold tracking-tight tabular-nums">
+              {stats ? `${ratePct}%` : "…"}
+            </div>
+            <div className="mt-0.5 text-xs text-muted-foreground">
+              命中 {fmtInt(stats?.hits ?? 0)} / 总请求 {fmtInt(total)}
+            </div>
+            <div className="mt-2 flex h-9 items-end gap-1">
+              {trend.map((b, i) => (
+                <div key={i} className="flex h-full flex-1 flex-col justify-end gap-px"
+                  title={`${fmtTsShort(b.ts)}  命中 ${b.hits} / 未命中 ${b.misses}`}>
+                  {b.misses > 0 && <div className="w-full rounded-sm bg-muted" style={{ height: `${((b.misses / maxBucket) * 100).toFixed(1)}%` }} />}
+                  {b.hits > 0 && <div className="w-full rounded-sm bg-gradient-to-t from-emerald-500 to-teal-400" style={{ height: `${((b.hits / maxBucket) * 100).toFixed(1)}%` }} />}
+                </div>
+              ))}
+            </div>
+            <div className="mt-1 text-[10px] text-muted-foreground">近 1 小时 · 每 5 分钟一桶(灰=未命中,绿=命中)</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Zap className="h-3.5 w-3.5" />累计节省 tokens
+            </div>
+            <div className="mono mt-1 text-2xl font-bold tracking-tight text-emerald-600 tabular-nums">
+              {stats ? fmtInt(stats.tokens_saved) : "…"}
+            </div>
+            <div className="mt-0.5 text-xs text-muted-foreground">命中即免费回放,不再计费</div>
+            <div className="mt-2 space-y-1 text-xs text-muted-foreground">
+              <div className="flex justify-between"><span>命中</span><span className="mono text-success">+{fmtInt(stats?.hits ?? 0)}</span></div>
+              <div className="flex justify-between"><span>未命中(已回源)</span><span className="mono">{fmtInt(stats?.misses ?? 0)}</span></div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="pt-5">
+            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Database className="h-3.5 w-3.5" />当前缓存条数
+            </div>
+            <div className="mono mt-1 text-2xl font-bold tracking-tight tabular-nums">
+              {stats ? fmtInt(stats.entries) : "…"}
+            </div>
+            <div className="mt-0.5 text-xs text-muted-foreground">按 模型 + 供应商 隔离</div>
+            <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+              <div className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-[width] duration-300"
+                style={{ width: `${Math.min(100, ((stats?.entries ?? 0) / 2048) * 100).toFixed(1)}%` }} />
+            </div>
+            <div className="mt-1 text-[10px] text-muted-foreground">容量上限 2048 条,超限淘汰最旧</div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-base">最近命中({hits.length})</CardTitle>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={load} disabled={refreshing}>
+                <RefreshCw className={cn("h-4 w-4", refreshing && "animate-spin")} />刷新
+              </Button>
+              <Button variant="outline" size="sm" className="text-destructive hover:text-destructive"
+                onClick={() => setConfirm({
+                  title: "清空语义缓存?",
+                  desc: "所有已缓存响应将被删除,后续请求重新回源并计费。",
+                  action: async () => { await api.clearCache(); load(); },
+                })}>
+                <Trash2 className="h-4 w-4" />清空缓存
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {hits.length === 0 ? (
+            <p className="text-sm text-muted-foreground">暂无命中记录 — 缓存命中后会出现在这里(每 10 秒自动刷新)。</p>
+          ) : (
+            <Table>
+              <TableHeader><TableRow><TableHead>时间</TableHead><TableHead>命中类型</TableHead><TableHead>模型</TableHead><TableHead>供应商</TableHead><TableHead className="text-right">节省 tokens</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {hits.map((h, i) => (
+                  <TableRow key={i}>
+                    <TableCell className="mono text-xs text-muted-foreground">{fmtTsShort(h.ts)}</TableCell>
+                    <TableCell>
+                      {h.hit_type === "exact" ? (
+                        <Badge variant="success" className="text-[10px]">精确</Badge>
+                      ) : (
+                        <Badge className="bg-indigo-500/10 text-indigo-600 ring-1 ring-indigo-500/20 text-[10px]">
+                          语义{h.similarity != null ? ` · ${(h.similarity * 100).toFixed(0)}%` : ""}
+                        </Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="mono">{h.model}</TableCell>
+                    <TableCell>{h.provider}</TableCell>
+                    <TableCell className="mono text-right text-emerald-600">+{fmtInt(h.tokens_saved)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      <ConfirmDialog confirm={confirm} onClose={() => setConfirm(null)} />
+    </div>
+  );
+}
+
 const PORT_OPTIONS = [
   { port: 465, label: "465 (SSL / 隐式 TLS)" },
   { port: 587, label: "587 (STARTTLS)" },
@@ -2208,6 +2357,14 @@ function SettingsPanel() {
   const [fbSaving, setFbSaving] = useState(false);
   const [fbNote, setFbNote] = useState("");
   const [fbErr, setFbErr] = useState("");
+  // 语义缓存
+  const [cacheEnabled, setCacheEnabled] = useState(true);
+  const [cacheTtl, setCacheTtl] = useState(3600);
+  const [cacheThreshold, setCacheThreshold] = useState(0.8);
+  const [cacheMultiTurn, setCacheMultiTurn] = useState(3);
+  const [cacheSaving, setCacheSaving] = useState(false);
+  const [cacheNote, setCacheNote] = useState("");
+  const [cacheErr, setCacheErr] = useState("");
 
   const load = async () => {
     setLoading(true);
@@ -2223,6 +2380,12 @@ function SettingsPanel() {
   useEffect(() => {
     api.fallbackSettings()
       .then((r) => { setFbEnabled(r.fallback_enabled); setFbMaxRetries(r.max_retries); })
+      .catch(() => { /* 回退默认值 */ });
+    api.cacheSettings()
+      .then((r) => {
+        setCacheEnabled(r.enabled); setCacheTtl(r.ttl_secs);
+        setCacheThreshold(r.similarity_threshold); setCacheMultiTurn(r.multi_turn_max);
+      })
       .catch(() => { /* 回退默认值 */ });
   }, []);
 
@@ -2269,6 +2432,23 @@ function SettingsPanel() {
     } catch (e: any) {
       setFbErr(e.message);
     } finally { setFbSaving(false); }
+  };
+
+  const saveCache = async () => {
+    setCacheErr(""); setCacheNote("");
+    if (cacheTtl < 1 || cacheTtl > 604800) { setCacheErr("TTL 需在 1~604800 秒(7 天)之间"); return; }
+    setCacheSaving(true);
+    try {
+      await api.saveCacheSettings({
+        enabled: cacheEnabled,
+        ttl_secs: Math.floor(cacheTtl),
+        similarity_threshold: cacheThreshold,
+        multi_turn_max: cacheMultiTurn,
+      });
+      setCacheNote(cacheEnabled ? "已保存,即时生效。" : "已保存:缓存已关闭,所有请求直接回源。");
+    } catch (e: any) {
+      setCacheErr(e.message);
+    } finally { setCacheSaving(false); }
   };
 
   return (
@@ -2357,6 +2537,58 @@ function SettingsPanel() {
             <Button onClick={saveFallback} disabled={fbSaving}>{fbSaving ? "保存中…" : "保存配置"}</Button>
             {fbNote && <span className="text-xs text-success">{fbNote}</span>}
             {fbErr && <span className="text-xs text-destructive">{fbErr}</span>}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-base">语义缓存</CardTitle>
+            <Badge variant={cacheEnabled ? "success" : "muted"}>{cacheEnabled ? "缓存开启" : "已关闭"}</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-xs text-muted-foreground">
+            相同请求(按模型/供应商隔离)在 TTL 内直接回放缓存响应,命中免费不计费;响应头 X-Relay-Cache 标记 HIT/MISS。多轮对话消息数超过阈值后自动跳过缓存。
+          </p>
+          <div className="flex items-center justify-between gap-4 rounded-xl border bg-muted/30 px-4 py-3">
+            <div className="space-y-0.5">
+              <p className="text-sm font-medium">启用语义缓存</p>
+              <p className="text-xs text-muted-foreground">关闭后所有请求直接转发上游,不做缓存。</p>
+            </div>
+            <Switch checked={cacheEnabled} onCheckedChange={setCacheEnabled} aria-label="切换语义缓存" />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="sm:col-span-2">
+              <label className="mb-1 block text-xs text-muted-foreground">相似度阈值(0.5 ~ 0.95,当前 <span className="mono font-medium text-foreground">{cacheThreshold.toFixed(2)}</span>)</label>
+              <input type="range" min="0.5" max="0.95" step="0.01" value={cacheThreshold}
+                onChange={(e) => setCacheThreshold(Number(e.target.value))}
+                disabled={!cacheEnabled} aria-label="语义相似度阈值"
+                className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary disabled:cursor-not-allowed disabled:opacity-50" />
+              <p className="mt-1 text-[11px] text-muted-foreground">值越高要求越严格(需更接近原文才命中);批 D 接入语义向量后对语义命中生效,当前精确命中不受影响。</p>
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-muted-foreground">缓存有效期 TTL(秒)</label>
+              <Input type="number" min={1} max={604800} disabled={!cacheEnabled} className={cacheEnabled ? "" : "opacity-50"}
+                value={cacheTtl}
+                onChange={(e) => setCacheTtl(Math.max(1, Math.floor(Number(e.target.value) || 1)))} />
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                {cacheTtl >= 3600 && cacheTtl % 3600 === 0 ? `约 ${cacheTtl / 3600} 小时` : cacheTtl >= 60 ? `约 ${Math.round(cacheTtl / 60)} 分钟` : "最短 1 秒,最长 7 天"}
+              </p>
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-muted-foreground">多轮对话阈值(条)</label>
+              <Input type="number" min={1} max={100} disabled={!cacheEnabled} className={cacheEnabled ? "" : "opacity-50"}
+                value={cacheMultiTurn}
+                onChange={(e) => setCacheMultiTurn(Math.max(1, Math.floor(Number(e.target.value) || 1)))} />
+              <p className="mt-1 text-[11px] text-muted-foreground">消息条数超过该值的长对话跳过缓存,避免低质命中。</p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+            <Button onClick={saveCache} disabled={cacheSaving}>{cacheSaving ? "保存中…" : "保存配置"}</Button>
+            {cacheNote && <span className="text-xs text-success">{cacheNote}</span>}
+            {cacheErr && <span className="text-xs text-destructive">{cacheErr}</span>}
           </div>
         </CardContent>
       </Card>

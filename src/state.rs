@@ -432,6 +432,8 @@ pub struct AppState {
     pub usage_tx: mpsc::Sender<UsageEvent>,
     /// 带 TTL 的缓存(内存或 Redis):OAuth CSRF state、邮箱验证码。
     pub cache: crate::cache::Cache,
+    /// 语义缓存 L1(精确哈希 + TTL,进程内):响应缓存与命中统计。
+    pub semantic_cache: crate::semantic_cache::SemanticCache,
     /// ---------- 上游治理 ----------
     /// 每个上游连接的并发槽(排队信号量)。0 容量 = 不限(跳过获取)。
     pub upstream_slots: DashMap<UpstreamKey, Arc<Semaphore>>,
@@ -1467,6 +1469,7 @@ mod tests {
             db,
             usage_tx,
             cache: Cache::Memory(StdMutex::new(HashMap::new())),
+            semantic_cache: crate::semantic_cache::SemanticCache::new(),
             upstream_slots: DashMap::new(),
             upstream_breakers: DashMap::new(),
             round_robin: DashMap::new(),

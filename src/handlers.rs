@@ -229,6 +229,12 @@ pub async fn run_chat(
     let cand_init = init_candidates(&candidates);
     // failover 策略:fallback 关闭只试首个候选;max_retries 限制尝试候选数(0=不限)。
     let attempt_cap = state.config.load().defaults.attempt_cap(candidates.len());
+    // 语义缓存:开关关闭或消息条数超阈值时整体跳过(不记 miss)。
+    let cache_ok = {
+        let cs = state.config.load().cache_semantic.clone();
+        cs.enabled && crate::semantic_cache::eligible(&req, cs.multi_turn_max)
+    };
+    let mut cache_missed = false;
     let mut attempts: Vec<RequestAttempt> = Vec::new();
     let run_start = std::time::Instant::now();
     let run_path: &'static str = "chat";
@@ -240,6 +246,49 @@ pub async fn run_chat(
         let kind = r.kind;
         let (provider_name, base_url, api_key, upstream_model, multiplier) =
             (&r.provider, &r.base_url, r.api_key.as_deref(), &r.upstream_model, r.multiplier);
+
+        // ---- 语义缓存查找:先于熔断/并发检查,命中即免费回放 ----
+        let cache_key = if cache_ok {
+            Some(crate::semantic_cache::make_key(
+                run_path, &model, provider_name, upstream_model, stream, &req,
+            ))
+        } else {
+            None
+        };
+        if let Some(key) = cache_key.as_ref() {
+            if let Some(entry) = state.semantic_cache.get(key) {
+                state.semantic_cache.record_hit(crate::semantic_cache::HitRecord {
+                    ts: crate::semantic_cache::now_secs(),
+                    hit_type: "exact".into(),
+                    similarity: None,
+                    model: model.clone(),
+                    provider: provider_name.clone(),
+                    tokens_saved: (entry.input_tokens + entry.output_tokens) as u64,
+                });
+                state
+                    .record_metrics_request(None, crate::state::METRIC_STATUS_OK, req_start.elapsed())
+                    .await;
+                let trace = RunTrace {
+                    request_id: request_id.clone(),
+                    user_id: user_id_str.clone(),
+                    path: run_path,
+                    requested_model: model.clone(),
+                    stream,
+                    candidates: cand_init.clone(),
+                    attempts: Vec::new(),
+                    final_kind: Some("cache".into()),
+                    final_upstream_model: Some(upstream_model.clone()),
+                    final_status: 200,
+                    latency_ms: run_start.elapsed().as_millis() as u32,
+                };
+                trace.emit_success(&state, 0, 0, 0).await;
+                return Ok(crate::semantic_cache::replay_response(entry, provider_name, &request_id));
+            }
+            if !cache_missed {
+                cache_missed = true;
+                state.semantic_cache.record_miss();
+            }
+        }
 
         // ---- P2:熔断检查 ----
         let ukey = UpstreamKey::new(kind, base_url, api_key);
@@ -296,7 +345,7 @@ pub async fn run_chat(
                             final_status,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace));
+                        return Ok(cache_wrap(state.clone(), stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -326,7 +375,7 @@ pub async fn run_chat(
                             final_status,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return non_stream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, kind, base_url, api_key, trace).await;
+                        return non_stream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, kind, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream));
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
@@ -404,7 +453,7 @@ pub async fn run_chat(
                             final_status,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(anthropic_stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace));
+                        return Ok(cache_wrap(state.clone(), anthropic_stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -434,7 +483,7 @@ pub async fn run_chat(
                             final_status,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return anthropic_nonstream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, base_url, api_key, trace).await;
+                        return anthropic_nonstream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream));
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
@@ -742,6 +791,12 @@ pub async fn run_messages(
     let cand_init = init_candidates(&candidates);
     // failover 策略:fallback 关闭只试首个候选;max_retries 限制尝试候选数(0=不限)。
     let attempt_cap = state.config.load().defaults.attempt_cap(candidates.len());
+    // 语义缓存:开关关闭或消息条数超阈值时整体跳过(不记 miss)。
+    let cache_ok = {
+        let cs = state.config.load().cache_semantic.clone();
+        cs.enabled && crate::semantic_cache::eligible(&req, cs.multi_turn_max)
+    };
+    let mut cache_missed = false;
     let mut attempts: Vec<RequestAttempt> = Vec::new();
     let run_start = std::time::Instant::now();
     let run_path: &'static str = "messages";
@@ -753,6 +808,49 @@ pub async fn run_messages(
         let kind = r.kind;
         let (provider_name, base_url, api_key, upstream_model, multiplier) =
             (&r.provider, &r.base_url, r.api_key.as_deref(), &r.upstream_model, r.multiplier);
+
+        // ---- 语义缓存查找:先于熔断/并发检查,命中即免费回放 ----
+        let cache_key = if cache_ok {
+            Some(crate::semantic_cache::make_key(
+                run_path, &model, provider_name, upstream_model, stream, &req,
+            ))
+        } else {
+            None
+        };
+        if let Some(key) = cache_key.as_ref() {
+            if let Some(entry) = state.semantic_cache.get(key) {
+                state.semantic_cache.record_hit(crate::semantic_cache::HitRecord {
+                    ts: crate::semantic_cache::now_secs(),
+                    hit_type: "exact".into(),
+                    similarity: None,
+                    model: model.clone(),
+                    provider: provider_name.clone(),
+                    tokens_saved: (entry.input_tokens + entry.output_tokens) as u64,
+                });
+                state
+                    .record_metrics_request(None, crate::state::METRIC_STATUS_OK, req_start.elapsed())
+                    .await;
+                let trace = RunTrace {
+                    request_id: request_id.clone(),
+                    user_id: user_id_str.clone(),
+                    path: run_path,
+                    requested_model: model.clone(),
+                    stream,
+                    candidates: cand_init.clone(),
+                    attempts: Vec::new(),
+                    final_kind: Some("cache".into()),
+                    final_upstream_model: Some(upstream_model.clone()),
+                    final_status: 200,
+                    latency_ms: run_start.elapsed().as_millis() as u32,
+                };
+                trace.emit_success(&state, 0, 0, 0).await;
+                return Ok(crate::semantic_cache::replay_response(entry, provider_name, &request_id));
+            }
+            if !cache_missed {
+                cache_missed = true;
+                state.semantic_cache.record_miss();
+            }
+        }
 
         // ---- P2:熔断检查 ----
         let ukey = UpstreamKey::new(kind, base_url, api_key);
@@ -802,7 +900,7 @@ pub async fn run_messages(
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
                             final_status, latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(anthropic_passthrough_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace));
+                        return Ok(cache_wrap(state.clone(), anthropic_passthrough_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -826,7 +924,7 @@ pub async fn run_messages(
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
                             final_status, latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return anthropic_passthrough_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, base_url, api_key, trace).await;
+                        return anthropic_passthrough_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream));
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
@@ -896,7 +994,7 @@ pub async fn run_messages(
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
                             final_status, latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(messages_openai_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), kind, base_url.to_string(), api_key.map(|s| s.to_string()), trace));
+                        return Ok(cache_wrap(state.clone(), messages_openai_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), kind, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -920,7 +1018,7 @@ pub async fn run_messages(
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
                             final_status, latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return messages_openai_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, kind, base_url, api_key, trace).await;
+                        return messages_openai_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, kind, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream));
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
@@ -1204,6 +1302,63 @@ where
         .header("cache-control", "no-cache")
         .body(Body::from_stream(s))
         .unwrap()
+}
+
+/// 语义缓存写回包装:透传原响应,同时旁路累积响应体;
+/// 流完整结束(客户端未中断)才提取 usage 并写入缓存;命中回放走 replay_response。
+fn cache_wrap(
+    state: Arc<AppState>,
+    resp: Response,
+    cache_key: Option<String>,
+    is_stream: bool,
+) -> Response {
+    let Some(key) = cache_key else {
+        return resp;
+    };
+    let ttl = state.config.load().cache_semantic.ttl_secs;
+    let (parts, body) = resp.into_parts();
+    let content_type = parts
+        .headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or(if is_stream { "text/event-stream" } else { "application/json" })
+        .to_string();
+    let upstream = body.into_data_stream();
+    let s = async_stream::stream! {
+        let mut upstream = upstream;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut complete = true;
+        while let Some(chunk) = upstream.next().await {
+            match chunk {
+                Ok(b) => {
+                    buf.extend_from_slice(&b);
+                    yield Ok::<Bytes, axum::Error>(b);
+                }
+                Err(_) => {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+        if complete && !buf.is_empty() {
+            let body_bytes = Bytes::from(buf);
+            let (input_tokens, output_tokens) =
+                crate::semantic_cache::extract_usage(&body_bytes, is_stream);
+            let now = crate::semantic_cache::now_secs();
+            state.semantic_cache.store(key, crate::semantic_cache::Entry {
+                content_type,
+                body: body_bytes,
+                input_tokens,
+                output_tokens,
+                expires_at: now + ttl,
+            });
+        }
+    };
+    let mut resp = Response::from_parts(parts, Body::from_stream(s));
+    if let Ok(v) = axum::http::HeaderValue::from_str("MISS") {
+        resp.headers_mut().insert("x-relay-cache", v);
+    }
+    resp
 }
 
 /// 构造一个 OpenAI chat.completion.chunk 的 SSE 行。

@@ -66,6 +66,8 @@ pub fn cost_usd(input_tokens: u64, output_tokens: u64, input_price: f64, output_
 }
 
 /// 估算一次调用的成本;任一侧价格无法确定时返回 None(由调用方决定按 0 计或拒绝)。
+/// 预留:阶段二批E CostAware 策略与费用维度接线。
+#[allow(dead_code)]
 pub fn estimate_cost(
     model: &str,
     input_tokens: u64,
