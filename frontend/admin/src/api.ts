@@ -131,6 +131,36 @@ export interface RouteRow {
   label: string | null;
 }
 
+export interface ImportRoutePayload {
+  public_name: string;
+  kind: string;
+  base_url: string;
+  upstream_model: string;
+  weight?: number;
+  multiplier?: number;
+}
+
+export interface ImportGroupPayload {
+  name: string;
+  strategy?: string;
+  routes: ImportRoutePayload[];
+  time_rules?: TimeRulePayload[];
+}
+
+export interface ImportPreviewRow {
+  name: string;
+  action: "create" | "overwrite";
+  existing_routes: number;
+  routes: number;
+  time_rules: number;
+  missing_models: { public_name: string; kind: string; base_url: string; upstream_model: string }[];
+}
+
+export interface ImportPreviewResp {
+  data: ImportPreviewRow[];
+  summary: { groups: number; create: number; overwrite: number; routes: number; time_rules: number; skipped_routes: number };
+}
+
 export const api = {
   login: (username: string, password: string) =>
     req("/admin/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
@@ -210,6 +240,17 @@ export const api = {
   updateRoute: (id: number, body: { public_name: string; model_id: number; weight?: number; multiplier?: number }) =>
     req(`/admin/api/routes/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteRoute: (id: number) => req(`/admin/api/routes/${id}`, { method: "DELETE" }),
+  batchDeleteRoutes: (ids: number[]) =>
+    req("/admin/api/routes/batch-delete", { method: "POST", body: JSON.stringify({ ids }) }),
+  batchUpdateRoutes: (ids: number[], body: { weight?: number; multiplier?: number }) =>
+    req("/admin/api/routes/batch-update", { method: "POST", body: JSON.stringify({ ids, ...body }) }),
+
+  groupsExport: () => req("/admin/api/groups/export"),
+  groupExport: (id: number) => req(`/admin/api/groups/${id}/export`),
+  importPreview: (body: { groups: ImportGroupPayload[] }): Promise<ImportPreviewResp> =>
+    req("/admin/api/groups/import/preview", { method: "POST", body: JSON.stringify(body) }),
+  groupsImport: (body: { groups: ImportGroupPayload[] }): Promise<{ ok: boolean; imported: { id: number; name: string; action: string; routes: number; time_rules: number; skipped_routes: number }[] }> =>
+    req("/admin/api/groups/import", { method: "POST", body: JSON.stringify(body) }),
 
   usage: (page?: number, pageSize?: number): Promise<{ data: any[]; total: number; page: number; page_size: number; total_pages: number }> => {
     const qs = new URLSearchParams();

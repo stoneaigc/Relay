@@ -1381,6 +1381,264 @@ pub async fn delete_route(
     Ok(Json(json!({ "ok": true })))
 }
 
+#[derive(Deserialize)]
+pub struct BatchRoutesBody {
+    pub ids: Vec<i64>,
+    #[serde(default)]
+    pub weight: Option<i64>,
+    #[serde(default)]
+    pub multiplier: Option<f64>,
+}
+
+/// POST /admin/routes/batch-delete —— 批量删除组内路由。
+pub async fn batch_delete_routes(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<BatchRoutesBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    for id in &body.ids {
+        storage::delete_route(&state.db, *id)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true, "deleted": body.ids.len() })))
+}
+
+/// POST /admin/routes/batch-update —— 批量改权重/倍率(至少给一个字段)。
+pub async fn batch_update_routes(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<BatchRoutesBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if body.weight.is_none() && body.multiplier.is_none() {
+        return Err(ApiError::BadRequest("weight or multiplier required".into()));
+    }
+    for id in &body.ids {
+        storage::update_route_fields(&state.db, *id, body.weight, body.multiplier)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true, "updated": body.ids.len() })))
+}
+
+// ---- 模型组导入/导出 ----
+
+/// 组装单组导出 payload:组配置 + 路由(附 kind/base_url/upstream_model 三元组) + 时段规则,绝不含 api_key。
+async fn group_export_payload(state: &AppState, group: &Value) -> Result<Value, ApiError> {
+    let id = group.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+    let routes = storage::list_routes_export(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let rules = storage::list_time_rules(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(json!({
+        "name": group.get("name").cloned().unwrap_or(json!("")),
+        "strategy": group.get("strategy").cloned().unwrap_or(json!("weighted_random")),
+        "routes": routes,
+        "time_rules": rules.iter().map(|r| json!({
+            "name": r.get("name"), "weekdays": r.get("weekdays"),
+            "start_time": r.get("start_time"), "end_time": r.get("end_time"),
+            "multiplier": r.get("multiplier"), "weight_map": r.get("weight_map"),
+            "active": r.get("active"),
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+/// GET /admin/groups/export —— 全量导出所有模型组。
+pub async fn groups_export(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let groups = storage::list_groups(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut out = Vec::with_capacity(groups.len());
+    for g in &groups {
+        out.push(group_export_payload(&state, g).await?);
+    }
+    Ok(Json(json!({ "version": 1, "exported_at": storage::now_iso(), "groups": out })))
+}
+
+/// GET /admin/groups/:id/export —— 单组导出。
+pub async fn group_export(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let groups = storage::list_groups(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let g = groups
+        .iter()
+        .find(|g| g.get("id").and_then(|v| v.as_i64()) == Some(id))
+        .ok_or_else(|| ApiError::BadRequest(format!("group {id} not found")))?;
+    let payload = group_export_payload(&state, g).await?;
+    Ok(Json(json!({ "version": 1, "exported_at": storage::now_iso(), "groups": [payload] })))
+}
+
+#[derive(Deserialize)]
+pub struct ImportRoute {
+    pub public_name: String,
+    pub kind: String,
+    pub base_url: String,
+    pub upstream_model: String,
+    #[serde(default = "import_default_weight")]
+    pub weight: i64,
+    #[serde(default = "import_default_multiplier")]
+    pub multiplier: f64,
+}
+
+fn import_default_weight() -> i64 { 100 }
+fn import_default_multiplier() -> f64 { 1.0 }
+
+#[derive(Deserialize)]
+pub struct ImportGroupBody {
+    pub name: String,
+    #[serde(default)]
+    pub strategy: Option<String>,
+    #[serde(default)]
+    pub routes: Vec<ImportRoute>,
+    #[serde(default)]
+    pub time_rules: Vec<TimeRuleBody>,
+}
+
+#[derive(Deserialize)]
+pub struct ImportBody {
+    #[serde(default)]
+    pub groups: Vec<ImportGroupBody>,
+}
+
+struct ResolvedGroup {
+    name: String,
+    strategy: String,
+    routes: Vec<(String, i64, i64, f64)>,
+    rules: Vec<storage::TimeRuleInput>,
+    missing: Vec<Value>,
+    action: &'static str,
+    existing_routes: usize,
+}
+
+/// preview/import 共用:把 (kind, base_url, upstream_model) 解析为本库 model_id;
+/// 找不到模型的路由跳过并记入 missing(不阻断整组导入),空组名直接报错。
+async fn resolve_import(state: &AppState, body: &ImportBody) -> Result<Vec<ResolvedGroup>, ApiError> {
+    let mut out = Vec::new();
+    for g in &body.groups {
+        let name = g.name.trim().to_string();
+        if name.is_empty() {
+            return Err(ApiError::BadRequest("group name required".into()));
+        }
+        let strategy = crate::routing::strategy_from_str(
+            g.strategy.as_deref().unwrap_or("weighted_random"),
+        )
+        .as_str()
+        .to_string();
+        let mut routes = Vec::new();
+        let mut missing = Vec::new();
+        for r in &g.routes {
+            let pn = r.public_name.trim().to_string();
+            if pn.is_empty() { continue; }
+            let model_id = storage::find_model_by_target(&state.db, &r.kind, &r.base_url, &r.upstream_model)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            match model_id {
+                Some(mid) => routes.push((pn, mid, r.weight, r.multiplier)),
+                None => missing.push(json!({
+                    "public_name": pn, "kind": r.kind,
+                    "base_url": r.base_url, "upstream_model": r.upstream_model,
+                })),
+            }
+        }
+        let rules = g.time_rules.iter().map(|t| storage::TimeRuleInput {
+            group_id: 0,
+            name: t.name.clone(),
+            weekdays: t.weekdays.clone(),
+            start_time: t.start_time.clone(),
+            end_time: t.end_time.clone(),
+            multiplier: t.multiplier,
+            weight_map: t.weight_map.clone(),
+            active: t.active,
+        }).collect();
+        let existing_id = storage::find_group_by_name(&state.db, &name)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        let (action, existing_routes) = match existing_id {
+            Some(gid) => {
+                let n = storage::list_routes(&state.db, gid)
+                    .await
+                    .map_err(|e| ApiError::Internal(e.to_string()))?
+                    .len();
+                ("overwrite", n)
+            }
+            None => ("create", 0),
+        };
+        out.push(ResolvedGroup {
+            name, strategy, routes, rules, missing, action, existing_routes,
+        });
+    }
+    Ok(out)
+}
+
+/// POST /admin/groups/import/preview —— 干跑:返回每组动作(新建/覆盖)、缺失模型与汇总,不落库。
+pub async fn preview_import(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ImportBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let resolved = resolve_import(&state, &body).await?;
+    let (mut creates, mut overwrites, mut routes_n, mut rules_n, mut skipped) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut data = Vec::with_capacity(resolved.len());
+    for g in &resolved {
+        creates += (g.action == "create") as usize;
+        overwrites += (g.action == "overwrite") as usize;
+        routes_n += g.routes.len();
+        rules_n += g.rules.len();
+        skipped += g.missing.len();
+        data.push(json!({
+            "name": g.name, "action": g.action, "existing_routes": g.existing_routes,
+            "routes": g.routes.len(), "time_rules": g.rules.len(), "missing_models": g.missing,
+        }));
+    }
+    Ok(Json(json!({
+        "data": data,
+        "summary": {
+            "groups": resolved.len(), "create": creates, "overwrite": overwrites,
+            "routes": routes_n, "time_rules": rules_n, "skipped_routes": skipped,
+        },
+    })))
+}
+
+/// POST /admin/groups/import —— 执行导入(按组名 upsert,同名整组覆盖)。
+pub async fn groups_import(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ImportBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let resolved = resolve_import(&state, &body).await?;
+    let mut imported = Vec::with_capacity(resolved.len());
+    for g in &resolved {
+        let (id, overwritten) = storage::import_group(&state.db, &g.name, &g.strategy, &g.routes, &g.rules)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        imported.push(json!({
+            "id": id, "name": g.name,
+            "action": if overwritten { "overwrite" } else { "create" },
+            "routes": g.routes.len(), "time_rules": g.rules.len(), "skipped_routes": g.missing.len(),
+        }));
+    }
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true, "imported": imported })))
+}
+
 // ---- 系统配置:failover ----
 
 /// GET /admin/settings/fallback -- 回显 failover 配置(DB 优先,否则配置文件值)。

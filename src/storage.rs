@@ -82,7 +82,7 @@ pub fn now_secs() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
 }
 
-fn now_iso() -> String {
+pub fn now_iso() -> String {
     format!("@{}", now_secs())
 }
 
@@ -617,6 +617,26 @@ pub async fn update_route(pool: &Db, id: i64, public_name: &str, model_id: i64, 
     Ok(())
 }
 
+/// 只更新提供的字段(批量改权重/倍率用)。
+pub async fn update_route_fields(pool: &Db, id: i64, weight: Option<i64>, multiplier: Option<f64>) -> anyhow::Result<()> {
+    match (weight, multiplier) {
+        (Some(w), Some(m)) => {
+            q!("UPDATE group_routes SET weight = ?, multiplier = ? WHERE id = ?")
+                .bind(w).bind(m).bind(id).execute(pool).await?;
+        }
+        (Some(w), None) => {
+            q!("UPDATE group_routes SET weight = ? WHERE id = ?")
+                .bind(w).bind(id).execute(pool).await?;
+        }
+        (None, Some(m)) => {
+            q!("UPDATE group_routes SET multiplier = ? WHERE id = ?")
+                .bind(m).bind(id).execute(pool).await?;
+        }
+        (None, None) => {}
+    }
+    Ok(())
+}
+
 pub async fn delete_route(pool: &Db, id: i64) -> anyhow::Result<()> {
     q!("DELETE FROM group_routes WHERE id = ?").bind(id).execute(pool).await?;
     Ok(())
@@ -687,6 +707,82 @@ pub async fn update_time_rule(pool: &Db, id: i64, rule: &TimeRuleInput) -> anyho
 pub async fn delete_time_rule(pool: &Db, id: i64) -> anyhow::Result<()> {
     q!("DELETE FROM time_rules WHERE id = ?").bind(id).execute(pool).await?;
     Ok(())
+}
+
+// ---- 模型组导入/导出 ----
+
+/// 按组名查组 id(导入 upsert 依据)。
+pub async fn find_group_by_name(pool: &Db, name: &str) -> anyhow::Result<Option<i64>> {
+    let row = q!("SELECT id FROM model_groups WHERE name = ?")
+        .bind(name).fetch_optional(pool).await?;
+    Ok(row.map(|r| r.get::<i64, _>("id")))
+}
+
+/// 按 (kind, base_url, upstream_model) 解析模型 id。provider 名是生成短名,跨实例不可移植,导入导出一律按三元组定位。
+pub async fn find_model_by_target(pool: &Db, kind: &str, base_url: &str, upstream_model: &str) -> anyhow::Result<Option<i64>> {
+    let row = q!(
+        "SELECT m.id FROM models m JOIN providers p ON p.name = m.provider
+         WHERE p.kind = ? AND p.base_url = ? AND m.upstream_model = ? LIMIT 1")
+        .bind(kind).bind(base_url).bind(upstream_model).fetch_optional(pool).await?;
+    Ok(row.map(|r| r.get::<i64, _>("id")))
+}
+
+/// 导出用:组内路由附 (kind, base_url, upstream_model) 三元组,不含任何 api_key。
+pub async fn list_routes_export(pool: &Db, group_id: i64) -> anyhow::Result<Vec<serde_json::Value>> {
+    let rows = q!(
+        "SELECT r.public_name, r.weight, r.multiplier, m.upstream_model, p.kind, p.base_url
+         FROM group_routes r JOIN models m ON m.id = r.model_id JOIN providers p ON p.name = m.provider
+         WHERE r.group_id = ? ORDER BY r.public_name")
+        .bind(group_id).fetch_all(pool).await?;
+    Ok(rows.iter().map(|r| serde_json::json!({
+        "public_name": r.get::<String,_>("public_name"),
+        "kind": r.get::<String,_>("kind"),
+        "base_url": r.get::<String,_>("base_url"),
+        "upstream_model": r.get::<String,_>("upstream_model"),
+        "weight": r.get::<i64,_>("weight"),
+        "multiplier": r.try_get::<f64,_>("multiplier").unwrap_or(1.0),
+    })).collect())
+}
+
+/// 导入单组(事务):同名组存在则整组覆盖(删路由/时段规则后重建并更新策略),否则新建。
+/// routes 元素为 (public_name, model_id, weight, multiplier),model_id 由上层按三元组解析;
+/// rules 复用 TimeRuleInput,其中 group_id 被忽略(以实际导入组为准)。返回 (组id, 是否覆盖)。
+pub async fn import_group(
+    pool: &Db,
+    name: &str,
+    strategy: &str,
+    routes: &[(String, i64, i64, f64)],
+    rules: &[TimeRuleInput],
+) -> anyhow::Result<(i64, bool)> {
+    let mut tx = pool.begin().await?;
+    let existing = q!("SELECT id FROM model_groups WHERE name = ?")
+        .bind(name).fetch_optional(&mut *tx).await?;
+    let (id, overwritten) = if let Some(row) = existing {
+        let gid: i64 = row.get("id");
+        q!("DELETE FROM group_routes WHERE group_id = ?").bind(gid).execute(&mut *tx).await?;
+        q!("DELETE FROM time_rules WHERE group_id = ?").bind(gid).execute(&mut *tx).await?;
+        q!("UPDATE model_groups SET strategy = ? WHERE id = ?")
+            .bind(strategy).bind(gid).execute(&mut *tx).await?;
+        (gid, true)
+    } else {
+        let r = q!("INSERT INTO model_groups (name, strategy, created_at) VALUES (?, ?, ?) RETURNING id")
+            .bind(name).bind(strategy).bind(now_iso())
+            .fetch_one(&mut *tx).await?;
+        (r.get::<i64, _>("id"), false)
+    };
+    for (public_name, model_id, weight, multiplier) in routes {
+        q!("INSERT INTO group_routes (group_id, public_name, model_id, weight, multiplier, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+            .bind(id).bind(public_name).bind(model_id).bind(weight).bind(multiplier).bind(now_iso())
+            .execute(&mut *tx).await?;
+    }
+    for rule in rules {
+        q!("INSERT INTO time_rules (group_id, name, weekdays, start_time, end_time, multiplier, weight_map, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(id).bind(&rule.name).bind(&rule.weekdays).bind(&rule.start_time).bind(&rule.end_time)
+            .bind(rule.multiplier).bind(&rule.weight_map).bind(rule.active as i64).bind(now_iso())
+            .execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok((id, overwritten))
 }
 
 pub async fn set_user_group(pool: &Db, user_id: Uuid, group_id: Option<i64>) -> anyhow::Result<()> {
@@ -2051,6 +2147,57 @@ mod tests {
     }
 
     // ---- find_or_create_provider ----
+
+    // ---- 模型组导入/导出 ----
+
+    #[tokio::test]
+    async fn group_import_export_roundtrip() {
+        let db = test_db().await;
+        let (prov, _) = find_or_create_provider(&db, "openai", "https://api.test.com", Some("sk-x")).await.unwrap();
+        let mid = add_model(&db, &prov, "gpt-4o", None, None, None).await.unwrap();
+        let gid = add_group(&db, "grp").await.unwrap();
+        add_route(&db, gid, "my-gpt", mid, 80, 1.5).await.unwrap();
+        add_time_rule(&db, &TimeRuleInput {
+            group_id: gid, name: "peak".into(), weekdays: "1-5".into(),
+            start_time: "09:00".into(), end_time: "18:00".into(),
+            multiplier: 1.2, weight_map: None, active: true,
+        }).await.unwrap();
+
+        // 导出:路由附三元组,按三元组解析命中/未命中
+        let ex = list_routes_export(&db, gid).await.unwrap();
+        assert_eq!(ex.len(), 1);
+        assert_eq!(ex[0]["kind"].as_str(), Some("openai"));
+        assert_eq!(ex[0]["base_url"].as_str(), Some("https://api.test.com"));
+        assert_eq!(ex[0]["upstream_model"].as_str(), Some("gpt-4o"));
+        assert_eq!(ex[0]["multiplier"].as_f64(), Some(1.5));
+        assert_eq!(find_model_by_target(&db, "openai", "https://api.test.com", "gpt-4o").await.unwrap(), Some(mid));
+        assert_eq!(find_model_by_target(&db, "openai", "https://other.com", "gpt-4o").await.unwrap(), None);
+
+        // 同名导入 → 覆盖:路由与时段规则整体重建,策略更新
+        assert_eq!(find_group_by_name(&db, "grp").await.unwrap(), Some(gid));
+        let rules = vec![TimeRuleInput {
+            group_id: 0, name: "off".into(), weekdays: "0-6".into(),
+            start_time: "00:00".into(), end_time: "23:59".into(),
+            multiplier: 0.8, weight_map: None, active: true,
+        }];
+        let (gid2, overwritten) = import_group(
+            &db, "grp", "priority",
+            &[("my-gpt".into(), mid, 60, 1.0)], &rules,
+        ).await.unwrap();
+        assert!(overwritten);
+        assert_eq!(gid2, gid);
+        let routes = list_routes(&db, gid).await.unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0]["weight"].as_i64(), Some(60));
+        let trs = list_time_rules(&db, gid).await.unwrap();
+        assert_eq!(trs.len(), 1);
+        assert_eq!(trs[0]["name"].as_str(), Some("off"));
+
+        // 新建分支:不同组名 → create
+        let (gid3, over3) = import_group(&db, "grp2", "weighted_random", &[], &[]).await.unwrap();
+        assert!(!over3);
+        assert_ne!(gid3, gid);
+    }
 
     // ---- cache_vectors(L2 向量)----
 

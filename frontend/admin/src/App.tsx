@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
-import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles } from "lucide-react";
-import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow } from "./api";
+import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload } from "lucide-react";
+import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -1208,6 +1208,9 @@ function GroupsPanel() {
   const [routeDlg, setRouteDlg] = useState<{ edit: RouteRow | null } | null>(null);
   const [timeRuleDlg, setTimeRuleDlg] = useState<{ edit: TimeRuleRow | null } | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [checked, setChecked] = useState<Set<number>>(new Set());
+  const [importOpen, setImportOpen] = useState(false);
+  const [batchDlg, setBatchDlg] = useState<"multiplier" | "weight" | null>(null);
 
   const loadGroups = async () => {
     const [g, m] = await Promise.all([api.groups(), api.models()]);
@@ -1217,7 +1220,7 @@ function GroupsPanel() {
   const loadRoutes = async (gid: number) => { setRoutes((await api.routes(gid)).data); };
   const loadTimeRules = async (gid: number) => { setTimeRules((await api.timeRules(gid)).data); };
   useEffect(() => { loadGroups(); }, []);
-  useEffect(() => { if (sel != null) { loadRoutes(sel); loadTimeRules(sel); } }, [sel]);
+  useEffect(() => { if (sel != null) { loadRoutes(sel); loadTimeRules(sel); } setChecked(new Set()); }, [sel]);
 
   const createGroup = async (name: string) => { const r = await api.addGroup(name); await loadGroups(); setSel(r.id); };
   const setActive = async (g: GroupRow) => { if (!g.is_active) { await api.activateGroup(g.id); loadGroups(); } };
@@ -1230,6 +1233,38 @@ function GroupsPanel() {
     title: "删除该路由?",
     action: async () => { await api.deleteRoute(id); if (sel != null) loadRoutes(sel); },
   });
+  const downloadJson = (data: unknown, filename: string) => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  };
+  const exportAll = async () =>
+    downloadJson(await api.groupsExport(), `relay-groups-${new Date().toISOString().slice(0, 10)}.json`);
+  const exportGroup = async (gid: number) => {
+    const g = groups.find((x) => x.id === gid);
+    downloadJson(await api.groupExport(gid), `relay-group-${g?.name ?? gid}.json`);
+  };
+  const toggleChecked = (id: number) => setChecked((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  const delRoutesBatch = () => {
+    const ids = [...checked];
+    if (!ids.length) return;
+    setConfirm({
+      title: `删除选中的 ${ids.length} 条路由?`,
+      desc: "删除后用户请求这些对外模型名将无法路由。",
+      action: async () => { await api.batchDeleteRoutes(ids); setChecked(new Set()); if (sel != null) loadRoutes(sel); },
+    });
+  };
+  const applyBatch = async (field: "multiplier" | "weight", val: number) => {
+    await api.batchUpdateRoutes([...checked], field === "multiplier" ? { multiplier: val } : { weight: val });
+    setChecked(new Set());
+    if (sel != null) loadRoutes(sel);
+  };
   const setStrategy = async (gid: number, strategy: string) => {
     await api.setGroupStrategy(gid, strategy);
     await loadGroups();
@@ -1253,7 +1288,15 @@ function GroupsPanel() {
   return (
     <div className="grid h-full min-h-0 gap-5 md:grid-cols-[260px_1fr]">
       <Card className="flex h-full min-h-0 flex-col">
-        <CardHeader><CardTitle className="text-base">模型组</CardTitle></CardHeader>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-2">
+            <CardTitle className="text-base">模型组</CardTitle>
+            <div className="flex items-center gap-0.5">
+              <button className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" title="导出全部模型组(JSON)" onClick={exportAll}><Download className="h-4 w-4" /></button>
+              <button className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" title="导入模型组(JSON)" onClick={() => setImportOpen(true)}><Upload className="h-4 w-4" /></button>
+            </div>
+          </div>
+        </CardHeader>
         <CardContent className="min-h-0 flex-1 space-y-3 overflow-auto">
           <div className="flex gap-2">
             <Input placeholder="搜索模型组" value={gq} onChange={(e) => setGq(e.target.value)} />
@@ -1300,7 +1343,12 @@ function GroupsPanel() {
                   </select>
                 </div>
               )}
-              {sel != null && <Button size="sm" onClick={() => setRouteDlg({ edit: null })}><Plus className="h-4 w-4" />添加路由</Button>}
+              {sel != null && (
+                <>
+                  <Button size="sm" variant="outline" title="导出该组(JSON)" onClick={() => exportGroup(sel)}><Download className="h-4 w-4" /></Button>
+                  <Button size="sm" onClick={() => setRouteDlg({ edit: null })}><Plus className="h-4 w-4" />添加路由</Button>
+                </>
+              )}
             </div>
           </div>
           {curStrategy === "priority" && <p className="mt-1 text-[11px] text-muted-foreground">优先级模式:数字越大越优先;主模型故障时自动切换到下一个。</p>}
@@ -1346,9 +1394,24 @@ function GroupsPanel() {
                   </div>
                 )}
               </div>
-              <p className="mb-3 text-xs text-muted-foreground">用户请求「对外模型名」→ 路由到指定模型;响应里保留用户传的名字。同名多条按权重/优先级分流。</p>
+              {checked.size > 0 ? (
+                <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
+                  <Badge>已选 {checked.size} 条</Badge>
+                  <Button size="sm" variant="outline" onClick={() => setBatchDlg("multiplier")}>批量改倍率</Button>
+                  <Button size="sm" variant="outline" onClick={() => setBatchDlg("weight")}>批量改权重</Button>
+                  <Button size="sm" variant="destructive" onClick={delRoutesBatch}><Trash2 className="h-4 w-4" />批量删除</Button>
+                  <Button size="sm" variant="ghost" onClick={() => setChecked(new Set())}>取消选择</Button>
+                </div>
+              ) : (
+                <p className="mb-3 text-xs text-muted-foreground">用户请求「对外模型名」→ 路由到指定模型;响应里保留用户传的名字。同名多条按权重/优先级分流。</p>
+              )}
               <Table>
                 <TableHeader><TableRow>
+                  <TableHead className="w-9 pr-0">
+                    <input type="checkbox" className="h-3.5 w-3.5 accent-primary" title="全选本组路由"
+                      checked={routes.length > 0 && checked.size === routes.length}
+                      onChange={(e) => setChecked(e.target.checked ? new Set(routes.map((r) => r.id)) : new Set())} />
+                  </TableHead>
                   <TableHead>对外模型名</TableHead><TableHead>→ 实际模型</TableHead>
                   <TableHead>{curStrategy === "priority" ? "优先级" : "权重"}</TableHead>
                   <TableHead>倍率</TableHead><TableHead className="text-right">操作</TableHead>
@@ -1363,7 +1426,10 @@ function GroupsPanel() {
                       // 故障链指示:同名路由之间的连接线
                       const prevSameName = idx > 0 && sorted[idx - 1].public_name === r.public_name;
                       return (
-                        <TableRow key={r.id}>
+                        <TableRow key={r.id} data-checked={checked.has(r.id) || undefined} className={cn(checked.has(r.id) && "bg-primary/5")}>
+                          <TableCell>
+                            <input type="checkbox" className="h-3.5 w-3.5 accent-primary" checked={checked.has(r.id)} onChange={() => toggleChecked(r.id)} />
+                          </TableCell>
                           <TableCell className="mono">
                             {curStrategy === "priority" && prevSameName && <span className="mr-1 text-muted-foreground">↓</span>}
                             {r.public_name}
@@ -1387,7 +1453,7 @@ function GroupsPanel() {
                   );
                     });
                   })()}
-                  {routes.length === 0 && <TableRow><TableCell colSpan={5} className="text-sm text-muted-foreground">该组暂无路由</TableCell></TableRow>}
+                  {routes.length === 0 && <TableRow><TableCell colSpan={6} className="text-sm text-muted-foreground">该组暂无路由</TableCell></TableRow>}
                 </TableBody>
               </Table>
             </>
@@ -1398,6 +1464,8 @@ function GroupsPanel() {
       {sel != null && <AddRouteDialog dlg={routeDlg} groupId={sel} models={models} strategy={curStrategy} onClose={() => setRouteDlg(null)} onSaved={() => loadRoutes(sel)} />}
       {sel != null && <TimeRuleDialog dlg={timeRuleDlg} groupId={sel} onClose={() => setTimeRuleDlg(null)} onSaved={() => loadTimeRules(sel)} />}
       <AddGroupDialog open={groupOpen} onClose={() => setGroupOpen(false)} onCreate={createGroup} />
+      <ImportGroupsDialog open={importOpen} onClose={() => setImportOpen(false)} onImported={() => { loadGroups(); if (sel != null) loadRoutes(sel); }} />
+      {batchDlg && <BatchEditDialog field={batchDlg} count={checked.size} onClose={() => setBatchDlg(null)} onApply={(v) => applyBatch(batchDlg, v)} />}
       <ConfirmDialog confirm={confirm} onClose={() => setConfirm(null)} />
     </div>
   );
@@ -1424,6 +1492,148 @@ function AddGroupDialog({ open, onClose, onCreate }: { open: boolean; onClose: (
           <Button variant="ghost" onClick={onClose}>取消</Button>
           <Button onClick={submit} disabled={!name.trim()}><Plus className="h-4 w-4" />创建</Button>
         </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function BatchEditDialog({ field, count, onClose, onApply }: {
+  field: "multiplier" | "weight"; count: number; onClose: () => void; onApply: (v: number) => Promise<void>;
+}) {
+  const [val, setVal] = useState(field === "multiplier" ? "1.0" : "100");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    const n = Number(val);
+    if (!Number.isFinite(n) || n < 0) { setErr("请输入不小于 0 的数字"); return; }
+    setErr(""); setBusy(true);
+    try { await onApply(n); onClose(); } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-xs">
+        <DialogHeader>
+          <DialogTitle>{field === "multiplier" ? "批量改计费倍率" : "批量改权重"}</DialogTitle>
+          <DialogDescription>将同时应用到选中的 {count} 条路由。</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <Input value={val} onChange={(e) => setVal(e.target.value)} autoFocus
+            onKeyDown={(e) => e.key === "Enter" && submit()} />
+          {err && <p className="text-sm text-destructive">{err}</p>}
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>取消</Button>
+          <Button onClick={submit} disabled={busy}>{busy ? "应用中..." : "应用"}</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ImportGroupsDialog({ open, onClose, onImported }: { open: boolean; onClose: () => void; onImported: () => void }) {
+  const [step, setStep] = useState<1 | 2>(1);
+  const [text, setText] = useState("");
+  const [parsed, setParsed] = useState<ImportGroupPayload[] | null>(null);
+  const [preview, setPreview] = useState<ImportPreviewResp | null>(null);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (open) { setStep(1); setText(""); setParsed(null); setPreview(null); setErr(""); } }, [open]);
+
+  const parseJson = async (raw: string) => {
+    setErr("");
+    let obj: any;
+    try { obj = JSON.parse(raw); } catch { setErr("JSON 解析失败,请检查格式"); return; }
+    const groups = Array.isArray(obj?.groups) ? obj.groups : Array.isArray(obj) ? obj : null;
+    if (!groups || !groups.length) { setErr("未找到模型组数据(需要 groups 数组)"); return; }
+    setParsed(groups);
+    setBusy(true);
+    try { setPreview(await api.importPreview({ groups })); setStep(2); }
+    catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+  };
+  const pickFile = (f: File | undefined) => {
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => setText(String(reader.result ?? ""));
+    reader.readAsText(f);
+  };
+  const doImport = async () => {
+    if (!parsed) return;
+    setBusy(true); setErr("");
+    try { await api.groupsImport({ groups: parsed }); onImported(); onClose(); }
+    catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>导入模型组</DialogTitle>
+          <DialogDescription>按组名匹配:同名组整组覆盖(路由与时段规则重建),新组名则创建。本机缺失的上游模型会跳过并提示。</DialogDescription>
+        </DialogHeader>
+        {step === 1 ? (
+          <div className="space-y-3">
+            <textarea
+              className="min-h-[220px] w-full rounded-lg border border-input bg-card p-3 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+              placeholder={'粘贴导出的 JSON,例如:\n{\n  "version": 1,\n  "groups": [{ "name": "默认组", "routes": [ ... ] }]\n}'}
+              value={text} onChange={(e) => setText(e.target.value)} />
+            <div className="flex items-center justify-between gap-2">
+              <Button variant="outline" size="sm" onClick={() => fileRef.current?.click()}>选择 JSON 文件…</Button>
+              <input ref={fileRef} type="file" accept=".json,application/json" className="hidden" onChange={(e) => pickFile(e.target.files?.[0])} />
+              <div className="flex gap-2">
+                <Button variant="ghost" onClick={onClose}>取消</Button>
+                <Button size="sm" disabled={!text.trim() || busy} onClick={() => parseJson(text)}>{busy ? "解析中..." : "解析并预览"}</Button>
+              </div>
+            </div>
+            {err && <p className="text-sm text-destructive">{err}</p>}
+          </div>
+        ) : preview && (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Badge>共 {preview.summary.groups} 组</Badge>
+              {preview.summary.create > 0 && <Badge variant="success">新建 {preview.summary.create}</Badge>}
+              {preview.summary.overwrite > 0 && <Badge>覆盖 {preview.summary.overwrite}</Badge>}
+              <Badge variant="muted">路由 {preview.summary.routes} 条</Badge>
+              {preview.summary.time_rules > 0 && <Badge variant="muted">时段规则 {preview.summary.time_rules} 条</Badge>}
+              {preview.summary.skipped_routes > 0 && <Badge variant="destructive">跳过 {preview.summary.skipped_routes} 条</Badge>}
+            </div>
+            <div className="max-h-[260px] overflow-auto rounded-lg border border-border/60">
+              <Table>
+                <TableHeader><TableRow>
+                  <TableHead>模型组</TableHead><TableHead>动作</TableHead>
+                  <TableHead>路由</TableHead><TableHead>时段</TableHead><TableHead>缺失上游</TableHead>
+                </TableRow></TableHeader>
+                <TableBody>
+                  {preview.data.map((row) => (
+                    <TableRow key={row.name}>
+                      <TableCell className="font-medium">{row.name}</TableCell>
+                      <TableCell>
+                        {row.action === "create"
+                          ? <Badge variant="success">新建</Badge>
+                          : <Badge>覆盖 · 替换现有 {row.existing_routes} 条</Badge>}
+                      </TableCell>
+                      <TableCell>{row.routes}</TableCell>
+                      <TableCell>{row.time_rules}</TableCell>
+                      <TableCell>
+                        {row.missing_models.length === 0 ? <span className="text-xs text-muted-foreground">—</span> : (
+                          <span className="text-xs text-destructive"
+                            title={row.missing_models.map((m) => `${m.public_name} (${m.kind} ${m.base_url} ${m.upstream_model})`).join("\n")}>
+                            {row.missing_models.length} 条
+                          </span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            {err && <p className="text-sm text-destructive">{err}</p>}
+            <div className="flex justify-between gap-2">
+              <Button variant="ghost" onClick={() => { setStep(1); setPreview(null); }}>上一步</Button>
+              <Button onClick={doImport} disabled={busy}>{busy ? "导入中..." : `确认导入 ${preview.summary.groups} 组`}</Button>
+            </div>
+          </div>
+        )}
       </DialogContent>
     </Dialog>
   );

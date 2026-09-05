@@ -11,6 +11,10 @@ frontend/*/dist/
 *.db-shm
 *.db-wal
 
+# 本地运行日志
+/relay-stdout.log
+/relay-stderr.log
+
 # 打包产物
 /dist
 *.tar.gz
