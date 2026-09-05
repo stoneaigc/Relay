@@ -4,6 +4,7 @@ use chrono::{Datelike, Timelike, Utc};
 
 use crate::config::ProviderKind;
 use crate::error::ApiError;
+use crate::pricing;
 
 /// 一个上游连接(协议 + 地址 + 密钥)。
 #[derive(Clone)]
@@ -20,6 +21,10 @@ pub struct ProviderConn {
 pub struct ModelDef {
     pub provider: String,
     pub upstream_model: String,
+    /// 输入单价 $/1M tokens(手动定价;None=回退内置默认价表)。
+    pub input_price: Option<f64>,
+    /// 输出单价 $/1M tokens(手动定价;None=回退内置默认价表)。
+    pub output_price: Option<f64>,
 }
 
 /// 组内一条路由目标。
@@ -61,6 +66,8 @@ pub enum Strategy {
     RoundRobin,
     /// 优先级:按 weight 降序(越大越优先),失败自动切下一个。
     Priority,
+    /// 成本优先:按预估单价升序选最便宜,同价随机(未定价殿后);不健康候选由请求侧熔断器跳过。
+    CostAware,
 }
 
 impl Strategy {
@@ -70,6 +77,7 @@ impl Strategy {
             Strategy::WeightedRoundRobin => "weighted_round_robin",
             Strategy::RoundRobin => "round_robin",
             Strategy::Priority => "priority",
+            Strategy::CostAware => "cost_aware",
         }
     }
 }
@@ -80,6 +88,7 @@ pub fn strategy_from_str(s: &str) -> Strategy {
         "weighted_round_robin" => Strategy::WeightedRoundRobin,
         "round_robin" => Strategy::RoundRobin,
         "priority" => Strategy::Priority,
+        "cost_aware" => Strategy::CostAware,
         _ => Strategy::WeightedRandom,
     }
 }
@@ -172,6 +181,7 @@ impl Routing {
             Strategy::RoundRobin => order_round_robin(group_id, sort_targets, rr_counter, true),
             Strategy::WeightedRoundRobin => order_round_robin(group_id, sort_targets, rr_counter, false),
             Strategy::Priority => order_by_priority(sort_targets),
+            Strategy::CostAware => order_by_cost(sort_targets, &self.models),
         };
         let mut seen: std::collections::HashSet<(ProviderKind, String, String)> = std::collections::HashSet::new();
         let mut out: Vec<Resolved> = Vec::new();
@@ -298,6 +308,39 @@ fn order_by_priority(targets: &[Target]) -> Vec<usize> {
     idx
 }
 
+/// 原地 Fisher-Yates 洗牌(用 rand::random,不引入额外 trait 依赖)。
+fn fisher_yates_shuffle<T>(v: &mut [T]) {
+    for i in (1..v.len()).rev() {
+        let j = rand::random::<usize>() % (i + 1);
+        v.swap(i, j);
+    }
+}
+
+/// 单个目标的成本基数:两侧单价之和 × 计费倍率(负倍率按 0 计)。
+/// 价格经 pricing::resolve_prices(手动定价优先,回退内置价表);任一侧未定价 = INFINITY 殿后。
+fn target_cost(t: &Target, models: &HashMap<i64, ModelDef>) -> f64 {
+    let Some(m) = models.get(&t.model_id) else {
+        return f64::INFINITY;
+    };
+    let (i, o) = pricing::resolve_prices(&m.upstream_model, m.input_price, m.output_price);
+    match (i, o) {
+        (Some(i), Some(o)) => (i + o) * t.multiplier.max(0.0),
+        _ => f64::INFINITY,
+    }
+}
+
+/// 成本优先排序:先整体洗牌(同价随机),再按成本基数稳定升序(未定价殿后)。
+fn order_by_cost(targets: &[Target], models: &HashMap<i64, ModelDef>) -> Vec<usize> {
+    let mut keyed: Vec<(usize, f64)> = targets
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i, target_cost(t, models)))
+        .collect();
+    fisher_yates_shuffle(&mut keyed);
+    keyed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    keyed.into_iter().map(|(i, _)| i).collect()
+}
+
 /// 轮询类负载策略:生成候选顺序,第一条为「本次命中的目标」,其后为 failover 次序。
 /// - `simple_mode=true`(对应简单轮询):不看权重,每次按游标逐条轮流。
 /// - `simple_mode=false`(对应加权轮询):按命中顺序排列,再由 resolve_all 按权重轮盘驱动游标。
@@ -356,6 +399,7 @@ mod tests {
         assert_eq!(strategy_from_str("weighted_round_robin"), Strategy::WeightedRoundRobin);
         assert_eq!(strategy_from_str("round_robin"), Strategy::RoundRobin);
         assert_eq!(strategy_from_str("priority"), Strategy::Priority);
+        assert_eq!(strategy_from_str("cost_aware"), Strategy::CostAware);
     }
 
     #[test]
@@ -366,7 +410,7 @@ mod tests {
 
     #[test]
     fn strategy_as_str_roundtrip() {
-        let strategies = [Strategy::WeightedRandom, Strategy::WeightedRoundRobin, Strategy::RoundRobin, Strategy::Priority];
+        let strategies = [Strategy::WeightedRandom, Strategy::WeightedRoundRobin, Strategy::RoundRobin, Strategy::Priority, Strategy::CostAware];
         for s in &strategies {
             assert_eq!(strategy_from_str(s.as_str()), *s);
         }
@@ -443,6 +487,98 @@ mod tests {
         let targets = vec![Target { model_id: 1, weight: 100, multiplier: 1.0 }];
         let order = shuffle_weighted(&targets);
         assert_eq!(order, vec![0]);
+    }
+
+    // ---- order_by_cost ----
+
+    fn mdl(upstream: &str, input_price: Option<f64>, output_price: Option<f64>) -> ModelDef {
+        ModelDef { provider: "p".into(), upstream_model: upstream.into(), input_price, output_price }
+    }
+
+    #[test]
+    fn cost_order_ascending_by_price() {
+        let mut models = HashMap::new();
+        models.insert(1, mdl("gpt-4o-mini", None, None)); // 0.15+0.6 = 0.75
+        models.insert(2, mdl("gpt-4o", None, None)); // 2.5+10.0 = 12.5
+        models.insert(3, mdl("custom-x", None, None)); // 未定价
+        let targets = vec![
+            Target { model_id: 2, weight: 1, multiplier: 1.0 },
+            Target { model_id: 1, weight: 1, multiplier: 1.0 },
+            Target { model_id: 3, weight: 1, multiplier: 1.0 },
+        ];
+        let order = order_by_cost(&targets, &models);
+        assert_eq!(order, vec![1, 0, 2]);
+    }
+
+    #[test]
+    fn cost_order_multiplier_aware() {
+        let mut models = HashMap::new();
+        models.insert(1, mdl("gpt-4o-mini", None, None)); // 0.75 × 1.0
+        models.insert(2, mdl("gpt-4o", None, None)); // 12.5 × 0.05 = 0.625
+        let targets = vec![
+            Target { model_id: 1, weight: 1, multiplier: 1.0 },
+            Target { model_id: 2, weight: 1, multiplier: 0.05 },
+        ];
+        let order = order_by_cost(&targets, &models);
+        assert_eq!(order, vec![1, 0]);
+    }
+
+    #[test]
+    fn cost_order_unpriced_last() {
+        let mut models = HashMap::new();
+        models.insert(1, mdl("custom-a", None, None));
+        models.insert(2, mdl("gpt-4o-mini", None, None));
+        // 模型未登记也应视为未定价
+        let targets = vec![
+            Target { model_id: 1, weight: 1, multiplier: 1.0 },
+            Target { model_id: 2, weight: 1, multiplier: 1.0 },
+            Target { model_id: 99, weight: 1, multiplier: 1.0 },
+        ];
+        let order = order_by_cost(&targets, &models);
+        // 唯一定价者第一;两个未定价(INFINITY)之间同价随机,只能断言集合
+        assert_eq!(order[0], 1);
+        let mut tail = order[1..].to_vec();
+        tail.sort();
+        assert_eq!(tail, vec![0, 2]);
+    }
+
+    #[test]
+    fn cost_order_covers_all() {
+        let mut models = HashMap::new();
+        models.insert(1, mdl("gpt-4o-mini", None, None));
+        models.insert(2, mdl("gpt-4o", None, None));
+        models.insert(3, mdl("custom-x", None, None));
+        let targets = vec![
+            Target { model_id: 1, weight: 1, multiplier: 1.0 },
+            Target { model_id: 2, weight: 1, multiplier: 1.0 },
+            Target { model_id: 3, weight: 1, multiplier: 1.0 },
+        ];
+        let order = order_by_cost(&targets, &models);
+        let mut sorted = order.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn cost_order_manual_price_overrides() {
+        let mut models = HashMap::new();
+        // 手动定价 0.0/0.0 = 免费,应排最前(而非回退内置表)
+        models.insert(1, mdl("gpt-4o", Some(0.0), Some(0.0)));
+        models.insert(2, mdl("gpt-4o-mini", None, None)); // 0.75
+        let targets = vec![
+            Target { model_id: 1, weight: 1, multiplier: 1.0 },
+            Target { model_id: 2, weight: 1, multiplier: 1.0 },
+        ];
+        let order = order_by_cost(&targets, &models);
+        assert_eq!(order, vec![0, 1]);
+    }
+
+    #[test]
+    fn cost_order_empty_targets() {
+        let models: HashMap<i64, ModelDef> = HashMap::new();
+        let targets: Vec<Target> = vec![];
+        let order = order_by_cost(&targets, &models);
+        assert!(order.is_empty());
     }
 }
 

@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS usage_logs (
   input_tokens   BIGINT,
   output_tokens  BIGINT,
   charged_tokens BIGINT,
+  key_id         TEXT,
+  cost_usd       DOUBLE PRECISION,
   status         BIGINT,
   ts             BIGINT NOT NULL DEFAULT 0,
   created_at     TEXT NOT NULL,

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles } from "lucide-react";
-import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheHitRow, EmbeddingSettingsResp } from "./api";
+import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -1244,6 +1244,7 @@ function GroupsPanel() {
     weighted_round_robin: "加权轮询",
     round_robin: "简单轮询",
     priority: "优先级（故障转移链）",
+    cost_aware: "成本优先",
   };
   const curStrategy = groups.find((g) => g.id === sel)?.strategy ?? "weighted_random";
   const filteredGroups = groups.filter((g) => !gq.trim() || g.name.includes(gq.trim()));
@@ -1293,6 +1294,7 @@ function GroupsPanel() {
                     <option value="weighted_round_robin">加权轮询</option>
                     <option value="round_robin">简单轮询</option>
                     <option value="priority">优先级（故障转移链）</option>
+                    <option value="cost_aware">成本优先</option>
                   </select>
                 </div>
               )}
@@ -1300,6 +1302,7 @@ function GroupsPanel() {
             </div>
           </div>
           {curStrategy === "priority" && <p className="mt-1 text-[11px] text-muted-foreground">优先级模式:数字越大越优先;主模型故障时自动切换到下一个。</p>}
+          {curStrategy === "cost_aware" && <p className="mt-1 text-[11px] text-muted-foreground">成本优先模式:按 单价×倍率 从低到高选择;未定价模型自动殿后,同价随机分摊。</p>}
         </CardHeader>
         <CardContent className="min-h-0 flex-1 overflow-auto">
           {sel == null ? <p className="text-sm text-muted-foreground">先选择左侧一个模型组</p> : (
@@ -2155,33 +2158,100 @@ function RewardTaskDialog({ task, onClose, onDone }: {
   );
 }
 
+const fmtCost = (n: number) => (n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(6)}`);
+
+/** 用量分布单维度条形块(纯 CSS 横向条,top10) */
+function BreakdownBars({ title, rows, metric }: { title: string; rows: UsageBreakdownRow[]; metric: "tokens" | "cost" }) {
+  const val = (r: UsageBreakdownRow) => (metric === "cost" ? r.cost_usd : r.input_tokens + r.output_tokens);
+  const max = Math.max(...rows.map(val), 0);
+  const gradient = metric === "cost" ? "from-amber-500 to-orange-400" : "from-sky-500 to-indigo-400";
+  return (
+    <div className="min-w-0">
+      <h4 className="text-xs font-medium text-muted-foreground">{title}</h4>
+      {rows.length === 0 ? (
+        <p className="mt-3 text-sm text-muted-foreground">暂无数据</p>
+      ) : (
+        <div className="mt-3 space-y-2.5">
+          {rows.map((r, i) => (
+            <div key={i}>
+              <div className="flex items-baseline justify-between gap-2 text-xs">
+                <span className="min-w-0 truncate font-medium" title={r.label}>{r.label}</span>
+                <span className="mono shrink-0 tabular-nums text-muted-foreground">
+                  {metric === "cost" ? fmtCost(r.cost_usd) : fmtInt(r.input_tokens + r.output_tokens)}
+                  <span className="ml-1.5 text-[10px] text-muted-foreground/70">{fmtInt(r.calls)} 次</span>
+                </span>
+              </div>
+              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                <div className={`h-full rounded-full bg-gradient-to-r ${gradient} transition-[width] duration-300`}
+                  style={{ width: max > 0 ? `${((val(r) / max) * 100).toFixed(1)}%` : "0%" }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UsagePanel() {
   const [rows, setRows] = useState<any[]>([]);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [total, setTotal] = useState(0);
+  const [bd, setBd] = useState<UsageBreakdownResp | null>(null);
+  const [metric, setMetric] = useState<"tokens" | "cost">("tokens");
   useEffect(() => { api.usage(page, pageSize).then((r) => { setRows(r.data); setTotal(r.total); }); }, [page, pageSize]);
+  useEffect(() => { api.usageBreakdown().then(setBd).catch(() => { /* 静默,下轮刷新重试 */ }); }, []);
   return (
-    <Card>
-      <CardHeader><CardTitle className="text-base">全局用量({total})</CardTitle></CardHeader>
-      <CardContent>
-        {rows.length === 0 ? <p className="text-sm text-muted-foreground">暂无记录</p> : (
-          <Table>
-            <TableHeader><TableRow><TableHead>用户</TableHead><TableHead>模型</TableHead><TableHead>供应商</TableHead><TableHead>输入</TableHead><TableHead>输出</TableHead><TableHead>计费</TableHead></TableRow></TableHeader>
-            <TableBody>
-              {rows.map((r, i) => (
-                <TableRow key={i}>
-                  <TableCell className="mono text-xs">{String(r.user_id).slice(0, 8)}</TableCell>
-                  <TableCell className="mono">{r.model}</TableCell><TableCell>{r.provider}</TableCell>
-                  <TableCell>{r.input_tokens}</TableCell><TableCell>{r.output_tokens}</TableCell><TableCell className="mono">{r.charged_tokens}</TableCell>
-                </TableRow>
+    <div className="space-y-5">
+      <Card>
+        <CardHeader>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">用量分布</CardTitle>
+              <CardDescription className="mt-0.5">Top 10 · 费用按计费口径(单价×倍率)折算,未定价模型记 $0</CardDescription>
+            </div>
+            <div className="inline-flex rounded-lg border border-input bg-card p-0.5 text-xs">
+              {([["tokens", "Tokens"], ["cost", "费用"]] as const).map(([v, label]) => (
+                <button key={v} onClick={() => setMetric(v)}
+                  className={cn("rounded-md px-3 py-1 transition-colors",
+                    metric === v ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground")}>
+                  {label}
+                </button>
               ))}
-            </TableBody>
-          </Table>
-        )}
-        <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={setPage} onPageSizeChange={(s) => { setPage(1); setPageSize(s); }} />
-      </CardContent>
-    </Card>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-6 lg:grid-cols-3">
+            <BreakdownBars title="按供应商" rows={bd?.providers ?? []} metric={metric} />
+            <BreakdownBars title="按用户" rows={bd?.users ?? []} metric={metric} />
+            <BreakdownBars title="按密钥" rows={bd?.keys ?? []} metric={metric} />
+          </div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle className="text-base">调用明细({total})</CardTitle></CardHeader>
+        <CardContent>
+          {rows.length === 0 ? <p className="text-sm text-muted-foreground">暂无记录</p> : (
+            <Table>
+              <TableHeader><TableRow><TableHead>用户</TableHead><TableHead>模型</TableHead><TableHead>供应商</TableHead><TableHead>输入</TableHead><TableHead>输出</TableHead><TableHead>计费</TableHead><TableHead>费用</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {rows.map((r, i) => (
+                  <TableRow key={i}>
+                    <TableCell className="mono text-xs">{String(r.user_id).slice(0, 8)}</TableCell>
+                    <TableCell className="mono">{r.model}</TableCell><TableCell>{r.provider}</TableCell>
+                    <TableCell>{r.input_tokens}</TableCell><TableCell>{r.output_tokens}</TableCell><TableCell className="mono">{r.charged_tokens}</TableCell>
+                    <TableCell className="mono tabular-nums">{r.cost_usd == null ? "—" : fmtCost(r.cost_usd)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+          <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={setPage} onPageSizeChange={(s) => { setPage(1); setPageSize(s); }} />
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 

@@ -155,14 +155,15 @@ async fn run_openai(
     let auth = authenticate(&state, &headers)?;
     let req: Value = serde_json::from_slice(&body)
         .map_err(|e| ApiError::BadRequest(format!("invalid json: {e}")))?;
-    run_chat(state, auth.user, req).await
+    run_chat(state, auth.user, Some(auth.key_id), req).await
 }
 
 /// 数据面核心:对已鉴权的用户执行一次 chat 调用(路由 + 上游 + 计费 + 并发)。
-/// 同时供 `/v1/chat/completions`(Key)与 `/portal/chat`(门户 JWT)复用。
+/// 同时供 `/v1/chat/completions`(Key)与 `/portal/chat`(门户 JWT)复用;门户无密钥传 None。
 pub async fn run_chat(
     state: Arc<AppState>,
     user: Arc<crate::state::UserState>,
+    key_id: Option<uuid::Uuid>,
     req: Value,
 ) -> Result<Response, ApiError> {
     // 全局计时器:用于 catch-all 失败路径写指标(成功率 / RPS / 延迟)
@@ -393,7 +394,7 @@ pub async fn run_chat(
                             final_status,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(cache_wrap(state.clone(), stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
+                        return Ok(cache_wrap(state.clone(), stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -423,7 +424,7 @@ pub async fn run_chat(
                             final_status,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return non_stream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, kind, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
+                        return non_stream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, slot, kind, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
@@ -501,7 +502,7 @@ pub async fn run_chat(
                             final_status,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(cache_wrap(state.clone(), anthropic_stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
+                        return Ok(cache_wrap(state.clone(), anthropic_stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -531,7 +532,7 @@ pub async fn run_chat(
                             final_status,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return anthropic_nonstream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
+                        return anthropic_nonstream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, slot, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
@@ -600,6 +601,7 @@ async fn anthropic_nonstream_response(
     upstream_model: String,
     multiplier: f64,
     user: Arc<crate::state::UserState>,
+    key_id: Option<uuid::Uuid>,
     _slot: Option<OwnedSemaphorePermit>,
     base_url: &str,
     api_key: Option<&str>,
@@ -615,7 +617,7 @@ async fn anthropic_nonstream_response(
 
     let payload = crate::translate::anthropic_to_openai(&aresp, &model);
     let _ = state.usage_tx.send(UsageEvent {
-        user_id: user.id, model: model.clone(), provider: provider_name, upstream_model,
+        user_id: user.id, key_id, cost_usd: 0.0, model: model.clone(), provider: provider_name, upstream_model,
         input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200,
         request_id: Some(trace.request_id.clone()),
     }).await;
@@ -639,6 +641,7 @@ fn anthropic_stream_response(
     upstream_model: String,
     multiplier: f64,
     user: Arc<crate::state::UserState>,
+    key_id: Option<uuid::Uuid>,
     base_url: String,
     api_key: Option<String>,
     trace: RunTrace,
@@ -741,7 +744,7 @@ fn anthropic_stream_response(
         user.deduct(charged);
         user.record_tokens(input.saturating_add(output));
         let _ = state.usage_tx.send(UsageEvent {
-            user_id, model, provider: provider_name, upstream_model,
+            user_id, key_id, cost_usd: 0.0, model, provider: provider_name, upstream_model,
             input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200,
             request_id: Some(trace.request_id.clone()),
         }).await;
@@ -779,13 +782,14 @@ async fn run_anthropic(
     let auth = authenticate(&state, &headers)?;
     let req: Value = serde_json::from_slice(&body)
         .map_err(|e| ApiError::BadRequest(format!("invalid json: {e}")))?;
-    run_messages(state, auth.user, req).await
+    run_messages(state, auth.user, Some(auth.key_id), req).await
 }
 
 /// Anthropic 入站核心:路由 + 上游(Anthropic 直通 / OpenAI 翻译)+ 计费。
 pub async fn run_messages(
     state: Arc<AppState>,
     user: Arc<crate::state::UserState>,
+    key_id: Option<uuid::Uuid>,
     req: Value,
 ) -> Result<Response, ApiError> {
     let req_start = std::time::Instant::now();
@@ -996,7 +1000,7 @@ pub async fn run_messages(
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
                             final_status, latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(cache_wrap(state.clone(), anthropic_passthrough_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
+                        return Ok(cache_wrap(state.clone(), anthropic_passthrough_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -1020,7 +1024,7 @@ pub async fn run_messages(
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
                             final_status, latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return anthropic_passthrough_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
+                        return anthropic_passthrough_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, slot, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
@@ -1090,7 +1094,7 @@ pub async fn run_messages(
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
                             final_status, latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(cache_wrap(state.clone(), messages_openai_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), kind, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
+                        return Ok(cache_wrap(state.clone(), messages_openai_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, kind, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -1114,7 +1118,7 @@ pub async fn run_messages(
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
                             final_status, latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return messages_openai_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), slot, kind, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
+                        return messages_openai_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, slot, kind, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
@@ -1178,6 +1182,7 @@ pub async fn run_messages(
 async fn anth_charge(
     state: &AppState,
     user: &Arc<crate::state::UserState>,
+    key_id: Option<uuid::Uuid>,
     input: u32,
     output: u32,
     multiplier: f64,
@@ -1194,7 +1199,7 @@ async fn anth_charge(
     user.deduct(charged);
     user.record_tokens(input.saturating_add(output));
     let tx = state.usage_tx.clone();
-    let ev = UsageEvent { user_id: user.id, model, provider, upstream_model: upstream, input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200, request_id };
+    let ev = UsageEvent { user_id: user.id, key_id, cost_usd: 0.0, model, provider, upstream_model: upstream, input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200, request_id };
     tokio::spawn(async move { let _ = tx.send(ev).await; });
     // 补记 token 指标:上游分桶 + 全局
     let k = UpstreamKey::new(kind, base_url, api_key);
@@ -1206,6 +1211,7 @@ async fn anth_charge(
 async fn anthropic_passthrough_nonstream(
     state: &AppState, resp: reqwest::Response, model: String, provider_name: String,
     upstream_model: String, multiplier: f64, user: Arc<crate::state::UserState>,
+    key_id: Option<uuid::Uuid>,
     _slot: Option<OwnedSemaphorePermit>,
     base_url: &str,
     api_key: Option<&str>,
@@ -1216,7 +1222,7 @@ async fn anthropic_passthrough_nonstream(
     let input = payload.pointer("/usage/input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let output = payload.pointer("/usage/output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     payload["model"] = json!(model);
-    anth_charge(state, &user, input, output, multiplier, model, provider_name, upstream_model, ProviderKind::Anthropic, base_url, api_key, Some(trace.request_id.clone()), trace).await;
+    anth_charge(state, &user, key_id, input, output, multiplier, model, provider_name, upstream_model, ProviderKind::Anthropic, base_url, api_key, Some(trace.request_id.clone()), trace).await;
     let mut out = Json(payload).into_response();
     apply_relay_headers(&mut out, &hdrs);
     Ok(out)
@@ -1227,6 +1233,7 @@ fn anthropic_passthrough_stream(
     state: Arc<AppState>, resp: reqwest::Response, guard: crate::state::ConcurrencyGuard,
     slot: Option<OwnedSemaphorePermit>,
     model: String, provider_name: String, upstream_model: String, multiplier: f64, user: Arc<crate::state::UserState>,
+    key_id: Option<uuid::Uuid>,
     base_url: String,
     api_key: Option<String>,
     trace: RunTrace,
@@ -1259,7 +1266,7 @@ fn anthropic_passthrough_stream(
                 Err(e) => { yield Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())); break; }
             }
         }
-        anth_charge(&state, &user, input, output, multiplier, model, provider_name, upstream_model, ProviderKind::Anthropic, &base_url, api_key.as_deref(), Some(trace.request_id.clone()), trace).await;
+        anth_charge(&state, &user, key_id, input, output, multiplier, model, provider_name, upstream_model, ProviderKind::Anthropic, &base_url, api_key.as_deref(), Some(trace.request_id.clone()), trace).await;
     };
     let mut resp = sse_response(s);
     apply_relay_headers(&mut resp, &hdrs);
@@ -1270,6 +1277,7 @@ fn anthropic_passthrough_stream(
 async fn messages_openai_nonstream(
     state: &AppState, resp: reqwest::Response, model: String, provider_name: String,
     upstream_model: String, multiplier: f64, user: Arc<crate::state::UserState>,
+    key_id: Option<uuid::Uuid>,
     _slot: Option<OwnedSemaphorePermit>,
     kind: ProviderKind,
     base_url: &str,
@@ -1281,7 +1289,7 @@ async fn messages_openai_nonstream(
     let input = oai.pointer("/usage/prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let output = oai.pointer("/usage/completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let payload = crate::translate::openai_to_anthropic_response(&oai, &model);
-    anth_charge(state, &user, input, output, multiplier, model, provider_name, upstream_model, kind, base_url, api_key, Some(trace.request_id.clone()), trace).await;
+    anth_charge(state, &user, key_id, input, output, multiplier, model, provider_name, upstream_model, kind, base_url, api_key, Some(trace.request_id.clone()), trace).await;
     let mut out = Json(payload).into_response();
     apply_relay_headers(&mut out, &hdrs);
     Ok(out)
@@ -1293,6 +1301,7 @@ fn messages_openai_stream(
     state: Arc<AppState>, resp: reqwest::Response, guard: crate::state::ConcurrencyGuard,
     slot: Option<OwnedSemaphorePermit>,
     model: String, provider_name: String, upstream_model: String, multiplier: f64, user: Arc<crate::state::UserState>,
+    key_id: Option<uuid::Uuid>,
     kind: ProviderKind,
     base_url: String,
     api_key: Option<String>,
@@ -1378,7 +1387,7 @@ fn messages_openai_stream(
             yield Ok(a_event("message_delta", json!({"type":"message_delta","delta":{"stop_reason":stop,"stop_sequence":Value::Null},"usage":{"output_tokens":output}})));
             yield Ok(a_event("message_stop", json!({"type":"message_stop"})));
         }
-        anth_charge(&state, &user, input, output, multiplier, model, provider_name, upstream_model, kind, &base_url, api_key.as_deref(), Some(trace.request_id.clone()), trace).await;
+        anth_charge(&state, &user, key_id, input, output, multiplier, model, provider_name, upstream_model, kind, &base_url, api_key.as_deref(), Some(trace.request_id.clone()), trace).await;
     };
     let mut resp = sse_response(s);
     apply_relay_headers(&mut resp, &hdrs);
@@ -1545,6 +1554,7 @@ fn stream_response(
     upstream_model: String,
     multiplier: f64,
     user: Arc<crate::state::UserState>,
+    key_id: Option<uuid::Uuid>,
     base_url: String,
     api_key: Option<String>,
     trace: RunTrace,
@@ -1583,6 +1593,8 @@ fn stream_response(
             .usage_tx
             .send(UsageEvent {
                 user_id,
+                key_id,
+                cost_usd: 0.0,
                 model,
                 provider: provider_name,
                 upstream_model,
@@ -1613,6 +1625,7 @@ async fn non_stream_response(
     upstream_model: String,
     multiplier: f64,
     user: Arc<crate::state::UserState>,
+    key_id: Option<uuid::Uuid>,
     _slot: Option<OwnedSemaphorePermit>,
     kind: ProviderKind,
     base_url: &str,
@@ -1646,6 +1659,8 @@ async fn non_stream_response(
         .usage_tx
         .send(UsageEvent {
             user_id: user.id,
+            key_id,
+            cost_usd: 0.0,
             model,
             provider: provider_name,
             upstream_model,

@@ -32,13 +32,13 @@ fn make_test_routing() -> Routing {
 
     let mut models = HashMap::new();
     // OpenAI models
-    models.insert(1, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into() });
-    models.insert(2, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o-mini".into() });
+    models.insert(1, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into(), input_price: None, output_price: None });
+    models.insert(2, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o-mini".into(), input_price: None, output_price: None });
     // DeepSeek models
-    models.insert(3, ModelDef { provider: "p-deepseek".into(), upstream_model: "deepseek-chat".into() });
-    models.insert(4, ModelDef { provider: "p-deepseek".into(), upstream_model: "deepseek-reasoner".into() });
+    models.insert(3, ModelDef { provider: "p-deepseek".into(), upstream_model: "deepseek-chat".into(), input_price: None, output_price: None });
+    models.insert(4, ModelDef { provider: "p-deepseek".into(), upstream_model: "deepseek-reasoner".into(), input_price: None, output_price: None });
     // Anthropic model
-    models.insert(5, ModelDef { provider: "p-anthropic".into(), upstream_model: "claude-sonnet-4-20250514".into() });
+    models.insert(5, ModelDef { provider: "p-anthropic".into(), upstream_model: "claude-sonnet-4-20250514".into(), input_price: None, output_price: None });
 
     let mut group_names = HashMap::new();
     group_names.insert(1, "Production".into());
@@ -112,7 +112,7 @@ fn priority_deduplicates_same_upstream() {
         .push(Target { model_id: 100, weight: 10, multiplier: 1.0 });
     // model_id=100 没有对应的 ModelDef,会被跳过;但如果添加了就要去重
     // 用另一个 model_id 指向同一个 provider+model 来测试去重
-    rt.models.insert(100, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into() });
+    rt.models.insert(100, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into(), input_price: None, output_price: None });
     let rr = dashmap::DashMap::new();
     let candidates = resolve_with_counter(&rt, Strategy::Priority, "chat", &rr, None);
     // 去重后应该只有 3 个(OpenAI 只出现一次)

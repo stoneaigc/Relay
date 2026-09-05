@@ -66,8 +66,6 @@ pub fn cost_usd(input_tokens: u64, output_tokens: u64, input_price: f64, output_
 }
 
 /// 估算一次调用的成本;任一侧价格无法确定时返回 None(由调用方决定按 0 计或拒绝)。
-/// 预留:阶段二批E CostAware 策略与费用维度接线。
-#[allow(dead_code)]
 pub fn estimate_cost(
     model: &str,
     input_tokens: u64,
@@ -77,6 +75,17 @@ pub fn estimate_cost(
 ) -> Option<f64> {
     let (i, o) = resolve_prices(model, manual_input, manual_output);
     Some(cost_usd(input_tokens, output_tokens, i?, o?))
+}
+
+/// 按计费口径折算实际成本:`base` 为按上游模型单价估算的成本,
+/// 用 charged/(input+output) 反推总倍率(模型倍率×时段倍率×用户计费倍率),与 charged_tokens 完全同口径。
+/// base 为 None(未定价)或 tokens 为 0 时返回 0.0。
+pub fn billed_cost(base: Option<f64>, input_tokens: u64, output_tokens: u64, charged_tokens: i64) -> f64 {
+    let total = input_tokens + output_tokens;
+    if total == 0 {
+        return 0.0;
+    }
+    base.map(|b| b * (charged_tokens as f64 / total as f64)).unwrap_or(0.0)
 }
 
 #[cfg(test)]
@@ -138,5 +147,18 @@ mod tests {
     #[test]
     fn estimate_cost_unpriced_returns_none() {
         assert!(estimate_cost("custom-x", 1000, 1000, None, None).is_none());
+    }
+
+    #[test]
+    fn billed_cost_scales_with_charged() {
+        // base=7.5,总倍率 = 2000/1000 = 2 → 15.0
+        let c = billed_cost(Some(7.5), 1000, 0, 2000);
+        assert!((c - 15.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn billed_cost_none_or_zero_tokens_is_zero() {
+        assert_eq!(billed_cost(None, 1000, 1000, 5000), 0.0);
+        assert_eq!(billed_cost(Some(7.5), 0, 0, 100), 0.0);
     }
 }

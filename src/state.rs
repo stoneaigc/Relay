@@ -29,6 +29,8 @@ pub enum BudgetStatus {
 /// API Key 在内存中的映射条目。校验请求时只读此结构,不查库。
 #[derive(Debug, Clone)]
 pub struct KeyEntry {
+    /// api_keys.id,用量明细按密钥维度归因用。
+    pub id: Uuid,
     pub user_id: Uuid,
 }
 
@@ -281,12 +283,16 @@ impl Drop for ConcurrencyGuard {
 #[derive(Debug, Clone)]
 pub struct UsageEvent {
     pub user_id: Uuid,
+    /// 发起调用的 API Key(api_keys.id);门户侧调用无密钥时为 None。
+    pub key_id: Option<Uuid>,
     pub model: String,
     pub provider: String,
     pub upstream_model: String,
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub charged_tokens: i64,
+    /// 计费口径成本(USD),由消费端按上游单价×总倍率折算后覆写;发送侧恒填 0.0。
+    pub cost_usd: f64,
     pub status: u16,
     /// 关联的请求链路 ID(request_logs.request_id)。
     pub request_id: Option<String>,

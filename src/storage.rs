@@ -204,6 +204,13 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE users ADD COLUMN IF NOT EXISTS budget_monthly_tokens BIGINT")
             .execute(pool)
             .await;
+        // 用量日志:密钥归因 + 计费口径成本(USD)。
+        let _ = q!("ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS key_id TEXT")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION")
+            .execute(pool)
+            .await;
     } else {
         let _ = q!("ALTER TABLE reward_claims ADD COLUMN task_id INTEGER").execute(pool).await;
         let _ = q!("ALTER TABLE users ADD COLUMN bill_multiplier REAL NOT NULL DEFAULT 1.0")
@@ -234,6 +241,9 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         // 模型价格表($/1M tokens,可空=未定价)。
         let _ = q!("ALTER TABLE models ADD COLUMN input_price REAL").execute(pool).await;
         let _ = q!("ALTER TABLE models ADD COLUMN output_price REAL").execute(pool).await;
+        // 用量日志:密钥归因 + 计费口径成本(USD)。
+        let _ = q!("ALTER TABLE usage_logs ADD COLUMN key_id TEXT").execute(pool).await;
+        let _ = q!("ALTER TABLE usage_logs ADD COLUMN cost_usd REAL").execute(pool).await;
         // 模型防重唯一索引:旧库有重复时创建失败则跳过，幂等由 add_model 查询保证。
         let _ = q!("CREATE UNIQUE INDEX IF NOT EXISTS uniq_models_provider_model ON models(provider, upstream_model)")
             .execute(pool)
@@ -277,12 +287,13 @@ pub async fn load_into_memory(
         users.insert(id, us);
     }
 
-    let rows = q!("SELECT user_id, key_hash FROM api_keys WHERE revoked = 0")
+    let rows = q!("SELECT id, user_id, key_hash FROM api_keys WHERE revoked = 0")
         .fetch_all(pool)
         .await?;
     for r in rows {
         let user_id = Uuid::parse_str(r.get::<String, _>("user_id").as_str())?;
-        keys.insert(r.get::<String, _>("key_hash"), KeyEntry { user_id });
+        let id = Uuid::parse_str(r.get::<String, _>("id").as_str())?;
+        keys.insert(r.get::<String, _>("key_hash"), KeyEntry { id, user_id });
     }
 
     // 重启恢复:从库内日/月用量初始化预算窗口(仅预算用户)。
@@ -697,10 +708,12 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
             kind, base_url: r.get("base_url"), api_key: r.get("api_key"), concurrency: None,
         });
     }
-    for r in q!("SELECT id, provider, upstream_model FROM models").fetch_all(pool).await? {
+    for r in q!("SELECT id, provider, upstream_model, input_price, output_price FROM models").fetch_all(pool).await? {
         routing.models.insert(r.get::<i64, _>("id"), ModelDef {
             provider: r.get("provider"),
             upstream_model: r.get("upstream_model"),
+            input_price: r.try_get("input_price").unwrap_or(None),
+            output_price: r.try_get("output_price").unwrap_or(None),
         });
     }
     for r in q!("SELECT id, name, strategy FROM model_groups").fetch_all(pool).await? {
@@ -1506,7 +1519,7 @@ pub async fn usage_rows(
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = if let Some(uid) = user_id {
         q!(
-            "SELECT user_id, model, provider, input_tokens, output_tokens, charged_tokens, status, created_at
+            "SELECT user_id, model, provider, input_tokens, output_tokens, charged_tokens, cost_usd, status, created_at
              FROM usage_logs WHERE user_id = ? ORDER BY id DESC LIMIT ?",
         )
         .bind(uid.to_string())
@@ -1515,7 +1528,7 @@ pub async fn usage_rows(
         .await?
     } else {
         q!(
-            "SELECT user_id, model, provider, input_tokens, output_tokens, charged_tokens, status, created_at
+            "SELECT user_id, model, provider, input_tokens, output_tokens, charged_tokens, cost_usd, status, created_at
              FROM usage_logs ORDER BY id DESC LIMIT ?",
         )
         .bind(limit)
@@ -1532,6 +1545,7 @@ pub async fn usage_rows(
                 "input_tokens": r.get::<Option<i64>, _>("input_tokens"),
                 "output_tokens": r.get::<Option<i64>, _>("output_tokens"),
                 "charged_tokens": r.get::<Option<i64>, _>("charged_tokens"),
+                "cost_usd": r.try_get::<Option<f64>, _>("cost_usd").ok().flatten(),
                 "status": r.get::<Option<i64>, _>("status"),
                 "created_at": r.get::<String, _>("created_at"),
             })
@@ -1557,7 +1571,7 @@ pub async fn usage_rows_page(
     };
     let rows = if let Some(uid) = user_id {
         q!(
-            "SELECT user_id, model, provider, input_tokens, output_tokens, charged_tokens, status, created_at
+            "SELECT user_id, model, provider, input_tokens, output_tokens, charged_tokens, cost_usd, status, created_at
              FROM usage_logs WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
         )
         .bind(uid.to_string())
@@ -1567,7 +1581,7 @@ pub async fn usage_rows_page(
         .await?
     } else {
         q!(
-            "SELECT user_id, model, provider, input_tokens, output_tokens, charged_tokens, status, created_at
+            "SELECT user_id, model, provider, input_tokens, output_tokens, charged_tokens, cost_usd, status, created_at
              FROM usage_logs ORDER BY id DESC LIMIT ? OFFSET ?",
         )
         .bind(page_size)
@@ -1585,6 +1599,7 @@ pub async fn usage_rows_page(
                     "input_tokens": r.get::<Option<i64>, _>("input_tokens"),
                     "output_tokens": r.get::<Option<i64>, _>("output_tokens"),
                     "charged_tokens": r.get::<Option<i64>, _>("charged_tokens"),
+                    "cost_usd": r.try_get::<Option<f64>, _>("cost_usd").ok().flatten(),
                     "status": r.get::<Option<i64>, _>("status"),
                     "created_at": r.get::<String, _>("created_at"),
                 })
@@ -1646,6 +1661,71 @@ pub async fn overview(pool: &Db) -> anyhow::Result<serde_json::Value> {
     }))
 }
 
+/// 用量三维聚合:按供应商 / 用户 / 密钥分组(费用降序,各取前 10),供用量页横向条形图。
+pub async fn usage_breakdown(pool: &Db) -> anyhow::Result<serde_json::Value> {
+    let providers = q!(
+        "SELECT COALESCE(provider, '(未知)') AS label,
+                COUNT(*) AS calls,
+                CAST(COALESCE(SUM(input_tokens),0) AS BIGINT) AS input_tokens,
+                CAST(COALESCE(SUM(output_tokens),0) AS BIGINT) AS output_tokens,
+                CAST(COALESCE(SUM(charged_tokens),0) AS BIGINT) AS charged_tokens,
+                COALESCE(SUM(cost_usd),0.0) AS cost_usd
+         FROM usage_logs
+         GROUP BY COALESCE(provider, '(未知)')
+         ORDER BY cost_usd DESC
+         LIMIT 10"
+    )
+    .fetch_all(pool)
+    .await?;
+    let users = q!(
+        "SELECT COALESCE(u.username, u.phone, l.user_id) AS label,
+                COUNT(*) AS calls,
+                CAST(COALESCE(SUM(l.input_tokens),0) AS BIGINT) AS input_tokens,
+                CAST(COALESCE(SUM(l.output_tokens),0) AS BIGINT) AS output_tokens,
+                CAST(COALESCE(SUM(l.charged_tokens),0) AS BIGINT) AS charged_tokens,
+                COALESCE(SUM(l.cost_usd),0.0) AS cost_usd
+         FROM usage_logs l LEFT JOIN users u ON u.id = l.user_id
+         GROUP BY l.user_id, u.username, u.phone
+         ORDER BY cost_usd DESC
+         LIMIT 10"
+    )
+    .fetch_all(pool)
+    .await?;
+    let keys = q!(
+        "SELECT COALESCE(k.key_prefix, '(未知密钥)') AS label,
+                COUNT(*) AS calls,
+                CAST(COALESCE(SUM(l.input_tokens),0) AS BIGINT) AS input_tokens,
+                CAST(COALESCE(SUM(l.output_tokens),0) AS BIGINT) AS output_tokens,
+                CAST(COALESCE(SUM(l.charged_tokens),0) AS BIGINT) AS charged_tokens,
+                COALESCE(SUM(l.cost_usd),0.0) AS cost_usd
+         FROM usage_logs l LEFT JOIN api_keys k ON k.id = l.key_id
+         GROUP BY l.key_id, k.key_prefix
+         ORDER BY cost_usd DESC
+         LIMIT 10"
+    )
+    .fetch_all(pool)
+    .await?;
+    let map = |rows: &[sqlx::any::AnyRow]| -> Vec<serde_json::Value> {
+        rows.iter()
+            .map(|r| {
+                serde_json::json!({
+                    "label": r.get::<String, _>("label"),
+                    "calls": r.get::<i64, _>("calls"),
+                    "input_tokens": r.get::<i64, _>("input_tokens"),
+                    "output_tokens": r.get::<i64, _>("output_tokens"),
+                    "charged_tokens": r.get::<i64, _>("charged_tokens"),
+                    "cost_usd": r.try_get::<f64, _>("cost_usd").unwrap_or(0.0),
+                })
+            })
+            .collect()
+    };
+    Ok(serde_json::json!({
+        "providers": map(&providers),
+        "users": map(&users),
+        "keys": map(&keys),
+    }))
+}
+
 /// 写一条用量日志。
 pub async fn insert_usage(
     pool: &Db,
@@ -1653,16 +1733,18 @@ pub async fn insert_usage(
 ) -> anyhow::Result<()> {
     q!(
         "INSERT INTO usage_logs
-         (user_id, model, provider, upstream_model, input_tokens, output_tokens, charged_tokens, status, ts, created_at, request_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         (user_id, key_id, model, provider, upstream_model, input_tokens, output_tokens, charged_tokens, cost_usd, status, ts, created_at, request_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(ev.user_id.to_string())
+    .bind(ev.key_id.map(|k| k.to_string()))
     .bind(&ev.model)
     .bind(&ev.provider)
     .bind(&ev.upstream_model)
     .bind(ev.input_tokens as i64)
     .bind(ev.output_tokens as i64)
     .bind(ev.charged_tokens)
+    .bind(ev.cost_usd)
     .bind(ev.status as i64)
     .bind(now_secs())
     .bind(now_iso())

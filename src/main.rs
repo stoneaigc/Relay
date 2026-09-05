@@ -215,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/users/:id/usage", get(admin::user_usage))
         .route("/users/:id/series", get(admin::user_series))
         .route("/usage", get(admin::global_usage))
+        .route("/usage/breakdown", get(admin::usage_breakdown))
         .route("/rewards", get(admin::list_rewards))
         .route("/rewards/:id/review", post(admin::review_reward))
         .route("/reward-tasks", get(admin::list_reward_tasks).post(admin::create_reward_task))
@@ -309,7 +310,19 @@ async fn background_task(
         tokio::select! {
             maybe = rx.recv() => {
                 match maybe {
-                    Some(ev) => {
+                    Some(mut ev) => {
+                        // 费用折算(消费端单点):按 (provider, upstream_model) 查模型价格,
+                        // 估基础成本后用 charged/(input+output) 反推总倍率,与计费口径完全一致;未定价记 0。
+                        let total = ev.input_tokens + ev.output_tokens;
+                        if total > 0 {
+                            let prices = state.routing.load().models.values()
+                                .find(|m| m.provider == ev.provider && m.upstream_model == ev.upstream_model)
+                                .map(|m| (m.input_price, m.output_price));
+                            if let Some((pi, po)) = prices {
+                                let base = crate::pricing::estimate_cost(&ev.upstream_model, ev.input_tokens as u64, ev.output_tokens as u64, pi, po);
+                                ev.cost_usd = crate::pricing::billed_cost(base, ev.input_tokens as u64, ev.output_tokens as u64, ev.charged_tokens);
+                            }
+                        }
                         if let Err(e) = storage::insert_usage(&state.db, &ev).await {
                             tracing::error!("insert usage failed: {e}");
                         }

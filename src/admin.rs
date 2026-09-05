@@ -447,6 +447,18 @@ pub async fn global_usage(
     })))
 }
 
+/// GET /admin/usage/breakdown —— 用量聚合:按供应商/用户/密钥三个维度的 top10(含费用)。
+pub async fn usage_breakdown(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let data = storage::usage_breakdown(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(data))
+}
+
 // ---- 奖励任务(后台配置)----
 
 /// GET /admin/reward-tasks —— 奖励任务列表(含未启用)。

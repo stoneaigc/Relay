@@ -292,7 +292,7 @@ pub async fn create_key(
     let (plaintext, hash, row) = storage::create_key(&state.db, uid, &body.interface_kind)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    state.keys.insert(hash, KeyEntry { user_id: uid });
+    state.keys.insert(hash, KeyEntry { id: row.id, user_id: uid });
 
     Ok(Json(json!({
         "id": row.id,
@@ -323,7 +323,7 @@ pub async fn rotate_key(
     let (plaintext, hash, row) = storage::create_key(&state.db, uid, &body.interface_kind)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    state.keys.insert(hash, KeyEntry { user_id: uid });
+    state.keys.insert(hash, KeyEntry { id: row.id, user_id: uid });
 
     Ok(Json(json!({
         "id": row.id,
@@ -352,7 +352,8 @@ pub async fn chat(
 ) -> Result<axum::response::Response, ApiError> {
     let uid = portal_user(&state, &headers)?;
     let user = state.user(&uid).ok_or(ApiError::InvalidKey)?;
-    crate::handlers::run_chat(Arc::clone(&state), user, body).await
+    // 门户对话走 JWT 鉴权,无 API Key,密钥维度记 None。
+    crate::handlers::run_chat(Arc::clone(&state), user, None, body).await
 }
 
 /// GET /portal/series —— 当前用户最近 30 天每日消耗(曲线)。

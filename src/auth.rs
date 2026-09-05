@@ -8,6 +8,8 @@ use crate::storage::hash_key;
 
 pub struct AuthCtx {
     pub user: Arc<UserState>,
+    /// 命中的 API Key id(用量明细按密钥维度归因)。
+    pub key_id: uuid::Uuid,
 }
 
 /// 从请求头取 API Key 并在内存中校验(不查库)。
@@ -25,7 +27,7 @@ pub fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<AuthCtx, Ap
         return Err(ApiError::AccountDisabled);
     }
 
-    Ok(AuthCtx { user })
+    Ok(AuthCtx { user, key_id: entry.id })
 }
 
 fn extract_key(headers: &HeaderMap) -> Option<String> {

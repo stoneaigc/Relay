@@ -219,6 +219,9 @@ export const api = {
     return req(`/admin/api/usage${s ? "?" + s : ""}`);
   },
 
+  // ---- 用量分布(按供应商/用户/密钥聚合,top10) ----
+  usageBreakdown: (): Promise<UsageBreakdownResp> => req("/admin/api/usage/breakdown"),
+
   rewards: (status?: "pending" | "approved" | "rejected", page?: number, pageSize?: number): Promise<RewardListResp> => {
     const qs = new URLSearchParams();
     if (status) qs.set("status", status);
@@ -607,4 +610,23 @@ export interface RequestLogRow {
   charged_tokens: number;
   /** unix 秒 */
   ts: number;
+}
+
+// ================== 用量分布 ==================
+
+/** 单个聚合行(按供应商/用户/密钥任一维度) */
+export interface UsageBreakdownRow {
+  label: string;
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  charged_tokens: number;
+  /** 计费口径成本(USD),消费端折算;未定价为 0 */
+  cost_usd: number;
+}
+
+export interface UsageBreakdownResp {
+  providers: UsageBreakdownRow[];
+  users: UsageBreakdownRow[];
+  keys: UsageBreakdownRow[];
 }
