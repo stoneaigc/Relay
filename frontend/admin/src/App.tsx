@@ -1245,6 +1245,7 @@ function GroupsPanel() {
     round_robin: "简单轮询",
     priority: "优先级（故障转移链）",
     cost_aware: "成本优先",
+    latency_aware: "延迟优先",
   };
   const curStrategy = groups.find((g) => g.id === sel)?.strategy ?? "weighted_random";
   const filteredGroups = groups.filter((g) => !gq.trim() || g.name.includes(gq.trim()));
@@ -1295,6 +1296,7 @@ function GroupsPanel() {
                     <option value="round_robin">简单轮询</option>
                     <option value="priority">优先级（故障转移链）</option>
                     <option value="cost_aware">成本优先</option>
+                    <option value="latency_aware">延迟优先</option>
                   </select>
                 </div>
               )}
@@ -1303,6 +1305,7 @@ function GroupsPanel() {
           </div>
           {curStrategy === "priority" && <p className="mt-1 text-[11px] text-muted-foreground">优先级模式:数字越大越优先;主模型故障时自动切换到下一个。</p>}
           {curStrategy === "cost_aware" && <p className="mt-1 text-[11px] text-muted-foreground">成本优先模式:按 单价×倍率 从低到高选择;未定价模型自动殿后,同价随机分摊。</p>}
+          {curStrategy === "latency_aware" && <p className="mt-1 text-[11px] text-muted-foreground">延迟优先模式:按窗口内 P50 延迟从低到高选择;无数据候选自动殿后随机分摊,快照每 15 秒刷新一次。</p>}
         </CardHeader>
         <CardContent className="min-h-0 flex-1 overflow-auto">
           {sel == null ? <p className="text-sm text-muted-foreground">先选择左侧一个模型组</p> : (

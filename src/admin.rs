@@ -4,6 +4,7 @@ use std::sync::Arc;
 use axum::{
     extract::{Path, State},
     http::HeaderMap,
+    response::IntoResponse,
     Json,
 };
 use serde::Deserialize;
@@ -2083,6 +2084,183 @@ pub async fn metrics_overview(
         obj.remove("upstream_series");
     }
     Ok(Json(out))
+}
+
+/// GET /metrics —— Prometheus exposition 文本导出(内存滚动 48h 窗口)。
+/// 鉴权:管理端 JWT(与 /admin/api 一致),或 `Bearer <metrics.export_token>`(供 Prometheus 抓取器使用;未配置该令牌则仅 JWT 可访问)。
+pub async fn metrics_export(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    if admin_guard(&state, &headers).is_err() {
+        let token_ok = {
+            let cfg = state.config();
+            let want = cfg.metrics.export_token.clone();
+            !want.is_empty()
+                && headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.strip_prefix("Bearer "))
+                    .map(|t| t == want)
+                    .unwrap_or(false)
+        };
+        if !token_ok {
+            return Err(ApiError::Unauthorized);
+        }
+    }
+    let snap = state.export_snapshot().await;
+    let body = render_prometheus(&snap);
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
+        .into_response())
+}
+
+/// Prometheus label 值转义(反斜杠 / 双引号 / 换行)。
+fn escape_label(v: &str) -> String {
+    v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+}
+
+/// 数值输出:非有限数(如 NaN/缺失)统一输出 0,保证 exposition 格式合法。
+fn prom_num(v: Option<f64>) -> String {
+    match v {
+        Some(x) if x.is_finite() => format!("{x}"),
+        _ => "0".to_string(),
+    }
+}
+
+/// 把 export_snapshot 渲染为 Prometheus exposition 文本(手写,零新依赖)。
+fn render_prometheus(snap: &Value) -> String {
+    let mut out = String::with_capacity(4096);
+    let f64_at = |v: &Value, k: &str| -> Option<f64> { v.get(k).and_then(|x| x.as_f64()) };
+    let window = snap.get("window_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+    let empty = json!({});
+    let g = snap.get("global").unwrap_or(&empty);
+    let providers = snap
+        .get("providers")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // ---- 窗口说明 ----
+    out.push_str("# HELP relay_metrics_window_secs 指标聚合窗口长度(秒),内存滚动窗口,重启后从零累积。\n");
+    out.push_str("# TYPE relay_metrics_window_secs gauge\n");
+    out.push_str(&format!("relay_metrics_window_secs {window}\n"));
+
+    // ---- 全局请求(按结果分类)----
+    out.push_str("# HELP relay_upstream_requests_total 数据面请求数(按范围与结果分类;窗口滑动导致数值非单调)。\n");
+    out.push_str("# TYPE relay_upstream_requests_total counter\n");
+    for status in ["success", "fail_unavailable", "fail_other"] {
+        out.push_str(&format!(
+            "relay_upstream_requests_total{{scope=\"global\",status=\"{status}\"}} {}\n",
+            prom_num(f64_at(g, status))
+        ));
+    }
+
+    // ---- per-provider 请求 ----
+    for p in &providers {
+        let name = p.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let lb = format!("provider=\"{}\"", escape_label(name));
+        for status in ["success", "fail_unavailable", "fail_other"] {
+            out.push_str(&format!(
+                "relay_upstream_requests_total{{{lb},status=\"{status}\"}} {}\n",
+                prom_num(f64_at(p, status))
+            ));
+        }
+    }
+
+    // ---- per-provider 延迟(summary:分位 + sum/count,sum 由 avg×count 反推)----
+    out.push_str("# HELP relay_upstream_request_duration_ms 上游成功请求延迟(毫秒)。\n");
+    out.push_str("# TYPE relay_upstream_request_duration_ms summary\n");
+    for p in &providers {
+        let name = p.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let lb = format!("provider=\"{}\"", escape_label(name));
+        for (q, key) in [("0.95", "p95_ms"), ("0.99", "p99_ms")] {
+            out.push_str(&format!(
+                "relay_upstream_request_duration_ms{{{lb},quantile=\"{q}\"}} {}\n",
+                prom_num(f64_at(p, key))
+            ));
+        }
+        let success = f64_at(p, "success").unwrap_or(0.0);
+        let sum = f64_at(p, "avg_ms").unwrap_or(0.0) * success;
+        out.push_str(&format!(
+            "relay_upstream_request_duration_ms_sum{{{lb}}} {}\n",
+            prom_num(Some(sum))
+        ));
+        out.push_str(&format!(
+            "relay_upstream_request_duration_ms_count{{{lb}}} {}\n",
+            prom_num(Some(success))
+        ));
+    }
+
+    // ---- per-provider 成功率 / 熔断 ----
+    out.push_str("# HELP relay_upstream_success_ratio 上游请求成功率(窗口内 success/requests)。\n");
+    out.push_str("# TYPE relay_upstream_success_ratio gauge\n");
+    for p in &providers {
+        let name = p.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let lb = format!("provider=\"{}\"", escape_label(name));
+        out.push_str(&format!(
+            "relay_upstream_success_ratio{{{lb}}} {}\n",
+            prom_num(f64_at(p, "success_rate"))
+        ));
+    }
+    out.push_str("# HELP relay_upstream_breaker_state 上游熔断器状态(1=熔断中,0=正常)。\n");
+    out.push_str("# TYPE relay_upstream_breaker_state gauge\n");
+    out.push_str("# HELP relay_upstream_breaker_fail_count 上游熔断器当前窗口失败计数。\n");
+    out.push_str("# TYPE relay_upstream_breaker_fail_count gauge\n");
+    for p in &providers {
+        let name = p.get("provider").and_then(|v| v.as_str()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let lb = format!("provider=\"{}\"", escape_label(name));
+        let breaker = p.get("breaker").unwrap_or(&empty);
+        let broken = breaker.get("is_broken").and_then(|v| v.as_bool()).unwrap_or(false);
+        let fails = f64_at(breaker, "fail_count").unwrap_or(0.0);
+        out.push_str(&format!(
+            "relay_upstream_breaker_state{{{lb}}} {}\n",
+            if broken { 1 } else { 0 }
+        ));
+        out.push_str(&format!(
+            "relay_upstream_breaker_fail_count{{{lb}}} {}\n",
+            prom_num(Some(fails))
+        ));
+    }
+
+    // ---- 全局 tokens ----
+    out.push_str("# HELP relay_tokens_input_total 输入 token 总量(窗口内,含失败请求已消耗部分)。\n");
+    out.push_str("# TYPE relay_tokens_input_total counter\n");
+    out.push_str(&format!("relay_tokens_input_total {}\n", prom_num(f64_at(g, "input_tokens"))));
+    out.push_str("# HELP relay_tokens_output_total 输出 token 总量(窗口内)。\n");
+    out.push_str("# TYPE relay_tokens_output_total counter\n");
+    out.push_str(&format!("relay_tokens_output_total {}\n", prom_num(f64_at(g, "output_tokens"))));
+
+    // ---- 语义缓存 ----
+    out.push_str("# HELP relay_cache_requests_total 语义缓存请求数(命中/未命中)。\n");
+    out.push_str("# TYPE relay_cache_requests_total counter\n");
+    let cache = snap.get("cache").unwrap_or(&empty);
+    let hits = f64_at(cache, "hits").unwrap_or(0.0);
+    let misses = f64_at(cache, "misses").unwrap_or(0.0);
+    out.push_str(&format!("relay_cache_requests_total{{result=\"hit\"}} {}\n", prom_num(Some(hits))));
+    out.push_str(&format!("relay_cache_requests_total{{result=\"miss\"}} {}\n", prom_num(Some(misses))));
+
+    // ---- 用户 ----
+    out.push_str("# HELP relay_users_total 内存中活跃用户会话数(进程重启后重建)。\n");
+    out.push_str("# TYPE relay_users_total gauge\n");
+    let users = f64_at(snap, "users").unwrap_or(0.0);
+    out.push_str(&format!("relay_users_total {}\n", prom_num(Some(users))));
+
+    out
 }
 
 #[cfg(test)]

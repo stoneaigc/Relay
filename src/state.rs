@@ -448,6 +448,8 @@ pub struct AppState {
     /// ---------- 组级负载策略的运行态 ----------
     /// 轮询游标(加权轮询 / 简单轮询用):group_id -> 自增计数。跨路由热替换存活。
     pub round_robin: DashMap<i64, std::sync::atomic::AtomicU32>,
+    /// 延迟优先策略用的 P50 延迟快照:provider 名 -> P50(ms)。由后台任务周期刷新,热路径只读。
+    pub latency_p50: DashMap<String, u64>,
     /// 高峰/低谷时段判断用的时区偏移秒数(Asia/Shanghai → 28800;DST 感知)。
     pub tz_offset_secs: i32,
     /// ---------- 路由失败审计(ring buffer,最新 push_back) ----------
@@ -1227,6 +1229,57 @@ impl AppState {
             "items": items,
         })
     }
+
+    /// 刷新延迟优先策略的 P50 快照:按内存路由表逐个供应商聚合近 1h 指标,取成功请求的 P50(ms)。
+    /// 由 main.rs 后台任务周期调用;窗口内无请求的供应商保留上次快照(新供应商冷启动随机分摊)。
+    pub async fn refresh_latency_p50(&self) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let since_min = now.saturating_sub(3600) / 60 * 60;
+        let routing = self.routing.load();
+        for (name, conn) in routing.providers.iter() {
+            let key = UpstreamKey::new(conn.kind, &conn.base_url, conn.api_key.as_deref());
+            let (total, _) = aggregate_timebuckets(
+                self.metrics.get_bucket(Some(key.clone())),
+                since_min,
+                0,
+                false,
+            )
+            .await;
+            if total.req == 0 {
+                continue;
+            }
+            self.latency_p50.insert(name.clone(), total.p(0.50) as u64);
+        }
+    }
+
+    /// Prometheus /metrics 导出数据快照:全局桶(48h 全窗口)+ per-provider 健康聚合 + 语义缓存命中。
+    pub async fn export_snapshot(&self) -> Value {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let window_secs = METRIC_MIN_WINDOW as u64 * 60;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let since_min = now.saturating_sub(window_secs) / 60 * 60;
+        let (global, _) = aggregate_timebuckets(self.metrics.get_bucket(None), since_min, 0, false).await;
+        let health = self.provider_health(Some(window_secs)).await;
+        let cache = self.semantic_cache.stats_snapshot();
+        json!({
+            "window_secs": window_secs,
+            "global": {
+                "requests": global.req,
+                "success": global.success,
+                "fail_unavailable": global.fail_unavail,
+                "fail_other": global.fail_other,
+                "input_tokens": global.input_tokens,
+                "output_tokens": global.output_tokens,
+            },
+            "providers": health.get("items").cloned().unwrap_or_else(|| json!([])),
+            "cache": {
+                "hits": cache.get("hits").and_then(|v| v.as_u64()).unwrap_or(0),
+                "misses": cache.get("misses").and_then(|v| v.as_u64()).unwrap_or(0),
+            },
+            "users": self.users.len(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1479,6 +1532,7 @@ mod tests {
             upstream_slots: DashMap::new(),
             upstream_breakers: DashMap::new(),
             round_robin: DashMap::new(),
+            latency_p50: DashMap::new(),
             tz_offset_secs: 28800,
             audit_failures: AsyncMutex::new(VecDeque::new()),
             metrics: MetricsStore::default(),

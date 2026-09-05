@@ -76,7 +76,8 @@ fn resolve_with_counter(
 ) -> Vec<(String, String, u32)> {
     let mut r = routing.clone();
     r.group_strategy.insert(1, strategy);
-    let result = r.resolve_all(1, requested, rr, 28800, now).unwrap();
+    let lat = dashmap::DashMap::new();
+    let result = r.resolve_all(1, requested, rr, &lat, 28800, now).unwrap();
     result.into_iter().map(|r| (r.upstream_model, r.base_url, r.weight)).collect()
 }
 
@@ -215,7 +216,8 @@ fn time_rule_overrides_weight() {
     // 注入固定时间:2026-08-30 10:00 UTC+8 = 02:00 UTC(周日,weekdays 0-6 命中)
     let fixed_time = Utc.with_ymd_and_hms(2026, 8, 30, 2, 0, 0).unwrap();
     let rr = dashmap::DashMap::new();
-    let result = rt.resolve_all(1, "chat", &rr, 28800, Some(fixed_time)).unwrap();
+    let lat = dashmap::DashMap::new();
+    let result = rt.resolve_all(1, "chat", &rr, &lat, 28800, Some(fixed_time)).unwrap();
     // 在时段覆盖下,OpenAI 权重变为 100,DeepSeek 变为 1
     // Priority 策略下 OpenAI 应该排第一
     let first = &result[0];
@@ -245,7 +247,8 @@ fn time_rule_disabled_ignored() {
 
     let fixed_time = Utc.with_ymd_and_hms(2026, 8, 30, 2, 0, 0).unwrap();
     let rr = dashmap::DashMap::new();
-    let result = rt.resolve_all(1, "chat", &rr, 28800, Some(fixed_time)).unwrap();
+    let lat = dashmap::DashMap::new();
+    let result = rt.resolve_all(1, "chat", &rr, &lat, 28800, Some(fixed_time)).unwrap();
     // 停用的规则不应生效,倍率应该是 model 原始值(无时段倍率)
     let first = result.iter().find(|r| r.upstream_model == "gpt-4o").unwrap();
     assert!((first.multiplier - 1.5).abs() < 0.01, "disabled rule should not affect multiplier, got {}", first.multiplier);
@@ -257,7 +260,8 @@ fn time_rule_disabled_ignored() {
 fn resolve_unknown_model_returns_error() {
     let rt = make_test_routing();
     let rr = dashmap::DashMap::new();
-    let result = rt.resolve_all(1, "nonexistent", &rr, 28800, None);
+    let lat = dashmap::DashMap::new();
+    let result = rt.resolve_all(1, "nonexistent", &rr, &lat, 28800, None);
     assert!(result.is_err());
 }
 
@@ -265,7 +269,8 @@ fn resolve_unknown_model_returns_error() {
 fn resolve_unknown_group_returns_error() {
     let rt = make_test_routing();
     let rr = dashmap::DashMap::new();
-    let result = rt.resolve_all(999, "chat", &rr, 28800, None);
+    let lat = dashmap::DashMap::new();
+    let result = rt.resolve_all(999, "chat", &rr, &lat, 28800, None);
     assert!(result.is_err());
 }
 
@@ -287,7 +292,8 @@ fn multiplier_includes_time_multiplier() {
 
     let fixed_time = Utc.with_ymd_and_hms(2026, 8, 30, 2, 0, 0).unwrap();
     let rr = dashmap::DashMap::new();
-    let result = rt.resolve_all(1, "chat", &rr, 28800, Some(fixed_time)).unwrap();
+    let lat = dashmap::DashMap::new();
+    let result = rt.resolve_all(1, "chat", &rr, &lat, 28800, Some(fixed_time)).unwrap();
     // OpenAI: multiplier=1.5 * time_multiplier=2.0 = 3.0
     let openai = result.iter().find(|r| r.upstream_model == "gpt-4o").unwrap();
     assert!((openai.multiplier - 3.0).abs() < 0.01);
@@ -304,11 +310,64 @@ fn different_public_names_independent_routing() {
     ]);
 
     let rr1 = dashmap::DashMap::new();
-    let chat = rt.resolve_all(1, "chat", &rr1, 28800, None).unwrap();
+    let lat1 = dashmap::DashMap::new();
+    let chat = rt.resolve_all(1, "chat", &rr1, &lat1, 28800, None).unwrap();
     let rr2 = dashmap::DashMap::new();
-    let fast = rt.resolve_all(1, "fast", &rr2, 28800, None).unwrap();
+    let lat2 = dashmap::DashMap::new();
+    let fast = rt.resolve_all(1, "fast", &rr2, &lat2, 28800, None).unwrap();
 
     assert_eq!(chat.len(), 3); // chat 有 3 个候选
     assert_eq!(fast.len(), 1); // fast 只有 1 个
     assert_eq!(fast[0].upstream_model, "gpt-4o-mini");
+}
+
+// ==================== 延迟优先 ====================
+
+#[test]
+fn latency_aware_orders_by_p50() {
+    let rt = make_test_routing();
+    let lat = dashmap::DashMap::new();
+    // P50:deepseek(200) < anthropic(450) < openai(800)
+    lat.insert("p-deepseek".to_string(), 200u64);
+    lat.insert("p-anthropic".to_string(), 450u64);
+    lat.insert("p-openai".to_string(), 800u64);
+    let rr = dashmap::DashMap::new();
+    let mut r = rt.clone();
+    r.group_strategy.insert(1, Strategy::LatencyAware);
+    let result = r.resolve_all(1, "chat", &rr, &lat, 28800, None).unwrap();
+    let models: Vec<&str> = result.iter().map(|x| x.upstream_model.as_str()).collect();
+    assert_eq!(models, vec!["deepseek-chat", "claude-sonnet-4-20250514", "gpt-4o"]);
+}
+
+#[test]
+fn latency_aware_no_data_goes_last() {
+    let rt = make_test_routing();
+    let lat = dashmap::DashMap::new();
+    // 只给 deepseek 数据,openai/anthropic 无数据殿后(彼此随机)
+    lat.insert("p-deepseek".to_string(), 300u64);
+    let rr = dashmap::DashMap::new();
+    let mut r = rt.clone();
+    r.group_strategy.insert(1, Strategy::LatencyAware);
+    let result = r.resolve_all(1, "chat", &rr, &lat, 28800, None).unwrap();
+    assert_eq!(result[0].upstream_model, "deepseek-chat");
+    assert_eq!(result.len(), 3);
+}
+
+#[test]
+fn latency_aware_dedup_still_applies() {
+    let mut rt = make_test_routing();
+    // 加一条与 model_id=1 相同上游的新路由(不同 model_id),延迟优先下也应去重
+    rt.groups.get_mut(&1).unwrap().get_mut("chat").unwrap()
+        .push(Target { model_id: 101, weight: 1, multiplier: 1.0 });
+    rt.models.insert(101, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into(), input_price: None, output_price: None });
+    let lat = dashmap::DashMap::new();
+    lat.insert("p-openai".to_string(), 100u64);
+    lat.insert("p-deepseek".to_string(), 500u64);
+    let rr = dashmap::DashMap::new();
+    let mut r = rt.clone();
+    r.group_strategy.insert(1, Strategy::LatencyAware);
+    let result = r.resolve_all(1, "chat", &rr, &lat, 28800, None).unwrap();
+    let gpt4o_count = result.iter().filter(|x| x.upstream_model == "gpt-4o").count();
+    assert_eq!(gpt4o_count, 1);
+    assert_eq!(result.len(), 3);
 }

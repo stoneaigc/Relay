@@ -169,6 +169,7 @@ async fn main() -> anyhow::Result<()> {
         upstream_slots: DashMap::new(),
         upstream_breakers: DashMap::new(),
         round_robin: DashMap::new(),
+        latency_p50: DashMap::new(),
         tz_offset_secs,
         audit_failures: AsyncMutex::new(VecDeque::with_capacity(AUDIT_FAILURE_CAP)),
         metrics: crate::state::MetricsStore::default(),
@@ -178,6 +179,19 @@ async fn main() -> anyhow::Result<()> {
 
     // 后台:用量落盘 + 请求链路落库 + 周期性余额回写。
     tokio::spawn(background_task(Arc::clone(&state), usage_rx, request_log_rx));
+
+    // 后台:延迟优先策略的 P50 快照周期刷新(独立于落盘任务,15s 一次,只读内存桶)。
+    tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(15));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                state.refresh_latency_p50().await;
+            }
+        }
+    });
 
     // ---- 门户 API(挂到 /portal/api)----
     let portal_api = Router::new()
@@ -273,6 +287,8 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/healthz", get(handlers::health))
+        // Prometheus 指标导出(管理端 JWT 或 metrics.export_token 鉴权)。
+        .route("/metrics", get(admin::metrics_export))
         // ---- 数据面(给 SDK 用)----
         .route("/v1/models", get(handlers::list_models))
         .route("/v1/chat/completions", post(handlers::chat_completions))

@@ -68,6 +68,8 @@ pub enum Strategy {
     Priority,
     /// 成本优先:按预估单价升序选最便宜,同价随机(未定价殿后);不健康候选由请求侧熔断器跳过。
     CostAware,
+    /// 延迟优先:按窗口内 P50 延迟升序选最快,无数据候选殿后且随机分摊;同值随机。
+    LatencyAware,
 }
 
 impl Strategy {
@@ -78,6 +80,7 @@ impl Strategy {
             Strategy::RoundRobin => "round_robin",
             Strategy::Priority => "priority",
             Strategy::CostAware => "cost_aware",
+            Strategy::LatencyAware => "latency_aware",
         }
     }
 }
@@ -89,6 +92,7 @@ pub fn strategy_from_str(s: &str) -> Strategy {
         "round_robin" => Strategy::RoundRobin,
         "priority" => Strategy::Priority,
         "cost_aware" => Strategy::CostAware,
+        "latency_aware" => Strategy::LatencyAware,
         _ => Strategy::WeightedRandom,
     }
 }
@@ -142,12 +146,14 @@ impl Routing {
     /// 1) 先按该组绑定的负载策略算出候选顺序(第一条就是本次命中的目标,后面是 failover 次序);
     /// 2) 然后按 (kind + base_url + upstream_model) 去重,避免重复打同一个上游。
     /// `rr_counter`: 组级轮询游标(加权轮询 / 简单轮询需要跨请求记住轮到哪),由 AppState 持有。
+    /// `lat_p50`: 供应商名 -> P50 延迟(ms)的快照(延迟优先策略用),由 AppState 后台周期刷新。
     /// `now`: 可选的当前时间(测试注入用);None 则用 Utc::now()。
     pub fn resolve_all(
         &self,
         group_id: i64,
         requested: &str,
         rr_counter: &dashmap::DashMap<i64, std::sync::atomic::AtomicU32>,
+        lat_p50: &dashmap::DashMap<String, u64>,
         tz_offset_secs: i32,
         now: Option<chrono::DateTime<Utc>>,
     ) -> Result<Vec<Resolved>, ApiError> {
@@ -182,6 +188,7 @@ impl Routing {
             Strategy::WeightedRoundRobin => order_round_robin(group_id, sort_targets, rr_counter, false),
             Strategy::Priority => order_by_priority(sort_targets),
             Strategy::CostAware => order_by_cost(sort_targets, &self.models),
+            Strategy::LatencyAware => order_by_latency(sort_targets, &self.models, lat_p50),
         };
         let mut seen: std::collections::HashSet<(ProviderKind, String, String)> = std::collections::HashSet::new();
         let mut out: Vec<Resolved> = Vec::new();
@@ -341,6 +348,30 @@ fn order_by_cost(targets: &[Target], models: &HashMap<i64, ModelDef>) -> Vec<usi
     keyed.into_iter().map(|(i, _)| i).collect()
 }
 
+/// 单个目标的 P50 延迟基数:经模型查供应商名,再查快照;无数据 = u64::MAX 殿后。
+fn target_latency(t: &Target, models: &HashMap<i64, ModelDef>, lat_p50: &dashmap::DashMap<String, u64>) -> u64 {
+    models
+        .get(&t.model_id)
+        .and_then(|m| lat_p50.get(&m.provider).map(|e| *e.value()))
+        .unwrap_or(u64::MAX)
+}
+
+/// 延迟优先排序:先整体洗牌(无数据/同值随机分摊),再按 P50 升序稳定排列(无数据殿后)。
+fn order_by_latency(
+    targets: &[Target],
+    models: &HashMap<i64, ModelDef>,
+    lat_p50: &dashmap::DashMap<String, u64>,
+) -> Vec<usize> {
+    let mut keyed: Vec<(usize, u64)> = targets
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (i, target_latency(t, models, lat_p50)))
+        .collect();
+    fisher_yates_shuffle(&mut keyed);
+    keyed.sort_by(|a, b| a.1.cmp(&b.1));
+    keyed.into_iter().map(|(i, _)| i).collect()
+}
+
 /// 轮询类负载策略:生成候选顺序,第一条为「本次命中的目标」,其后为 failover 次序。
 /// - `simple_mode=true`(对应简单轮询):不看权重,每次按游标逐条轮流。
 /// - `simple_mode=false`(对应加权轮询):按命中顺序排列,再由 resolve_all 按权重轮盘驱动游标。
@@ -400,6 +431,7 @@ mod tests {
         assert_eq!(strategy_from_str("round_robin"), Strategy::RoundRobin);
         assert_eq!(strategy_from_str("priority"), Strategy::Priority);
         assert_eq!(strategy_from_str("cost_aware"), Strategy::CostAware);
+        assert_eq!(strategy_from_str("latency_aware"), Strategy::LatencyAware);
     }
 
     #[test]
@@ -410,7 +442,7 @@ mod tests {
 
     #[test]
     fn strategy_as_str_roundtrip() {
-        let strategies = [Strategy::WeightedRandom, Strategy::WeightedRoundRobin, Strategy::RoundRobin, Strategy::Priority, Strategy::CostAware];
+        let strategies = [Strategy::WeightedRandom, Strategy::WeightedRoundRobin, Strategy::RoundRobin, Strategy::Priority, Strategy::CostAware, Strategy::LatencyAware];
         for s in &strategies {
             assert_eq!(strategy_from_str(s.as_str()), *s);
         }
@@ -579,6 +611,84 @@ mod tests {
         let targets: Vec<Target> = vec![];
         let order = order_by_cost(&targets, &models);
         assert!(order.is_empty());
+    }
+
+    // ---- order_by_latency ----
+
+    fn lat_map(pairs: &[(&str, u64)]) -> dashmap::DashMap<String, u64> {
+        let m = dashmap::DashMap::new();
+        for (k, v) in pairs {
+            m.insert((*k).to_string(), *v);
+        }
+        m
+    }
+
+    #[test]
+    fn latency_order_ascending_by_p50() {
+        let mut models = HashMap::new();
+        for (id, prov, name) in [(1i64, "p-openai", "gpt-4o"), (2, "p-deepseek", "deepseek-chat"), (3, "p-anthropic", "claude")] {
+            let mut m = mdl(name, None, None);
+            m.provider = prov.into();
+            models.insert(id, m);
+        }
+        let lat = lat_map(&[("p-openai", 800), ("p-deepseek", 200), ("p-anthropic", 450)]);
+        let targets = vec![
+            Target { model_id: 1, weight: 1, multiplier: 1.0 },
+            Target { model_id: 2, weight: 1, multiplier: 1.0 },
+            Target { model_id: 3, weight: 1, multiplier: 1.0 },
+        ];
+        let order = order_by_latency(&targets, &models, &lat);
+        // P50 升序:deepseek(200) < anthropic(450) < openai(800)
+        assert_eq!(order, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn latency_order_no_data_last() {
+        let mut models = HashMap::new();
+        let mut m1 = mdl("gpt-4o", None, None);
+        m1.provider = "p-openai".into();
+        models.insert(1, m1);
+        let mut m2 = mdl("custom-x", None, None);
+        m2.provider = "p-none".into(); // 快照里没有该供应商
+        models.insert(2, m2);
+        let lat = lat_map(&[("p-openai", 800)]);
+        let targets = vec![
+            Target { model_id: 2, weight: 1, multiplier: 1.0 },
+            Target { model_id: 1, weight: 1, multiplier: 1.0 },
+        ];
+        let order = order_by_latency(&targets, &models, &lat);
+        // 有数据的在前,无数据(u64::MAX)殿后
+        assert_eq!(order, vec![1, 0]);
+    }
+
+    #[test]
+    fn latency_order_empty_snapshot_covers_all() {
+        let mut models = HashMap::new();
+        let mut m1 = mdl("gpt-4o", None, None);
+        m1.provider = "p-openai".into();
+        models.insert(1, m1);
+        let mut m2 = mdl("deepseek-chat", None, None);
+        m2.provider = "p-deepseek".into();
+        models.insert(2, m2);
+        let lat = dashmap::DashMap::new();
+        let targets = vec![
+            Target { model_id: 1, weight: 1, multiplier: 1.0 },
+            Target { model_id: 2, weight: 1, multiplier: 1.0 },
+        ];
+        let order = order_by_latency(&targets, &models, &lat);
+        // 全部无数据:同值随机,但必须覆盖全部索引
+        let mut sorted = order.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec![0, 1]);
+    }
+
+    #[test]
+    fn latency_order_single_target() {
+        let models = HashMap::new();
+        let lat = dashmap::DashMap::new();
+        let targets = vec![Target { model_id: 1, weight: 1, multiplier: 1.0 }];
+        let order = order_by_latency(&targets, &models, &lat);
+        assert_eq!(order, vec![0]);
     }
 }
 

@@ -16,7 +16,7 @@
 
 - **双协议入站**：`/v1/chat/completions`（OpenAI）与 `/v1/messages`（Anthropic），流式 / 非流式都支持。
 - **协议互转**：上游是 OpenAI 还是 Anthropic 都透明路由；支持文本、工具调用（function calling）、多模态图片（[src/translate.rs](src/translate.rs)），流式逐 chunk 回译。
-- **加权路由 / 容灾**：一个对外模型名可映射到多个上游（按权重挑选），由模型组维护。
+- **加权路由 / 容灾**：一个对外模型名可映射到多个上游（按权重挑选），由模型组维护；支持权重 / 优先级 / 成本优先 / 轮询 / **延迟优先**（P50 快照）五种负载策略。
 - **故障转移 + 熔断**：可重试错误（连接失败 / 超时 / 429 / 5xx）自动切换下一候选；连续失败触发熔断，半开探测。
 - **请求链路追踪**：每次请求完整记录候选顺序、权重、实际尝试（failover 链）、熔断跳过、tokens，管理后台可视化。
 - **全内存热路径**：鉴权、余额、并发走 `DashMap` + 原子量，热路径零同步 DB 查询；余额与用量异步落库。
@@ -139,6 +139,7 @@ Vite 已配置代理，前端请求自动转发到 `:8080`，无需处理跨域�
 | `/admin/api/request-logs?q=&limit=` | 请求链路日志（倒序，`q` 按 request_id/模型 LIKE 检索） |
 | `/admin/api/upstreams` | 上游熔断 / 并发状态；`/upstreams/reset` 重置熔断 |
 | `/admin/api/metrics?range_secs=&top_n=` | 指标大盘（聚合 + 上游 TopN + 时序） |
+| `GET /metrics` | Prometheus 文本指标导出（统一 48h 窗口：请求/状态/延迟 P95/P99/熔断/tokens/缓存/用户数）；管理端 JWT 优先，失败时 `Bearer <metrics.export_token>`（配置非空才放行），否则 401 |
 | `/admin/api/audit/failures` | 失败审计（最后失败候选） |
 | 用户 / 模型 / 组 / 路由 / 奖励 / SMTP | 见 [src/admin.rs](src/admin.rs) |
 
@@ -179,6 +180,7 @@ RELAY_DATABASE__TYPE=sqlite
 | `[email]` | `smtp_host/port/username/password/from` | 注册验证码 SMTP；`smtp_host` 空 = 开发模式。`password` 填授权码；465=SSL、587/25=STARTTLS |
 | `[defaults]` | `concurrency_limit` / `signup_grant_tokens` | 全局默认并发与新用户赠额 |
 | `[logging]` | `store` = `sqlite` \| `elasticsearch` | 请求链路日志后端；ES 为预留占位 |
+| `[metrics]` | `export_token` | `/metrics` 导出令牌：非空时 `Bearer <token>` 可代替管理端 JWT 抓取（供 Prometheus 抓取器使用）；为空时仅管理端 JWT 可访问 |
 
 > 供应商 / 模型 / 模型组 / 路由 / 奖励任务全部由管理后台维护并持久化到数据库，不在配置文件里。
 >
@@ -223,7 +225,7 @@ deploy/          安装脚本 + systemd 模板
 - [ ] RPM/TPM 限流、响应缓存
 - [ ] 第三方登录：微信 / 支付宝（当前为邮箱验证码）
 - [ ] Elasticsearch 请求日志后端（已预留 trait 与配置开关，未实现）
-- [ ] Prometheus 指标导出
+- [x] Prometheus 指标导出：`GET /metrics` 文本格式（管理端 JWT 或 `metrics.export_token` 鉴权）
 
 ---
 

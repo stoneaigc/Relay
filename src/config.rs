@@ -26,6 +26,9 @@ pub struct Config {
     pub embedding: EmbeddingConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Prometheus 指标导出(GET /metrics)配置。
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 /// 请求日志存储后端。
@@ -48,6 +51,22 @@ impl Default for LoggingConfig {
         Self {
             store: default_log_store(),
             elasticsearch_url: String::new(),
+        }
+    }
+}
+
+/// Prometheus 指标导出配置。
+#[derive(Debug, Clone, Deserialize)]
+pub struct MetricsConfig {
+    /// /metrics 导出令牌:非空时,Bearer <token> 可代替管理端 JWT 访问 /metrics(供 Prometheus 抓取器使用);为空时仅管理端 JWT 可访问。
+    #[serde(default)]
+    pub export_token: String,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            export_token: String::new(),
         }
     }
 }

@@ -124,19 +124,38 @@
 
 ## 5. 阶段三 v0.4「透明与门面」
 
-- **Prometheus** **`/metrics`**：provider\_health 数据导出（无 UI）
+> 已拍板：基准先做 relay 基线（外部对比留可选）；`GET /metrics` 默认需鉴权；API 文档页 = 管理端 + 门户双份。
 
-- **LatencyAware 策略**：MetricsStore P50 已就绪，策略下拉加选项即可（零新 UI）
+### 5.1 功能设计
 
-- **性能基准测试**：relay vs One API vs LiteLLM，RPS/P99/内存，数字进 README
+- **LatencyAware 策略**：`Strategy::LatencyAware`；P50 快照存 `DashMap<provider名, p50_ms>`，由 main.rs 后台任务每 15s 从 MetricsStore 刷新（热路径零 await，注入 resolve，与 rr_counter 同风格）；排序按 P50 升序、无数据殿后且随机、同值随机。
 
-- **模型组导入导出向导**：两步 Dialog（选范围 → 预览 diff 只读表格 → 确认）
+- **Prometheus `GET /metrics`**：手写 exposition 文本格式（零新依赖）；复用 `provider_health()`（requests/success/fail_unavailable/fail_other/P95/P99/breaker）+ tokens/缓存命中/用户数计数器；指标族：`relay_upstream_requests_total{provider,status}`、`relay_upstream_request_duration_ms{quantile}`、`relay_upstream_success_ratio`、`relay_upstream_breaker_state`、`relay_tokens_total{direction}`、`relay_cache_hits_total{type=exact|semantic}`、`relay_users_total`。鉴权：接受 admin JWT 或新增 `[metrics] export_token` 静态 token（默认空 → 仅 admin JWT），401 文案指明配置方式。无 UI。
 
-- **路由批量编辑**：表格多选 + 批量操作栏（dropdown-menu 已有）
+- **模型组导入导出**：导出 = 单组 JSON 下载（组配置 + 路由 + 时段规则 + 策略）+ 全量导出；导入 = `POST /admin/api/groups/import` upsert（按组名匹配：存在→整组覆盖，不存在→新建）。
 
-- **API 文档页**：静态页 + mono 代码块
+- **路由批量编辑**：当前页内多选（checkbox 列 + 表头全选）。
 
-- **文档统一**：README 等残留 runapi 字样改 relay
+- **性能基准（relay 基线）**：`bench/` 脚本 + mock 上游固定响应 + oha 压测 → RPS/P99/内存进 README。
+
+### 5.2 UI 设计
+
+| 位置 | 设计 |
+| --- | --- |
+| 策略下拉 | 加「延迟优先」选项 + hint：「延迟优先模式:按窗口内 P50 延迟从低到高选择;无数据候选殿后随机分摊。」（对齐成本优先文案风格） |
+| 模型组页顶部 | 「导入」「导出全部」按钮，与搜索/新建并列 |
+| 导入 Dialog(max-w-2xl) | 两步：① 来源（粘贴 JSON / 选 .json 文件）→ 解析反馈「识别到 N 组 · M 路由 · K 时段规则」；② diff 只读预览表：组名 / 动作 pill（新建=success、覆盖=warning + 「将替换现有 N 条路由」）/ 路由数 / 策略 → 确认导入（pending 态，成功刷新列表）。四态：JSON 解析错误给具体行提示、空文件给指引 |
+| 组详情卡 | 卡头小按钮「导出」（单组 JSON 下载） |
+| 路由表 | 首列 checkbox + 全选；选中>0 浮出批量操作栏（「已选 N」badge + dropdown：批量删除〔ConfirmDialog destructive〕/ 批量改倍率 / 批量改权重） |
+| API 文档页（管理端 + 门户精简版） | 分区：快速开始 / 鉴权 / OpenAI·Anthropic 协议 / 流式 / 错误码 / `/metrics` 接入（含 Prometheus bearer_token 配置示例）；代码块 mono + 一键复制 + curl/Python/Node 语言 Tabs；门户版去掉管理向内容 |
+| README | 勾掉「Prometheus 指标导出」待办；补阶段三特性；基准数字表格 |
+
+### 5.3 执行批次
+
+- **批F 透明**：F1 后端（LatencyAware + /metrics 端点 + 测试）→ F2 前端（策略下拉/标签/hint）→ F3 验证+提交
+- **批G 门面一**：G1 后端（export/import 端点 + 测试）→ G2 前端（导入导出向导 + 批量编辑）→ G3 验证+提交
+- **批H 门面二**：H1 管理端 API 文档页 → H2 门户精简版 + 文档统一（runapi 残留、README 特性）→ H3 验证+提交
+- **批I 基准**：bench 脚本 + relay 基线 + README 数字（外部网关对比为可选项，默认不做）
 
 ***
 
