@@ -58,7 +58,7 @@
 ### 2.1 Workspace 结构(Cargo workspace)
 
 ```
-runapi/
+relay/
 ├── Cargo.toml                # workspace
 ├── crates/
 │   ├── gateway/              # 二进制:HTTP 服务入口、路由装配
@@ -160,7 +160,7 @@ runapi/
                            │ /portal/* (JWT)          │ /admin/* (JWT+RBAC)
                            ▼                           ▼
    SDK ──/v1/*(API Key)──►┌──────────────────────────────────────┐
-                          │        RunAPI Gateway (单进程, Rust)    │
+                          │        Relay Gateway (单进程, Rust)     │
                           │  ┌────────────────────────────────┐    │
                           │  │ 内存态(热路径):              │    │
                           │  │  DashMap<key→KeyEntry>(校验)   │    │

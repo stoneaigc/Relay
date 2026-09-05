@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
-import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload } from "lucide-react";
+import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen } from "lucide-react";
 import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
@@ -11,6 +11,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import PaginationBar from "./PaginationBar";
+import ApiDocsPanel from "./ApiDocs";
 import { PasswordInput } from "@/components/ui/password-input";
 import { Toaster } from "sonner";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
@@ -81,6 +82,7 @@ const NAV: { path: string; label: string; icon: any }[] = [
   { path: "/reward-tasks", label: "奖励设置", icon: Star },
   { path: "/usage", label: "全局用量", icon: BarChart3 },
   { path: "/cache", label: "缓存", icon: Database },
+  { path: "/docs", label: "API 文档", icon: BookOpen },
   { path: "/settings", label: "设置", icon: Settings },
 ];
 
@@ -158,6 +160,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
                 <Route path="/reward-tasks" element={<RewardTasksPanel />} />
                 <Route path="/usage" element={<UsagePanel />} />
                 <Route path="/cache" element={<CachePanel />} />
+                <Route path="/docs" element={<ApiDocsPanel />} />
                 <Route path="/settings" element={<SettingsPanel />} />
               </Routes>
             </div>

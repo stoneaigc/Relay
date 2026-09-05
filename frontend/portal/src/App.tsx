@@ -3,7 +3,7 @@ import { BrowserRouter, NavLink, useLocation } from "react-router-dom";
 import {
   Wallet, KeyRound, Copy, RefreshCw, Plus, LogOut, Check,
   LayoutDashboard, Receipt, MessageSquare, Menu, X, SendHorizontal, Boxes,
-  Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb,
+  Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen,
 } from "lucide-react";
 import { api, getToken, setToken, clearToken, KeyInfo, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType } from "./api";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import PaginationBar from "./PaginationBar";
+import DocsView from "./ApiDocs";
 
 const GRANT = 10_000_000;
 
@@ -196,21 +197,23 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
   );
 }
 
-type Section = "overview" | "chat" | "rewards" | "usage";
+type Section = "overview" | "chat" | "rewards" | "usage" | "docs";
 const NAV: { path: string; label: string; icon: any }[] = [
   { path: "/", label: "概览", icon: LayoutDashboard },
   { path: "/chat", label: "对话", icon: MessageSquare },
   { path: "/rewards", label: "奖励", icon: Gift },
   { path: "/usage", label: "用量明细", icon: Receipt },
+  { path: "/docs", label: "API 文档", icon: BookOpen },
 ];
 
 function Dashboard({ onLogout }: { onLogout: () => void }) {
   const loc = useLocation();
   const section: Section = loc.pathname.startsWith("/chat") ? "chat"
     : loc.pathname.startsWith("/rewards") ? "rewards"
-    : loc.pathname.startsWith("/usage") ? "usage" : "overview";
+    : loc.pathname.startsWith("/usage") ? "usage"
+    : loc.pathname.startsWith("/docs") ? "docs" : "overview";
   const title = section === "chat" ? "对话" : section === "rewards" ? "奖励"
-    : section === "usage" ? "用量明细" : "概览";
+    : section === "usage" ? "用量明细" : section === "docs" ? "API 文档" : "概览";
   const [mobileOpen, setMobileOpen] = useState(false);
   const [summary, setSummary] = useState<{ granted: number; used: number; balance: number } | null>(null);
   const [phone, setPhone] = useState("");
@@ -293,6 +296,12 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
 
         {section === "chat" ? (
           <ChatView models={models} onSent={refresh} />
+        ) : section === "docs" ? (
+          <div className="min-h-0 flex-1 overflow-auto">
+            <div className="p-4 md:p-6">
+              <DocsView />
+            </div>
+          </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
             <div className="p-4 md:p-6">
