@@ -27,9 +27,12 @@ export interface UserRow {
   balance: number;
   used: number;
   today: number;
+  used_month: number;
   granted: number;
   concurrency_limit: number | null;
   group_id: number;
+  budget_daily_tokens: number | null;
+  budget_monthly_tokens: number | null;
   source: string | null;
   created_at: string;
 }
@@ -143,7 +146,7 @@ export const api = {
     const s = qs.toString();
     return req(`/admin/api/users${s ? "?" + s : ""}`);
   },
-  createUser: (body: { username: string; password: string; email?: string; phone?: string; group_id?: number; grant_tokens?: number; concurrency_limit?: number }) =>
+  createUser: (body: { username: string; password: string; email?: string; phone?: string; group_id?: number; grant_tokens?: number; concurrency_limit?: number; budget_daily_tokens?: number; budget_monthly_tokens?: number }) =>
     req("/admin/api/users", { method: "POST", body: JSON.stringify(body) }),
   patchUser: (id: string, body: any) =>
     req(`/admin/api/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),

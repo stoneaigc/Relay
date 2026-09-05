@@ -197,6 +197,13 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE models ADD COLUMN IF NOT EXISTS output_price DOUBLE PRECISION")
             .execute(pool)
             .await;
+        // 周期预算(charged tokens,可空=不限)。
+        let _ = q!("ALTER TABLE users ADD COLUMN IF NOT EXISTS budget_daily_tokens BIGINT")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE users ADD COLUMN IF NOT EXISTS budget_monthly_tokens BIGINT")
+            .execute(pool)
+            .await;
     } else {
         let _ = q!("ALTER TABLE reward_claims ADD COLUMN task_id INTEGER").execute(pool).await;
         let _ = q!("ALTER TABLE users ADD COLUMN bill_multiplier REAL NOT NULL DEFAULT 1.0")
@@ -209,6 +216,8 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE users ADD COLUMN source TEXT").execute(pool).await;
         let _ = q!("ALTER TABLE users ADD COLUMN rpm_limit INTEGER").execute(pool).await;
         let _ = q!("ALTER TABLE users ADD COLUMN tpm_limit INTEGER").execute(pool).await;
+        let _ = q!("ALTER TABLE users ADD COLUMN budget_daily_tokens INTEGER").execute(pool).await;
+        let _ = q!("ALTER TABLE users ADD COLUMN budget_monthly_tokens INTEGER").execute(pool).await;
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN ts INTEGER NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
@@ -246,7 +255,7 @@ pub async fn load_into_memory(
     keys: &DashMap<String, KeyEntry>,
 ) -> anyhow::Result<()> {
     let rows = q!(
-        "SELECT id, status, token_balance, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit FROM users",
+        "SELECT id, status, token_balance, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens FROM users",
     )
     .fetch_all(pool)
     .await?;
@@ -262,6 +271,9 @@ pub async fn load_into_memory(
         let tpm = r.try_get::<Option<i64>, _>("tpm_limit").ok().flatten().unwrap_or(cfg.defaults.tpm_limit as i64).max(0) as u32;
         let us = Arc::new(UserState::new(id, balance, limit, status as u8, mult, group_id));
         us.set_limits(rpm, tpm);
+        let bd = r.try_get::<Option<i64>, _>("budget_daily_tokens").ok().flatten().unwrap_or(0).max(0);
+        let bm = r.try_get::<Option<i64>, _>("budget_monthly_tokens").ok().flatten().unwrap_or(0).max(0);
+        us.set_budgets(bd, bm);
         users.insert(id, us);
     }
 
@@ -271,6 +283,25 @@ pub async fn load_into_memory(
     for r in rows {
         let user_id = Uuid::parse_str(r.get::<String, _>("user_id").as_str())?;
         keys.insert(r.get::<String, _>("key_hash"), KeyEntry { user_id });
+    }
+
+    // 重启恢复:从库内日/月用量初始化预算窗口(仅预算用户)。
+    let any_budget = users.iter().any(|e| {
+        let u = e.value();
+        u.budget_daily.load(std::sync::atomic::Ordering::Relaxed) > 0
+            || u.budget_monthly.load(std::sync::atomic::Ordering::Relaxed) > 0
+    });
+    if any_budget {
+        let tz = cfg.defaults.tz_offset_hours as i64;
+        let day_map = usage_by_user(pool, Some(today_start(tz))).await.unwrap_or_default();
+        let month_map = usage_by_user(pool, Some(month_start(tz))).await.unwrap_or_default();
+        for e in users.iter() {
+            let u = e.value();
+            u.record_budget(0, tz);
+            let uid = u.id.to_string();
+            u.used_daily.fetch_max(day_map.get(&uid).copied().unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+            u.used_monthly.fetch_max(month_map.get(&uid).copied().unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+        }
     }
     Ok(())
 }
@@ -735,6 +766,8 @@ pub struct UserRow {
     pub group_id: Option<i64>,
     pub rpm_limit: Option<i64>,
     pub tpm_limit: Option<i64>,
+    pub budget_daily_tokens: Option<i64>,
+    pub budget_monthly_tokens: Option<i64>,
     pub source: Option<String>,
     pub created_at: String,
 }
@@ -832,7 +865,7 @@ pub async fn find_user_by_username(pool: &Db, username: &str) -> anyhow::Result<
 
 pub async fn get_user(pool: &Db, id: Uuid) -> anyhow::Result<Option<UserRow>> {
     let row = q!(
-        "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, source, created_at
+        "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens, source, created_at
          FROM users WHERE id = ?",
     )
     .bind(id.to_string())
@@ -845,7 +878,7 @@ pub async fn get_user(pool: &Db, id: Uuid) -> anyhow::Result<Option<UserRow>> {
 #[allow(dead_code)]
 pub async fn list_users(pool: &Db) -> anyhow::Result<Vec<UserRow>> {
     let rows = q!(
-        "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, source, created_at
+        "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens, source, created_at
          FROM users ORDER BY created_at DESC",
     )
     .fetch_all(pool)
@@ -861,7 +894,7 @@ pub async fn list_users_page(
 ) -> anyhow::Result<(Vec<UserRow>, i64)> {
     let total: i64 = q!("SELECT COUNT(*) AS c FROM users").fetch_one(pool).await?.get("c");
     let rows = q!(
-        "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, source, created_at
+        "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens, source, created_at
          FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
     )
     .bind(limit)
@@ -885,6 +918,8 @@ fn row_to_user(r: &sqlx::any::AnyRow) -> anyhow::Result<UserRow> {
         group_id: r.try_get::<Option<i64>, _>("group_id").unwrap_or(None),
         rpm_limit: r.try_get::<Option<i64>, _>("rpm_limit").unwrap_or(None),
         tpm_limit: r.try_get::<Option<i64>, _>("tpm_limit").unwrap_or(None),
+        budget_daily_tokens: r.try_get::<Option<i64>, _>("budget_daily_tokens").unwrap_or(None),
+        budget_monthly_tokens: r.try_get::<Option<i64>, _>("budget_monthly_tokens").unwrap_or(None),
         source: r.try_get("source").unwrap_or(None),
         created_at: r.get("created_at"),
     })
@@ -898,6 +933,8 @@ pub async fn update_user(
     bill_multiplier: Option<f64>,
     rpm_limit: Option<i64>,
     tpm_limit: Option<i64>,
+    budget_daily_tokens: Option<i64>,
+    budget_monthly_tokens: Option<i64>,
 ) -> anyhow::Result<()> {
     if let Some(cl) = concurrency_limit {
         q!("UPDATE users SET concurrency_limit = ? WHERE id = ?")
@@ -930,6 +967,20 @@ pub async fn update_user(
     if let Some(tpm) = tpm_limit {
         q!("UPDATE users SET tpm_limit = ? WHERE id = ?")
             .bind(tpm)
+            .bind(id.to_string())
+            .execute(pool)
+            .await?;
+    }
+    if let Some(d) = budget_daily_tokens {
+        q!("UPDATE users SET budget_daily_tokens = ? WHERE id = ?")
+            .bind(d)
+            .bind(id.to_string())
+            .execute(pool)
+            .await?;
+    }
+    if let Some(m) = budget_monthly_tokens {
+        q!("UPDATE users SET budget_monthly_tokens = ? WHERE id = ?")
+            .bind(m)
             .bind(id.to_string())
             .execute(pool)
             .await?;
@@ -1640,6 +1691,15 @@ pub fn today_start(tz_offset_hours: i64) -> i64 {
     now - ((now + offset).rem_euclid(86400))
 }
 
+/// 本地「本月 1 日 00:00」对应的 unix 秒(按时区偏移小时)。
+pub fn month_start(tz_offset_hours: i64) -> i64 {
+    let offset = tz_offset_hours * 3600;
+    let now = now_secs();
+    let days = (now + offset).div_euclid(86400);
+    let (y, m, _) = civil_from_days(days);
+    days_from_civil(y, m, 1) * 86400 - offset
+}
+
 /// 公历日期 ⇄ 自 1970-01-01 起的天数(Howard Hinnant 算法,无需 chrono)。
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
@@ -1651,7 +1711,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146097 + doe - 719468
 }
 
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = z - era * 146097;
@@ -1952,6 +2012,37 @@ mod tests {
         let models = list_models_by_provider(&db, &provider).await.unwrap();
         assert_eq!(models[0]["input_price"], 3.0);
         assert_eq!(models[0]["output_price"], serde_json::Value::Null);
+    }
+
+    // ---- 用户周期预算 ----
+
+    #[tokio::test]
+    async fn user_budget_roundtrip() {
+        let db = test_db().await;
+        let id = admin_create_user(&db, "budgeter", "x", None, None, 100, None, "admin")
+            .await
+            .unwrap();
+
+        // 设置日/月预算并回读
+        update_user(&db, id, None, None, None, None, None, Some(5000), Some(70000)).await.unwrap();
+        let (rows, _) = list_users_page(&db, 10, 0).await.unwrap();
+        let u = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(u.budget_daily_tokens, Some(5000));
+        assert_eq!(u.budget_monthly_tokens, Some(70000));
+
+        // None 不改动既有预算
+        update_user(&db, id, None, None, None, None, None, None, None).await.unwrap();
+        let (rows, _) = list_users_page(&db, 10, 0).await.unwrap();
+        let u = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(u.budget_daily_tokens, Some(5000));
+        assert_eq!(u.budget_monthly_tokens, Some(70000));
+
+        // Some(0) 表示「不限」
+        update_user(&db, id, None, None, None, None, None, Some(0), Some(0)).await.unwrap();
+        let (rows, _) = list_users_page(&db, 10, 0).await.unwrap();
+        let u = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(u.budget_daily_tokens, Some(0));
+        assert_eq!(u.budget_monthly_tokens, Some(0));
     }
 
     // ---- list_providers 分页 ----

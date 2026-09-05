@@ -33,6 +33,9 @@ pub enum ApiError {
     Unavailable(String),
     #[error("internal error: {0}")]
     Internal(String),
+    /// 周期预算耗尽(日/月窗口)。429 + insufficient_quota,对齐 OpenAI 语义。
+    #[error("{0} token budget exhausted")]
+    BudgetExhausted(&'static str),
 }
 
 impl ApiError {
@@ -45,7 +48,7 @@ impl ApiError {
             ApiError::NoTarget(_) => StatusCode::BAD_GATEWAY,
             ApiError::Upstream(_) => StatusCode::BAD_GATEWAY,
             ApiError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-            ApiError::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::TooManyRequests | ApiError::BudgetExhausted(_) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -55,7 +58,7 @@ impl ApiError {
         match self {
             ApiError::Unauthorized | ApiError::InvalidKey => "authentication_error",
             ApiError::AccountDisabled => "permission_error",
-            ApiError::InsufficientBalance => "insufficient_quota",
+            ApiError::InsufficientBalance | ApiError::BudgetExhausted(_) => "insufficient_quota",
             ApiError::ModelNotFound(_) | ApiError::ModelNotAllowed(_) => "not_found_error",
             ApiError::TooManyRequests => "rate_limit_error",
             ApiError::BadRequest(_) => "invalid_request_error",
@@ -85,7 +88,7 @@ impl ApiError {
             ApiError::AccountDisabled => "permission_error",
             ApiError::InsufficientBalance => "api_error",
             ApiError::ModelNotFound(_) | ApiError::ModelNotAllowed(_) => "not_found_error",
-            ApiError::TooManyRequests => "rate_limit_error",
+            ApiError::TooManyRequests | ApiError::BudgetExhausted(_) => "rate_limit_error",
             ApiError::BadRequest(_) => "invalid_request_error",
             ApiError::NoTarget(_) | ApiError::Upstream(_) | ApiError::Unavailable(_) => "api_error",
             ApiError::Internal(_) => "internal_error",

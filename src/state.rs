@@ -18,6 +18,14 @@ use crate::config::{Config, ProviderKind};
 /// 用户状态:0=active,1=disabled。
 pub const STATUS_ACTIVE: u8 = 0;
 
+/// 周期预算检查结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetStatus {
+    Ok,
+    DailyExhausted,
+    MonthlyExhausted,
+}
+
 /// API Key 在内存中的映射条目。校验请求时只读此结构,不查库。
 #[derive(Debug, Clone)]
 pub struct KeyEntry {
@@ -42,6 +50,18 @@ pub struct UserState {
     pub rpm_limit: AtomicU32,
     /// 每分钟 token 消耗上限(0 = 不限)。
     pub tpm_limit: AtomicU32,
+    /// 日预算(charged tokens,0 = 不限)。
+    pub budget_daily: AtomicI64,
+    /// 月预算(charged tokens,0 = 不限)。
+    pub budget_monthly: AtomicI64,
+    /// 当前日窗口已用 charged tokens。
+    pub used_daily: AtomicI64,
+    /// 当前月窗口已用 charged tokens。
+    pub used_monthly: AtomicI64,
+    /// 日窗口 key(本地日序数),变更时重置 used_daily。
+    day_key: AtomicI64,
+    /// 月窗口 key(本地 年*12+月),变更时重置 used_monthly。
+    month_key: AtomicI64,
     /// 滑动窗口限流状态(RPM 时间戳 / TPM 消费量)。
     rate: Mutex<RateWindow>,
 }
@@ -78,6 +98,12 @@ impl UserState {
             dirty: AtomicBool::new(false),
             rpm_limit: AtomicU32::new(0),
             tpm_limit: AtomicU32::new(0),
+            budget_daily: AtomicI64::new(0),
+            budget_monthly: AtomicI64::new(0),
+            used_daily: AtomicI64::new(0),
+            used_monthly: AtomicI64::new(0),
+            day_key: AtomicI64::new(0),
+            month_key: AtomicI64::new(0),
             rate: Mutex::new(RateWindow::default()),
         }
     }
@@ -86,6 +112,50 @@ impl UserState {
     pub fn set_limits(&self, rpm: u32, tpm: u32) {
         self.rpm_limit.store(rpm, Ordering::Relaxed);
         self.tpm_limit.store(tpm, Ordering::Relaxed);
+    }
+
+    /// 设置日/月预算(charged tokens,0 = 不限)。供管理端创建/修改用户后同步。
+    pub fn set_budgets(&self, daily: i64, monthly: i64) {
+        self.budget_daily.store(daily.max(0), Ordering::Relaxed);
+        self.budget_monthly.store(monthly.max(0), Ordering::Relaxed);
+    }
+
+    /// 窗口翻转(key 可注入,供确定性测试)。key 变化即跨窗口,重置对应计数。
+    fn roll_windows_keys(&self, day: i64, month: i64) {
+        if self.day_key.swap(day, Ordering::Relaxed) != day {
+            self.used_daily.store(0, Ordering::Relaxed);
+        }
+        if self.month_key.swap(month, Ordering::Relaxed) != month {
+            self.used_monthly.store(0, Ordering::Relaxed);
+        }
+    }
+
+    /// 按本地时区推进日/月窗口;跨窗口时重置计数。
+    fn roll_windows(&self, tz_offset_hours: i64, now: i64) {
+        let day = (now + tz_offset_hours * 3600).div_euclid(86400);
+        let (y, m, _) = crate::storage::civil_from_days(day);
+        self.roll_windows_keys(day, y * 12 + m as i64);
+    }
+
+    /// 记录一笔 charged tokens 到日/月窗口(自动跨窗口翻转)。
+    pub fn record_budget(&self, charged: i64, tz_offset_hours: i64) {
+        self.roll_windows(tz_offset_hours, Self::now_secs());
+        self.used_daily.fetch_add(charged, Ordering::Relaxed);
+        self.used_monthly.fetch_add(charged, Ordering::Relaxed);
+    }
+
+    /// 当前预算状态;耗尽返回对应窗口变体(调用方转 429 insufficient_quota)。
+    pub fn budget_status(&self, tz_offset_hours: i64) -> BudgetStatus {
+        self.roll_windows(tz_offset_hours, Self::now_secs());
+        let d = self.budget_daily.load(Ordering::Relaxed);
+        if d > 0 && self.used_daily.load(Ordering::Relaxed) >= d {
+            return BudgetStatus::DailyExhausted;
+        }
+        let m = self.budget_monthly.load(Ordering::Relaxed);
+        if m > 0 && self.used_monthly.load(Ordering::Relaxed) >= m {
+            return BudgetStatus::MonthlyExhausted;
+        }
+        BudgetStatus::Ok
     }
 
     fn now_secs() -> i64 {
@@ -1220,6 +1290,51 @@ mod tests {
         // P50: idx = (1*0.5).round() = 1 → s[1]=30
         assert_eq!(a.p(0.5), 30);
         assert_eq!(a.latency_max_ms, 30);
+    }
+
+    // --- 周期预算:累计 / 耗尽 / 滚动重置 ---
+    #[test]
+    fn budget_daily_exhausted() {
+        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 1.0, 0);
+        u.set_budgets(1000, 0);
+        assert_eq!(u.budget_status(8), BudgetStatus::Ok);
+        u.record_budget(600, 8);
+        assert_eq!(u.budget_status(8), BudgetStatus::Ok);
+        u.record_budget(400, 8);
+        assert_eq!(u.budget_status(8), BudgetStatus::DailyExhausted);
+    }
+
+    #[test]
+    fn budget_monthly_exhausted() {
+        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 1.0, 0);
+        u.set_budgets(0, 1500);
+        u.record_budget(1500, 8);
+        assert_eq!(u.budget_status(8), BudgetStatus::MonthlyExhausted);
+    }
+
+    #[test]
+    fn budget_window_rollover_resets_counters() {
+        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 1.0, 0);
+        u.set_budgets(1000, 2000);
+        u.record_budget(1000, 8);
+        assert_eq!(u.budget_status(8), BudgetStatus::DailyExhausted);
+
+        // 只换日(day_key+1,月键不变) → used_daily 归 0,used_monthly 保留
+        let day0 = u.day_key.load(Ordering::Relaxed);
+        let month0 = u.month_key.load(Ordering::Relaxed);
+        u.roll_windows_keys(day0 + 1, month0);
+        assert_eq!(u.used_daily.load(Ordering::Relaxed), 0);
+        assert_eq!(u.used_monthly.load(Ordering::Relaxed), 1000);
+        assert_eq!(u.budget_status(8), BudgetStatus::Ok);
+
+        // 再换月(month_key+1) → used_monthly 也归 0
+        u.roll_windows_keys(day0 + 1, month0 + 1);
+        assert_eq!(u.used_monthly.load(Ordering::Relaxed), 0);
+
+        // 滚动后重新累计正常
+        u.record_budget(300, 8);
+        assert_eq!(u.used_monthly.load(Ordering::Relaxed), 300);
+        assert_eq!(u.budget_status(8), BudgetStatus::Ok);
     }
 
     // --- 白盒 3:MetricsStore push_tokens_only 不污染 req/samples ---

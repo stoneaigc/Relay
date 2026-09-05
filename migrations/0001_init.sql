@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS users (
   group_id          INTEGER,                       -- 绑定的模型组
   rpm_limit         INTEGER,                       -- 每分钟请求上限(NULL=用全局默认)
   tpm_limit         INTEGER,                       -- 每分钟 token 上限(NULL=用全局默认)
+  budget_daily_tokens  INTEGER,                    -- 日预算(charged tokens,NULL=不限)
+  budget_monthly_tokens INTEGER,                    -- 月预算(charged tokens,NULL=不限)
   source            TEXT,                          -- 注册来源:admin|phone|wechat|alipay
   created_at        TEXT NOT NULL
 );

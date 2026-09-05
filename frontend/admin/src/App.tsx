@@ -257,6 +257,8 @@ function UserDialog({ dlg, groups, onClose, onSaved }: { dlg: { edit: UserRow | 
   const [phone, setPhone] = useState("");
   const [conc, setConc] = useState("16");
   const [amount, setAmount] = useState("");
+  const [budgetDaily, setBudgetDaily] = useState("");
+  const [budgetMonthly, setBudgetMonthly] = useState("");
   const [err, setErr] = useState("");
   useEffect(() => {
     if (open) {
@@ -264,16 +266,25 @@ function UserDialog({ dlg, groups, onClose, onSaved }: { dlg: { edit: UserRow | 
       setEmail(edit?.email ?? ""); setPhone(edit?.phone ?? "");
       setConc(String(edit?.concurrency_limit ?? 16));
       setAmount(edit ? "0" : "10000000"); setErr("");
+      setBudgetDaily(edit?.budget_daily_tokens ? String(edit.budget_daily_tokens) : "");
+      setBudgetMonthly(edit?.budget_monthly_tokens ? String(edit.budget_monthly_tokens) : "");
     }
   }, [dlg]);
 
   const submit = async () => {
     setErr("");
+    const bd = budgetDaily.trim() === "" ? 0 : Number(budgetDaily);
+    const bm = budgetMonthly.trim() === "" ? 0 : Number(budgetMonthly);
+    if (!Number.isFinite(bd) || bd < 0 || !Number.isFinite(bm) || bm < 0) {
+      setErr("预算需为非负数字,留空或 0 表示不限");
+      return;
+    }
     try {
       if (edit) {
         const body: any = {
           email: email.trim(), phone: phone.trim(),
           group_id: groupId, concurrency_limit: Number(conc),
+          budget_daily_tokens: bd, budget_monthly_tokens: bm,
         };
         if (password) body.password = password;
         if (Number(amount)) body.add_tokens = Number(amount);
@@ -284,6 +295,7 @@ function UserDialog({ dlg, groups, onClose, onSaved }: { dlg: { edit: UserRow | 
           email: email.trim() || undefined, phone: phone.trim() || undefined,
           group_id: groupId || undefined, grant_tokens: Number(amount) || 0,
           concurrency_limit: Number(conc),
+          budget_daily_tokens: bd || undefined, budget_monthly_tokens: bm || undefined,
         });
       }
       onSaved(); onClose();
@@ -322,6 +334,12 @@ function UserDialog({ dlg, groups, onClose, onSaved }: { dlg: { edit: UserRow | 
           </div>
           <div><label className="mb-1 block text-xs text-muted-foreground">{edit ? "增减额度(可为负,0 不变)" : "赠送 tokens"}</label>
             <Input value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="mb-1 block text-xs text-muted-foreground">日预算 tokens</label>
+              <Input placeholder="留空或 0 = 不限" value={budgetDaily} onChange={(e) => setBudgetDaily(e.target.value)} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">月预算 tokens</label>
+              <Input placeholder="留空或 0 = 不限" value={budgetMonthly} onChange={(e) => setBudgetMonthly(e.target.value)} /></div>
+          </div>
           {err && <p className="text-sm text-destructive">{err}</p>}
         </div>
         <div className="flex justify-end gap-2">
@@ -463,6 +481,38 @@ function OverviewPanel() {
   );
 }
 
+// 行内预算进度条:80% 转黄、95% 转红,耗尽显示「已耗尽」pill。
+function BudgetBar({ label, used, budget }: { label: string; used: number; budget: number | null }) {
+  if (!budget || budget <= 0) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <span className="w-3 text-[10px] leading-none text-muted-foreground">{label}</span>
+        <span className="text-xs leading-none text-muted-foreground">不限</span>
+      </div>
+    );
+  }
+  const pct = Math.min(100, Math.round((used / budget) * 100));
+  const exhausted = used >= budget;
+  const danger = exhausted || pct >= 95;
+  const warn = pct >= 80;
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="w-3 text-[10px] leading-none text-muted-foreground">{label}</span>
+      <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
+        <div
+          className={`h-full rounded-full transition-all ${danger ? "bg-destructive" : warn ? "bg-amber-500" : "bg-primary"}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      {exhausted ? (
+        <Badge variant="destructive" className="px-1.5 py-0 text-[10px] leading-tight">已耗尽</Badge>
+      ) : (
+        <span className={`text-[10px] leading-none ${danger ? "text-destructive" : warn ? "text-amber-500" : "text-muted-foreground"}`}>{pct}%</span>
+      )}
+    </div>
+  );
+}
+
 function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
   const [rows, setRows] = useState<UserRow[]>([]);
   const [groups, setGroups] = useState<GroupRow[]>([]);
@@ -509,7 +559,7 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
             <TableHeader>
               <TableRow>
                 <TableHead>用户</TableHead><TableHead>来源</TableHead><TableHead>总量</TableHead><TableHead>已用</TableHead>
-                <TableHead>今日</TableHead><TableHead>余额</TableHead><TableHead>并发</TableHead>
+                <TableHead>今日</TableHead><TableHead>预算</TableHead><TableHead>余额</TableHead><TableHead>并发</TableHead>
                 <TableHead>模型组</TableHead><TableHead>状态</TableHead><TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -529,6 +579,12 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
                   <TableCell className="mono text-muted-foreground">{u.granted.toLocaleString()}</TableCell>
                   <TableCell className="mono">{u.used.toLocaleString()}</TableCell>
                   <TableCell className="mono">{u.today > 0 ? <span className="text-primary">{u.today.toLocaleString()}</span> : "0"}</TableCell>
+                  <TableCell>
+                    <div className="space-y-1">
+                      <BudgetBar label="日" used={u.today} budget={u.budget_daily_tokens} />
+                      <BudgetBar label="月" used={u.used_month} budget={u.budget_monthly_tokens} />
+                    </div>
+                  </TableCell>
                   <TableCell className="mono">{u.balance.toLocaleString()}</TableCell>
                   <TableCell>{u.concurrency_limit ?? <span className="text-muted-foreground">默认</span>}</TableCell>
                   <TableCell>

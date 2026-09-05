@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS users (
   group_id          BIGINT,
   rpm_limit         BIGINT,                            -- NULL=用全局默认
   tpm_limit         BIGINT,                            -- NULL=用全局默认
+  budget_daily_tokens  BIGINT,                         -- 日预算(charged tokens,NULL=不限)
+  budget_monthly_tokens BIGINT,                        -- 月预算(charged tokens,NULL=不限)
   source            TEXT,
   created_at        TEXT NOT NULL
 );

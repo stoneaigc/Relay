@@ -284,6 +284,10 @@ async fn background_task(
                         if let Err(e) = storage::insert_usage(&state.db, &ev).await {
                             tracing::error!("insert usage failed: {e}");
                         }
+                        // 周期预算内存累计:所有 UsageEvent 都经过此处,与库内口径一致。
+                        if let Some(u) = state.users.get(&ev.user_id) {
+                            u.record_budget(ev.charged_tokens, state.tz_offset_secs as i64 / 3600);
+                        }
                     }
                     None => break,
                 }
@@ -300,8 +304,40 @@ async fn background_task(
             }
             _ = tick.tick() => {
                 flush_dirty(&state).await;
+                calibrate_budgets(&state).await;
             }
         }
+    }
+}
+
+/// 周期校准预算窗口:以库内日/月用量为下界修正内存计数(fetch_max)。
+/// 内存领先(未落库)不丢失;库内更大(重启/漂移)则纠正,方向安全。
+async fn calibrate_budgets(state: &AppState) {
+    let any = state.users.iter().any(|e| {
+        let u = e.value();
+        u.budget_daily.load(Ordering::Relaxed) > 0 || u.budget_monthly.load(Ordering::Relaxed) > 0
+    });
+    if !any {
+        return;
+    }
+    let tz = state.tz_offset_secs as i64 / 3600;
+    let day_map = storage::usage_by_user(&state.db, Some(storage::today_start(tz)))
+        .await
+        .unwrap_or_default();
+    let month_map = storage::usage_by_user(&state.db, Some(storage::month_start(tz)))
+        .await
+        .unwrap_or_default();
+    for entry in state.users.iter() {
+        let u = entry.value();
+        if u.budget_daily.load(Ordering::Relaxed) == 0 && u.budget_monthly.load(Ordering::Relaxed) == 0 {
+            continue;
+        }
+        u.record_budget(0, tz); // 先推进窗口翻转,再对齐库内值
+        let uid = u.id.to_string();
+        u.used_daily
+            .fetch_max(day_map.get(&uid).copied().unwrap_or(0), Ordering::Relaxed);
+        u.used_monthly
+            .fetch_max(month_map.get(&uid).copied().unwrap_or(0), Ordering::Relaxed);
     }
 }
 

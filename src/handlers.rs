@@ -188,6 +188,17 @@ pub async fn run_chat(
         fail_global!();
         return Err(ApiError::TooManyRequests);
     }
+    match user.budget_status(state.tz_offset_secs as i64 / 3600) {
+        crate::state::BudgetStatus::Ok => {}
+        crate::state::BudgetStatus::DailyExhausted => {
+            fail_global!();
+            return Err(ApiError::BudgetExhausted("daily"));
+        }
+        crate::state::BudgetStatus::MonthlyExhausted => {
+            fail_global!();
+            return Err(ApiError::BudgetExhausted("monthly"));
+        }
+    }
 
     let model = req
         .get("model")
@@ -700,6 +711,17 @@ pub async fn run_messages(
     if !user.try_rpm() || !user.tpm_ok() {
         fail_global!();
         return Err(ApiError::TooManyRequests);
+    }
+    match user.budget_status(state.tz_offset_secs as i64 / 3600) {
+        crate::state::BudgetStatus::Ok => {}
+        crate::state::BudgetStatus::DailyExhausted => {
+            fail_global!();
+            return Err(ApiError::BudgetExhausted("daily"));
+        }
+        crate::state::BudgetStatus::MonthlyExhausted => {
+            fail_global!();
+            return Err(ApiError::BudgetExhausted("monthly"));
+        }
     }
     let model = req
         .get("model")

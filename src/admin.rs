@@ -137,6 +137,7 @@ pub async fn list_users(
     let tz = state.config().defaults.tz_offset_hours;
     let used_map = storage::usage_by_user(&state.db, None).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     let today_map = storage::usage_by_user(&state.db, Some(storage::today_start(tz))).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    let month_map = storage::usage_by_user(&state.db, Some(storage::month_start(tz))).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let data: Vec<Value> = rows
         .iter()
@@ -155,9 +156,12 @@ pub async fn list_users(
                 "balance": balance,
                 "used": used,
                 "today": today,
+                "used_month": month_map.get(&uid).copied().unwrap_or(0),
                 "granted": used + balance,
                 "concurrency_limit": live.as_ref().map(|x| x.concurrency_limit.load(Ordering::Relaxed) as i64).or(u.concurrency_limit),
                 "group_id": live.as_ref().map(|x| x.group()).unwrap_or(u.group_id.unwrap_or(0)),
+                "budget_daily_tokens": u.budget_daily_tokens,
+                "budget_monthly_tokens": u.budget_monthly_tokens,
                 "source": u.source,
                 "created_at": u.created_at,
             })
@@ -183,6 +187,8 @@ pub struct CreateUser {
     pub concurrency_limit: Option<i64>,
     pub rpm_limit: Option<i64>,
     pub tpm_limit: Option<i64>,
+    pub budget_daily_tokens: Option<i64>,
+    pub budget_monthly_tokens: Option<i64>,
 }
 
 /// POST /admin/users
@@ -213,13 +219,34 @@ pub async fn create_user(
     let id = storage::admin_create_user(&state.db, body.username.trim(), &pwhash, email, phone, grant, gid, "admin")
         .await
         .map_err(|_| ApiError::BadRequest("用户名或手机号已存在".into()))?;
-    if body.concurrency_limit.is_some() || body.rpm_limit.is_some() || body.tpm_limit.is_some() {
-        storage::update_user(&state.db, id, body.concurrency_limit, None, None, body.rpm_limit, body.tpm_limit).await.ok();
+    if body.concurrency_limit.is_some()
+        || body.rpm_limit.is_some()
+        || body.tpm_limit.is_some()
+        || body.budget_daily_tokens.is_some()
+        || body.budget_monthly_tokens.is_some()
+    {
+        storage::update_user(
+            &state.db,
+            id,
+            body.concurrency_limit,
+            None,
+            None,
+            body.rpm_limit,
+            body.tpm_limit,
+            body.budget_daily_tokens,
+            body.budget_monthly_tokens,
+        )
+        .await
+        .ok();
     }
     let us = Arc::new(UserState::new(id, grant, limit, 0, 1.0, gid.unwrap_or(0)));
     us.set_limits(
         body.rpm_limit.map(|v| v.max(0) as u32).unwrap_or(default_rpm),
         body.tpm_limit.map(|v| v.max(0) as u32).unwrap_or(default_tpm),
+    );
+    us.set_budgets(
+        body.budget_daily_tokens.unwrap_or(0),
+        body.budget_monthly_tokens.unwrap_or(0),
     );
     state.users.insert(id, us);
     Ok(Json(json!({ "id": id })))
@@ -260,6 +287,8 @@ pub struct PatchUser {
     pub group_id: Option<i64>, // 绑定模型组(0 = 解绑)
     pub rpm_limit: Option<i64>,
     pub tpm_limit: Option<i64>,
+    pub budget_daily_tokens: Option<i64>,
+    pub budget_monthly_tokens: Option<i64>,
     pub username: Option<String>,
     pub email: Option<String>,
     pub phone: Option<String>,
@@ -275,9 +304,19 @@ pub async fn patch_user(
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
 
-    storage::update_user(&state.db, id, body.concurrency_limit, body.status, body.bill_multiplier, body.rpm_limit, body.tpm_limit)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    storage::update_user(
+        &state.db,
+        id,
+        body.concurrency_limit,
+        body.status,
+        body.bill_multiplier,
+        body.rpm_limit,
+        body.tpm_limit,
+        body.budget_daily_tokens,
+        body.budget_monthly_tokens,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
     if let Some(delta) = body.add_tokens {
         storage::add_tokens(&state.db, id, delta)
             .await
@@ -301,6 +340,11 @@ pub async fn patch_user(
             let rpm = body.rpm_limit.map(|v| v.max(0) as u32).unwrap_or_else(|| u.rpm_limit.load(Ordering::Relaxed));
             let tpm = body.tpm_limit.map(|v| v.max(0) as u32).unwrap_or_else(|| u.tpm_limit.load(Ordering::Relaxed));
             u.set_limits(rpm, tpm);
+        }
+        if body.budget_daily_tokens.is_some() || body.budget_monthly_tokens.is_some() {
+            let d = body.budget_daily_tokens.map(|v| v.max(0)).unwrap_or_else(|| u.budget_daily.load(Ordering::Relaxed));
+            let m = body.budget_monthly_tokens.map(|v| v.max(0)).unwrap_or_else(|| u.budget_monthly.load(Ordering::Relaxed));
+            u.set_budgets(d, m);
         }
     }
 
