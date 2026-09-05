@@ -1127,6 +1127,7 @@ pub async fn activate_group(
     storage::set_active_group(&state.db, id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(&state).await?;
     Ok(Json(json!({ "ok": true })))
 }
 

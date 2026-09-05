@@ -105,7 +105,7 @@ impl Default for CacheConfig {
     }
 }
 
-/// 语义缓存(响应缓存)配置:进程内 DashMap + TTL;L2 embedding 预留。
+/// 语义缓存(响应缓存)配置:进程内 RwLock<HashMap> + TTL;L2 embedding 预留。
 #[derive(Debug, Clone, Deserialize)]
 pub struct CacheSemanticConfig {
     /// 总开关。

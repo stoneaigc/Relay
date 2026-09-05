@@ -1,4 +1,4 @@
-//! 语义缓存 L1:精确哈希响应缓存(进程内 DashMap + TTL,零外部依赖)。
+//! 语义缓存 L1:精确哈希响应缓存(进程内 RwLock<HashMap> + TTL,零外部依赖)。
 //!
 //! - 缓存键 = sha256(path | model | provider | upstream_model | stream | 归一化请求体),
 //!   按 model/provider/upstream_model 隔离;stream 进入键,SSE 与 JSON 各自精确回放。
@@ -6,14 +6,16 @@
 //! - 存储由 handlers 的 tee 包装(cache_wrap)完成:旁路留存返回给客户端的字节,
 //!   流完整结束才落缓存(客户端中断/上游出错不缓存)。
 //! - L2(embedding 相似度)预留:similarity 字段与 threshold 配置先行落位。
+//! - 锁纪律:请求热路径只有单条 get/insert(短临界区,无嵌套锁),全表容量操作
+//!   (清过期/逐出)只在后台 sweep 执行;统计锁一律 try_lock 降级,拿不到即丢弃,
+//!   绝不阻塞请求 —— 避免 shard 锁等待在 async 上下文中占满 worker 线程。
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 use axum::body::{Body, Bytes};
 use axum::response::Response;
-use dashmap::DashMap;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -28,7 +30,7 @@ pub fn now_secs() -> u64 {
 const RECENT_CAP: usize = 200;
 /// 命中/未命中事件上限(用于 12×5min 趋势桶,余量充足)。
 const EVENTS_CAP: usize = 6000;
-/// 缓存条目上限(超出先清过期,再逐出任意一条)。
+/// 缓存条目上限(超出由后台 sweep 逐出,热路径不检查)。
 const MAX_ENTRIES: usize = 2048;
 /// 单条缓存响应体上限(超大响应不缓存,防内存放大)。
 const MAX_BODY: usize = 4 * 1024 * 1024;
@@ -61,7 +63,7 @@ pub struct HitRecord {
 
 /// 语义缓存存储 + 统计。
 pub struct SemanticCache {
-    map: DashMap<String, Entry>,
+    map: RwLock<HashMap<String, Entry>>,
     hits: AtomicU64,
     misses: AtomicU64,
     tokens_saved: AtomicU64,
@@ -78,7 +80,7 @@ impl Default for SemanticCache {
 impl SemanticCache {
     pub fn new() -> Self {
         Self {
-            map: DashMap::new(),
+            map: RwLock::new(HashMap::new()),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             tokens_saved: AtomicU64::new(0),
@@ -90,40 +92,55 @@ impl SemanticCache {
     /// 取缓存(惰性过期:过期即移除并视为未命中)。
     pub fn get(&self, key: &str) -> Option<Entry> {
         let now = now_secs();
-        if let Some(e) = self.map.get(key) {
-            if e.expires_at > now {
-                return Some(e.clone());
+        {
+            let m = self.map.read().ok()?;
+            if let Some(e) = m.get(key) {
+                if e.expires_at > now {
+                    return Some(e.clone());
+                }
             }
         }
-        self.map.remove_if(key, |_, e| e.expires_at <= now);
+        // 过期清理用 try_write:拿不到就交给后台 sweep,热路径绝不久等。
+        if let Ok(mut m) = self.map.try_write() {
+            m.remove(key);
+        }
         None
     }
 
-    /// 存缓存(超限先清过期,再逐出;超大响应体拒绝)。
+    /// 存缓存(热路径只做单条插入;容量上限由后台 sweep 兜底;超大响应体拒绝)。
     pub fn store(&self, key: String, entry: Entry) {
         if entry.body.len() > MAX_BODY {
             return;
         }
-        if self.map.len() >= MAX_ENTRIES {
-            self.sweep();
-            if self.map.len() >= MAX_ENTRIES {
-                if let Some(k) = self.map.iter().next().map(|e| e.key().clone()) {
-                    self.map.remove(&k);
-                }
-            }
+        if let Ok(mut m) = self.map.write() {
+            m.insert(key, entry);
         }
-        self.map.insert(key, entry);
     }
 
-    /// 清理全部过期条目(后台 5s tick 调用)。
+    /// 清理全部过期条目 + 容量兜底逐出(后台 5s tick 调用,全表操作不进请求热路径)。
     pub fn sweep(&self) {
         let now = now_secs();
-        self.map.retain(|_, e| e.expires_at > now);
+        let Ok(mut m) = self.map.write() else { return };
+        m.retain(|_, e| e.expires_at > now);
+        // 软上限留 25% 缓冲:超过 cap 时按 expires_at 从旧到新逐出至 3/4,
+        // 避免请求热路径在满容时抖动。
+        let cap = MAX_ENTRIES + MAX_ENTRIES / 4;
+        if m.len() > cap {
+            let floor = MAX_ENTRIES - MAX_ENTRIES / 4;
+            let mut olds: Vec<(String, u64)> =
+                m.iter().map(|(k, e)| (k.clone(), e.expires_at)).collect();
+            olds.sort_by_key(|(_, ex)| *ex);
+            for (k, _) in olds.into_iter().take(m.len() - floor) {
+                m.remove(&k);
+            }
+        }
     }
 
     /// 清空缓存与统计(管理端「清空缓存」)。
     pub fn clear(&self) {
-        self.map.clear();
+        if let Ok(mut m) = self.map.write() {
+            m.clear();
+        }
         self.hits.store(0, Ordering::Relaxed);
         self.misses.store(0, Ordering::Relaxed);
         self.tokens_saved.store(0, Ordering::Relaxed);
@@ -138,13 +155,13 @@ impl SemanticCache {
     /// 条目数(仅测试断言用)。
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.map.len()
+        self.map.read().map(|m| m.len()).unwrap_or(0)
     }
 
     /// 是否为空(仅测试断言用)。
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
-        self.map.is_empty()
+        self.len() == 0
     }
 
     /// 记录一次命中(统计 + 最近记录 + 事件)。
@@ -152,7 +169,8 @@ impl SemanticCache {
         self.hits.fetch_add(1, Ordering::Relaxed);
         self.tokens_saved
             .fetch_add(rec.tokens_saved, Ordering::Relaxed);
-        if let Ok(mut r) = self.recent.lock() {
+        // try_lock 降级:最近记录非关键路径,锁竞争时丢弃,绝不阻塞请求。
+        if let Ok(mut r) = self.recent.try_lock() {
             r.push_back(rec);
             while r.len() > RECENT_CAP {
                 r.pop_front();
@@ -168,7 +186,8 @@ impl SemanticCache {
     }
 
     fn push_event(&self, is_hit: bool) {
-        if let Ok(mut e) = self.events.lock() {
+        // try_lock 降级:统计事件非关键路径,锁竞争时丢弃,绝不阻塞请求。
+        if let Ok(mut e) = self.events.try_lock() {
             e.push_back((now_secs(), is_hit));
             while e.len() > EVENTS_CAP {
                 e.pop_front();
@@ -195,7 +214,7 @@ impl SemanticCache {
                 json!({ "ts": oldest + i * bucket, "hits": 0, "misses": 0 })
             })
             .collect();
-        if let Ok(e) = self.events.lock() {
+        if let Ok(e) = self.events.try_lock() {
             for &(ts, is_hit) in e.iter() {
                 if ts < oldest {
                     continue;
@@ -215,7 +234,7 @@ impl SemanticCache {
             "misses": misses,
             "hit_rate": (rate * 1000.0).round() / 1000.0,
             "tokens_saved": self.tokens_saved.load(Ordering::Relaxed),
-            "entries": self.map.len(),
+            "entries": self.map.read().map(|m| m.len()).unwrap_or(0),
             "trend": trend,
         })
     }

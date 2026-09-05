@@ -146,6 +146,28 @@ Vite 已配置代理，前端请求自动转发到 `:8080`，无需处理跨域�
 
 ---
 
+## 性能基准
+
+数据面基准脚本 [scripts/bench.mjs](scripts/bench.mjs)（零依赖，Node 18+），内嵌 mock OpenAI 上游：
+
+```bash
+node scripts/bench.mjs --key rk_live_xxx [--base http://localhost:8080] [--duration 10] [--concurrency 16]
+```
+
+参考数字（release build，`--duration 10 --concurrency 16`，Windows 11 桌面机，两轮取稳定值）：
+
+| 场景 | RPS | avg | P50 | P95 | P99 | 错误 |
+|---|---|---|---|---|---|---|
+| `GET /healthz`（纯 HTTP 栈） | ~9900 | 1.6ms | 1.3ms | 3.1ms | 4.3ms | 0 |
+| `GET /v1/models`（内存鉴权） | ~9600 | 1.7ms | 1.5ms | 3.0ms | 3.8ms | 0 |
+| `POST /v1/chat/completions`（全链路） | ~720 | 22ms | 4.4ms | 7.7ms | 300–390ms | 0 |
+
+- chat 场景为语义缓存 L1 **全未命中**重路径（每请求随机 nonce）：鉴权 → 路由 → 缓存查写 → 上游转发 → 计费扣减 → 异步落库；P50 仍在 5ms 内，P99 毛刺主要来自落库批刷与回环 mock 抖动。
+- 内存：持续 4 万+ 请求（缓存 1536 条驻留）后进程 WorkingSet ≈ 29MB。
+- 环境注记：本机回环 mock 上游；压测用户并发上限需 ≥ `--concurrency`（默认 16）。
+
+---
+
 ## 奖励任务
 
 奖励活动从后台配置，不再硬编码。每个任务是一条 `reward_tasks` 记录：

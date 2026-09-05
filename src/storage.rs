@@ -1822,31 +1822,42 @@ pub async fn usage_breakdown(pool: &Db) -> anyhow::Result<serde_json::Value> {
     }))
 }
 
-/// 写一条用量日志。
-pub async fn insert_usage(
+/// 单事务批量写入 usage_logs:把 N 次逐条落库合并为一次提交,高并发遥测下消费吞吐不再受逐条写入限制。
+/// 单条 SQL 失败仅记日志跳过,不影响整批(与逐条写入语义一致)。
+pub async fn insert_usage_batch(
     pool: &Db,
-    ev: &crate::state::UsageEvent,
+    evs: &[crate::state::UsageEvent],
 ) -> anyhow::Result<()> {
-    q!(
-        "INSERT INTO usage_logs
-         (user_id, key_id, model, provider, upstream_model, input_tokens, output_tokens, charged_tokens, cost_usd, status, ts, created_at, request_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(ev.user_id.to_string())
-    .bind(ev.key_id.map(|k| k.to_string()))
-    .bind(&ev.model)
-    .bind(&ev.provider)
-    .bind(&ev.upstream_model)
-    .bind(ev.input_tokens as i64)
-    .bind(ev.output_tokens as i64)
-    .bind(ev.charged_tokens)
-    .bind(ev.cost_usd)
-    .bind(ev.status as i64)
-    .bind(now_secs())
-    .bind(now_iso())
-    .bind(ev.request_id.as_deref())
-    .execute(pool)
-    .await?;
+    if evs.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for ev in evs {
+        let result = q!(
+            "INSERT INTO usage_logs
+             (user_id, key_id, model, provider, upstream_model, input_tokens, output_tokens, charged_tokens, cost_usd, status, ts, created_at, request_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(ev.user_id.to_string())
+        .bind(ev.key_id.map(|k| k.to_string()))
+        .bind(&ev.model)
+        .bind(&ev.provider)
+        .bind(&ev.upstream_model)
+        .bind(ev.input_tokens as i64)
+        .bind(ev.output_tokens as i64)
+        .bind(ev.charged_tokens)
+        .bind(ev.cost_usd)
+        .bind(ev.status as i64)
+        .bind(now_secs())
+        .bind(now_iso())
+        .bind(ev.request_id.as_deref())
+        .execute(&mut *tx)
+        .await;
+        if let Err(e) = result {
+            tracing::error!("insert usage batch item failed: {e}");
+        }
+    }
+    tx.commit().await?;
     Ok(())
 }
 

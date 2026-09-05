@@ -332,25 +332,40 @@ async fn background_task(
         tokio::select! {
             maybe = rx.recv() => {
                 match maybe {
-                    Some(mut ev) => {
-                        // 费用折算(消费端单点):按 (provider, upstream_model) 查模型价格,
-                        // 估基础成本后用 charged/(input+output) 反推总倍率,与计费口径完全一致;未定价记 0。
-                        let total = ev.input_tokens + ev.output_tokens;
-                        if total > 0 {
-                            let prices = state.routing.load().models.values()
-                                .find(|m| m.provider == ev.provider && m.upstream_model == ev.upstream_model)
-                                .map(|m| (m.input_price, m.output_price));
-                            if let Some((pi, po)) = prices {
-                                let base = crate::pricing::estimate_cost(&ev.upstream_model, ev.input_tokens as u64, ev.output_tokens as u64, pi, po);
-                                ev.cost_usd = crate::pricing::billed_cost(base, ev.input_tokens as u64, ev.output_tokens as u64, ev.charged_tokens);
+                    Some(ev) => {
+                        // 批量 drain:首条已到手,再非阻塞收取一批,单事务落库,高并发下不再逐条积压。
+                        let mut batch = vec![ev];
+                        while batch.len() < 256 {
+                            match rx.try_recv() {
+                                Ok(e) => batch.push(e),
+                                Err(_) => break,
                             }
                         }
-                        if let Err(e) = storage::insert_usage(&state.db, &ev).await {
-                            tracing::error!("insert usage failed: {e}");
+                        // 费用折算(消费端单点):按 (provider, upstream_model) 查模型价格,
+                        // 估基础成本后用 charged/(input+output) 反推总倍率,与计费口径完全一致;未定价记 0。
+                        let routing = state.routing.load();
+                        for ev in batch.iter_mut() {
+                            let total = ev.input_tokens + ev.output_tokens;
+                            if total > 0 {
+                                let prices = routing.models.values()
+                                    .find(|m| m.provider == ev.provider && m.upstream_model == ev.upstream_model)
+                                    .map(|m| (m.input_price, m.output_price));
+                                if let Some((pi, po)) = prices {
+                                    let base = crate::pricing::estimate_cost(&ev.upstream_model, ev.input_tokens as u64, ev.output_tokens as u64, pi, po);
+                                    ev.cost_usd = crate::pricing::billed_cost(base, ev.input_tokens as u64, ev.output_tokens as u64, ev.charged_tokens);
+                                }
+                            }
+                        }
+                        drop(routing);
+                        if let Err(e) = storage::insert_usage_batch(&state.db, &batch).await {
+                            tracing::error!("insert usage batch failed: {e}");
                         }
                         // 周期预算内存累计:所有 UsageEvent 都经过此处,与库内口径一致。
-                        if let Some(u) = state.users.get(&ev.user_id) {
-                            u.record_budget(ev.charged_tokens, state.tz_offset_secs as i64 / 3600);
+                        let tz_offset = state.tz_offset_secs as i64 / 3600;
+                        for ev in batch.iter() {
+                            if let Some(u) = state.users.get(&ev.user_id) {
+                                u.record_budget(ev.charged_tokens, tz_offset);
+                            }
                         }
                     }
                     None => break,
@@ -359,8 +374,16 @@ async fn background_task(
             log = req_rx.recv() => {
                 match log {
                     Some(l) => {
-                        if let Err(e) = state.request_log.write(&l).await {
-                            tracing::error!("write request_log failed: {e}");
+                        // 批量 drain + 单事务落库,与 usage 消费同思路。
+                        let mut batch = vec![l];
+                        while batch.len() < 256 {
+                            match req_rx.try_recv() {
+                                Ok(x) => batch.push(x),
+                                Err(_) => break,
+                            }
+                        }
+                        if let Err(e) = state.request_log.write_batch(batch).await {
+                            tracing::error!("write request_log batch failed: {e}");
                         }
                     }
                     None => break,
@@ -407,13 +430,26 @@ async fn calibrate_budgets(state: &AppState) {
 }
 
 /// 把内存中 dirty 的用户余额批量回写 SQLite。
+/// 先同步收集快照并立即释放 DashMap 读锁,再逐条 await 落库:
+/// 读锁绝不能跨 .await 持有,否则并发 deduct 的写锁会 park worker 线程,
+/// I/O driver 饿死后本函数的 SQLite await 永不完成,形成全运行时永久死锁。
 async fn flush_dirty(state: &AppState) {
-    for entry in state.users.iter() {
-        let u = entry.value();
-        if u.dirty.swap(false, Ordering::AcqRel) {
-            let bal = u.token_balance.load(Ordering::Relaxed);
-            if let Err(e) = storage::flush_balance(&state.db, u.id, bal).await {
-                tracing::error!("flush balance failed for {}: {e}", u.id);
+    let snapshot: Vec<_> = state
+        .users
+        .iter()
+        .filter_map(|entry| {
+            let u = entry.value();
+            if u.dirty.swap(false, Ordering::AcqRel) {
+                Some((u.id, u.token_balance.load(Ordering::Relaxed)))
+            } else {
+                None
+            }
+        })
+        .collect();
+    for (id, bal) in snapshot {
+        if let Err(e) = storage::flush_balance(&state.db, id, bal).await {
+            tracing::error!("flush balance failed for {}: {e}", id);
+            if let Some(u) = state.users.get(&id) {
                 u.dirty.store(true, Ordering::Relaxed); // 回写失败,保留 dirty 下次重试
             }
         }

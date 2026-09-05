@@ -81,6 +81,19 @@ pub trait RequestLogStore: Send + Sync {
         &self,
         q: &str,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<i64>> + Send + '_>>;
+
+    /// 批量落库:默认逐条回退到 write;SQLite 实现覆写为单事务,高并发下大幅降低提交开销。
+    fn write_batch(
+        &self,
+        logs: Vec<RequestLog>,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            for log in &logs {
+                self.write(log).await?;
+            }
+            Ok(())
+        })
+    }
 }
 
 // ======================== SQLite 实现 ========================
@@ -149,6 +162,63 @@ impl RequestLogStore for SqliteRequestLogStore {
                 .await
                 .map(|_| ())
                 .map_err(|e| anyhow::anyhow!("write request_logs failed: {e}"))
+        })
+    }
+
+    fn write_batch(
+        &self,
+        logs: Vec<RequestLog>,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            if logs.is_empty() {
+                return Ok(());
+            }
+            let mut tx = self
+                .db
+                .begin()
+                .await
+                .map_err(|e| anyhow::anyhow!("begin request_logs batch: {e}"))?;
+            for log in &logs {
+                let candidates_json = match serde_json::to_string(&log.candidates) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("write_batch: skip {}: serde: {e}", log.request_id);
+                        continue;
+                    }
+                };
+                let attempts_json = match serde_json::to_string(&log.attempts) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("write_batch: skip {}: serde: {e}", log.request_id);
+                        continue;
+                    }
+                };
+                if let Err(e) = sqlx::query(INSERT_SQL)
+                    .bind(&log.request_id)
+                    .bind(&log.user_id)
+                    .bind(&log.path)
+                    .bind(&log.requested_model)
+                    .bind(log.stream as i64)
+                    .bind(&candidates_json)
+                    .bind(&attempts_json)
+                    .bind(&log.final_kind)
+                    .bind(&log.final_upstream_model)
+                    .bind(log.final_status as i64)
+                    .bind(log.latency_ms as i64)
+                    .bind(log.input_tokens as i64)
+                    .bind(log.output_tokens as i64)
+                    .bind(log.charged_tokens)
+                    .bind(format!("@{}", log.ts))
+                    .execute(&mut *tx)
+                    .await
+                {
+                    tracing::error!("write request_logs batch item failed: {e}");
+                }
+            }
+            tx.commit()
+                .await
+                .map_err(|e| anyhow::anyhow!("commit request_logs batch: {e}"))?;
+            Ok(())
         })
     }
 
