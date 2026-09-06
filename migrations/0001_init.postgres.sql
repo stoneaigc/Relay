@@ -68,10 +68,15 @@ CREATE TABLE IF NOT EXISTS request_logs (
   input_tokens       BIGINT NOT NULL DEFAULT 0,
   output_tokens      BIGINT NOT NULL DEFAULT 0,
   charged_tokens     BIGINT NOT NULL DEFAULT 0,
+  req_body           TEXT,
+  resp_body          TEXT,
   created_at         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_reqlog_user ON request_logs(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_reqlog_reqid ON request_logs(request_id);
+CREATE INDEX IF NOT EXISTS idx_reqlog_status_created ON request_logs(final_status, created_at);
+CREATE INDEX IF NOT EXISTS idx_reqlog_created ON request_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_user_tokens ON usage_logs(user_id, charged_tokens);
 
 CREATE TABLE IF NOT EXISTS providers (
   name        TEXT PRIMARY KEY,

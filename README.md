@@ -18,7 +18,7 @@
 - **协议互转**：上游是 OpenAI 还是 Anthropic 都透明路由；支持文本、工具调用（function calling）、多模态图片（[src/translate.rs](src/translate.rs)），流式逐 chunk 回译。
 - **加权路由 / 容灾**：一个对外模型名可映射到多个上游（按权重挑选），由模型组维护；支持权重 / 优先级 / 成本优先 / 轮询 / **延迟优先**（P50 快照）五种负载策略。
 - **故障转移 + 熔断**：可重试错误（连接失败 / 超时 / 429 / 5xx）自动切换下一候选；连续失败触发熔断，半开探测。
-- **请求链路追踪**：每次请求完整记录候选顺序、权重、实际尝试（failover 链）、熔断跳过、tokens，管理后台可视化。
+- **请求链路追踪**：每次请求完整记录候选顺序、权重、实际尝试（failover 链）、熔断跳过、tokens 与请求/响应体预览，管理后台可视化；日志支持 SQLite / PostgreSQL / Elasticsearch 三种后端。
 - **全内存热路径**：鉴权、余额、并发走 `DashMap` + 原子量，热路径零同步 DB 查询；余额与用量异步落库。
 - **token 计费**：按 token 计费，支持模型级与用户级倍率（相乘），热更新即时生效。
 - **可插拔存储 / 缓存**：数据库 SQLite 或 Postgres；缓存进程内或 Redis，由配置切换。
@@ -85,6 +85,20 @@ Vite 已配置代理，前端请求自动转发到 `:8080`，无需处理跨域�
 
 ---
 
+## 部署形态
+
+| 形态 | 数据库 | 缓存 | 请求链路日志 | 适用场景 |
+|---|---|---|---|---|
+| **All-in-One（默认）** | SQLite（单文件） | 进程内 | SQLite `request_logs` 表 | 本地开发、自用、小规模部署；零外部依赖，`cargo run` 即起 |
+| **生产** | PostgreSQL | Redis（可选） | PostgreSQL 或 Elasticsearch | 多实例 / 高并发，需要更强的并发写入、备份与日志检索能力 |
+
+- **数据库切换**：`[database] type = "postgres"` + 连接分项或完整 `url`；表结构见 `migrations/*.postgres.sql`，首次启动自动幂等建表。All-in-One 直接用 SQLite 即可，无需任何外部服务。
+- **请求日志对接 ES**：`[logging] store = "elasticsearch"` 并配置 `elasticsearch_url`（可选 Basic 认证 `elasticsearch_username/password`），链路日志按日滚动写入 `<prefix>-YYYY.MM.DD`。请求/响应体预览**跟随存储后端**：ES 模式落 ES 文档同名字段；SQLite/PG 模式落 `request_logs.req_body / resp_body` 列（上限 `body_preview_max_bytes`，0=不采集）。
+- **保留策略**：`[logging] retention_days = 30` 表示链路/用量日志保留 30 天，后台任务每 10 分钟分批清理过期数据；`0`（默认）= 永久保留。
+- **缓存切换**：`[cache] type = "redis"` 供多实例共享语义缓存与热点数据；单实例保持 `memory` 即可。
+
+---
+
 ## 快速体验
 
 1. 打开门户 `:5173`，用邮箱注册（SMTP 未配置时为开发模式，验证码在接口响应的 `dev_code` 直接返回）→ 新用户自动赠送额度（默认 1000 万 token）。
@@ -117,6 +131,7 @@ Vite 已配置代理，前端请求自动转发到 `:8080`，无需处理跨域�
 - **候选顺序（负载策略）**：`# / 上游 / 模型 / 权重 / 状态`——加权命中 + failover 次序。
 - **实际尝试（failover 链）**：`上游 / 模型 / 状态 / 延迟 / 错误`——成功、`503 不可用`、`熔断跳过` 一目了然。
 - **Tokens 汇总**：↑输入 ↓输出 / 计费 / 是否流式。
+- **请求/响应体预览**：展开行内直接查看（按 `body_preview_max_bytes` 截断），便于复盘 prompt 与上游返回。
 
 失败（`final_status != 200`）行自动标红，便于快速定位故障。
 
@@ -137,7 +152,7 @@ Vite 已配置代理，前端请求自动转发到 `:8080`，无需处理跨域�
 
 | 路径 | 说明 |
 |---|---|
-| `/admin/api/request-logs?q=&limit=` | 请求链路日志（倒序，`q` 按 request_id/模型 LIKE 检索） |
+| `/admin/api/request-logs?q=&page=&page_size=&failed=&hours=` | 请求链路日志（倒序分页；`q` 按 request_id/模型检索，`failed` 只看失败/成功，`hours` 只看最近 N 小时；超大表下 `total` 在 20000 封顶，分页到此为止） |
 | `/admin/api/upstreams` | 上游熔断 / 并发状态；`/upstreams/reset` 重置熔断 |
 | `/admin/api/metrics?range_secs=&top_n=` | 指标大盘（聚合 + 上游 TopN + 时序） |
 | `GET /metrics` | Prometheus 文本指标导出（统一 48h 窗口：请求/状态/延迟 P95/P99/熔断/tokens/缓存/用户数）；管理端 JWT 优先，失败时 `Bearer <metrics.export_token>`（配置非空才放行），否则 401 |
@@ -202,7 +217,7 @@ RELAY_DATABASE__TYPE=sqlite
 | `[admin]` | `username` / `password` | 后台登录凭据，生产必须覆盖 |
 | `[email]` | `smtp_host/port/username/password/from` | 注册验证码 SMTP；`smtp_host` 空 = 开发模式。`password` 填授权码；465=SSL、587/25=STARTTLS |
 | `[defaults]` | `concurrency_limit` / `signup_grant_tokens` | 全局默认并发与新用户赠额 |
-| `[logging]` | `store` = `sqlite` \| `elasticsearch` | 请求链路日志后端；ES 为预留占位 |
+| `[logging]` | `store` = `sqlite` \| `elasticsearch` | 链路日志后端：`sqlite` 写主库（SQLite/PG）`request_logs` 表；`elasticsearch` 按日索引 `<prefix>-YYYY.MM.DD` 写 ES（配 `elasticsearch_url/index_prefix/username/password`）。`body_preview_max_bytes` 请求/响应体预览上限（0=不采集，默认 8192）；`retention_days` 保留天数（0=永久） |
 | `[metrics]` | `export_token` | `/metrics` 导出令牌：非空时 `Bearer <token>` 可代替管理端 JWT 抓取（供 Prometheus 抓取器使用）；为空时仅管理端 JWT 可访问 |
 
 > 供应商 / 模型 / 模型组 / 路由 / 奖励任务全部由管理后台维护并持久化到数据库，不在配置文件里。
@@ -220,7 +235,7 @@ src/
   translate.rs   OpenAI ⇄ Anthropic 协议互转
   providers/     上游客户端（openai / anthropic）
   routing.rs     内存路由（resolve_all：加权命中 + failover 次序）
-  reqlog.rs      请求链路模型 + 存储抽象（SQLite 默认 / ES 占位）
+  reqlog.rs      请求链路模型 + 存储抽象（SQLite / PostgreSQL / Elasticsearch）
   portal.rs      门户 API
   admin.rs       管理 API
   storage.rs     数据库读写（SQLite / Postgres）
@@ -240,14 +255,14 @@ deploy/          安装脚本 + systemd 模板
 
 - [x] 数据面：内存鉴权、加权路由、OpenAI 与 Anthropic 双协议入站、协议互转（文本/工具调用/图片）、流式与非流式、token 计费、并发限制
 - [x] 故障转移 + 熔断（可重试错误自动切换、连续失败触发熔断、半开探测）
-- [x] 请求链路追踪：全量记录候选顺序/权重/failover 链，管理后台可视化，与 `usage_logs` 以 `request_id` 关联
+- [x] 请求链路追踪：全量记录候选顺序/权重/failover 链，请求/响应体预览，失败/时间窗筛选与服务端搜索分页，管理后台可视化，与 `usage_logs` 以 `request_id` 关联
 - [x] 内存态 + 异步落库；SQLite / Postgres 可切换；缓存 memory / Redis 可切换
 - [x] 指标仪表盘：请求量/成功率/延迟/tokens 聚合 + 上游 TopN + 时序；上游熔断/并发状态面板；失败审计
 - [x] 门户：邮箱验证码注册/登录、找回密码、Key 创建/刷新（明文一次）、余额、用量趋势、在线对话、奖励申领
 - [x] 管理：用户 CRUD、并发/额度、模型倍率与用户倍率热更新、模型/组/路由维护、全局用量、奖励配置与审核、SMTP 邮箱设置（页面化）
 - [ ] RPM/TPM 限流（响应缓存已实现，见上）
 - [ ] 第三方登录：微信 / 支付宝（当前为邮箱验证码）
-- [ ] Elasticsearch 请求日志后端（已预留 trait 与配置开关，未实现）
+- [x] Elasticsearch 请求日志后端：按日索引写入 + Basic 认证；请求/响应体预览跟随存储后端，`retention_days` 过期清理
 - [x] Prometheus 指标导出：`GET /metrics` 文本格式（管理端 JWT 或 `metrics.export_token` 鉴权）
 - [x] 语义缓存：L1 精确 + L2 embedding 余弦相似度双层命中（命中免费回放），后台开关 + 命中率可视
 - [x] 模型组 JSON 导入/导出（两步向导：干跑预览 diff + 缺失上游跳过）与路由批量编辑（多选删除/改倍率/改权重）

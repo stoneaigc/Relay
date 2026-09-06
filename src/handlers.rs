@@ -34,6 +34,10 @@ pub struct RunTrace {
     pub final_upstream_model: Option<String>,
     pub final_status: i32,
     pub latency_ms: u32,
+    /// 请求体预览(截断到 body_preview_max_bytes)。
+    pub req_preview: Option<String>,
+    /// 响应体预览(仅非流式响应捕获;流式为 None)。
+    pub resp_preview: Option<String>,
 }
 
 impl RunTrace {
@@ -61,6 +65,8 @@ impl RunTrace {
             output_tokens: output,
             charged_tokens: charged,
             ts: crate::storage::now_secs(),
+            req_body: self.req_preview.clone(),
+            resp_body: self.resp_preview.clone(),
         };
         let _ = state.request_log_tx.send(log).await;
     }
@@ -83,9 +89,20 @@ impl RunTrace {
             output_tokens: 0,
             charged_tokens: 0,
             ts: crate::storage::now_secs(),
+            req_body: self.req_preview.clone(),
+            resp_body: self.resp_preview.clone(),
         };
         let _ = state.request_log_tx.send(log).await;
     }
+}
+
+/// 响应体预览:尊重 body_preview_max_bytes(0=关闭),UTF-8 边界安全截断。
+fn resp_preview_of(state: &AppState, v: &Value) -> Option<String> {
+    let max = state.config.load().logging.body_preview_max_bytes;
+    if max == 0 {
+        return None;
+    }
+    reqlog::body_preview(&serde_json::to_vec(v).unwrap_or_default(), max)
 }
 
 /// 构造候选初始列表(weight 填充,status 未定)。
@@ -168,6 +185,8 @@ pub async fn run_chat(
 ) -> Result<Response, ApiError> {
     // 全局计时器:用于 catch-all 失败路径写指标(成功率 / RPS / 延迟)
     let req_start = std::time::Instant::now();
+    // 请求体预览:跟随存储后端落库(SQLite/PG req_body 列 / ES 文档字段);body_preview_max_bytes=0 时不采集。
+    let req_preview = reqlog::body_preview(&serde_json::to_vec(&req).unwrap_or_default(), state.config.load().logging.body_preview_max_bytes);
 
     macro_rules! fail_global {
         () => {
@@ -292,6 +311,8 @@ pub async fn run_chat(
                     final_kind: Some("cache".into()),
                     final_upstream_model: Some(upstream_model.clone()),
                     final_status: 200,
+                    req_preview: req_preview.clone(),
+                    resp_preview: None,
                     latency_ms: run_start.elapsed().as_millis() as u32,
                 };
                 trace.emit_success(&state, 0, 0, 0).await;
@@ -326,6 +347,8 @@ pub async fn run_chat(
                             final_kind: Some("cache".into()),
                             final_upstream_model: Some(upstream_model.clone()),
                             final_status: 200,
+                            req_preview: req_preview.clone(),
+                            resp_preview: None,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
                         trace.emit_success(&state, 0, 0, 0).await;
@@ -392,6 +415,8 @@ pub async fn run_chat(
                             final_kind: final_kind.clone(),
                             final_upstream_model: final_upstream.clone(),
                             final_status,
+                            req_preview: req_preview.clone(),
+                            resp_preview: None,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
                         return Ok(cache_wrap(state.clone(), stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
@@ -422,6 +447,8 @@ pub async fn run_chat(
                             final_kind: final_kind.clone(),
                             final_upstream_model: final_upstream.clone(),
                             final_status,
+                            req_preview: req_preview.clone(),
+                            resp_preview: None,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
                         return non_stream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, slot, kind, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
@@ -462,7 +489,8 @@ pub async fn run_chat(
                             requested_model: model, stream,
                             candidates: cand_init, attempts,
                             final_kind, final_upstream_model: final_upstream,
-                            final_status: 400, latency_ms: run_start.elapsed().as_millis() as u32,
+                            final_status: 400, req_preview: req_preview.clone(), resp_preview: None,
+                            latency_ms: run_start.elapsed().as_millis() as u32,
                         };
                         trace.emit_error(&state, 400).await;
                         return Err(e);
@@ -500,6 +528,8 @@ pub async fn run_chat(
                             final_kind: final_kind.clone(),
                             final_upstream_model: final_upstream.clone(),
                             final_status,
+                            req_preview: req_preview.clone(),
+                            resp_preview: None,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
                         return Ok(cache_wrap(state.clone(), anthropic_stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
@@ -530,6 +560,8 @@ pub async fn run_chat(
                             final_kind: final_kind.clone(),
                             final_upstream_model: final_upstream.clone(),
                             final_status,
+                            req_preview: req_preview.clone(),
+                            resp_preview: None,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
                         return anthropic_nonstream_response(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, slot, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
@@ -569,7 +601,8 @@ pub async fn run_chat(
                             requested_model: model, stream,
                             candidates: cand_init, attempts,
                             final_kind, final_upstream_model: final_upstream,
-                            final_status: 400, latency_ms: run_start.elapsed().as_millis() as u32,
+                            final_status: 400, req_preview: req_preview.clone(), resp_preview: None,
+                            latency_ms: run_start.elapsed().as_millis() as u32,
                         };
                         trace.emit_error(&state, 400).await;
                         return Err(e);
@@ -586,6 +619,8 @@ pub async fn run_chat(
         candidates: cand_init, attempts,
         final_kind, final_upstream_model: final_upstream,
         final_status: crate::state::METRIC_STATUS_UNAVAILABLE as i32,
+        req_preview: req_preview.clone(),
+        resp_preview: None,
         latency_ms: run_start.elapsed().as_millis() as u32,
     };
     trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
@@ -616,6 +651,8 @@ async fn anthropic_nonstream_response(
     user.record_tokens(input.saturating_add(output));
 
     let payload = crate::translate::anthropic_to_openai(&aresp, &model);
+    let mut trace = trace;
+    trace.resp_preview = resp_preview_of(state, &payload);
     let _ = state.usage_tx.send(UsageEvent {
         user_id: user.id, key_id, cost_usd: 0.0, model: model.clone(), provider: provider_name, upstream_model,
         input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200,
@@ -793,6 +830,8 @@ pub async fn run_messages(
     req: Value,
 ) -> Result<Response, ApiError> {
     let req_start = std::time::Instant::now();
+    // 请求体预览:跟随存储后端落库(SQLite/PG req_body 列 / ES 文档字段);body_preview_max_bytes=0 时不采集。
+    let req_preview = reqlog::body_preview(&serde_json::to_vec(&req).unwrap_or_default(), state.config.load().logging.body_preview_max_bytes);
     macro_rules! fail_global {
         () => {
             state
@@ -905,6 +944,8 @@ pub async fn run_messages(
                     final_kind: Some("cache".into()),
                     final_upstream_model: Some(upstream_model.clone()),
                     final_status: 200,
+                    req_preview: req_preview.clone(),
+                    resp_preview: None,
                     latency_ms: run_start.elapsed().as_millis() as u32,
                 };
                 trace.emit_success(&state, 0, 0, 0).await;
@@ -939,6 +980,8 @@ pub async fn run_messages(
                             final_kind: Some("cache".into()),
                             final_upstream_model: Some(upstream_model.clone()),
                             final_status: 200,
+                            req_preview: req_preview.clone(),
+                            resp_preview: None,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
                         trace.emit_success(&state, 0, 0, 0).await;
@@ -998,7 +1041,8 @@ pub async fn run_messages(
                             requested_model: model.clone(), stream,
                             candidates: cand_init.clone(), attempts: attempts.clone(),
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
-                            final_status, latency_ms: run_start.elapsed().as_millis() as u32,
+                            final_status, req_preview: req_preview.clone(), resp_preview: None,
+                            latency_ms: run_start.elapsed().as_millis() as u32,
                         };
                         return Ok(cache_wrap(state.clone(), anthropic_passthrough_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
                     }
@@ -1022,7 +1066,8 @@ pub async fn run_messages(
                             requested_model: model.clone(), stream,
                             candidates: cand_init.clone(), attempts: attempts.clone(),
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
-                            final_status, latency_ms: run_start.elapsed().as_millis() as u32,
+                            final_status, req_preview: req_preview.clone(), resp_preview: None,
+                            latency_ms: run_start.elapsed().as_millis() as u32,
                         };
                         return anthropic_passthrough_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, slot, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
                     }
@@ -1061,7 +1106,8 @@ pub async fn run_messages(
                             requested_model: model, stream,
                             candidates: cand_init, attempts,
                             final_kind, final_upstream_model: final_upstream,
-                            final_status: 400, latency_ms: run_start.elapsed().as_millis() as u32,
+                            final_status: 400, req_preview: req_preview.clone(), resp_preview: None,
+                            latency_ms: run_start.elapsed().as_millis() as u32,
                         };
                         trace.emit_error(&state, 400).await;
                         return Err(e);
@@ -1092,7 +1138,8 @@ pub async fn run_messages(
                             requested_model: model.clone(), stream,
                             candidates: cand_init.clone(), attempts: attempts.clone(),
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
-                            final_status, latency_ms: run_start.elapsed().as_millis() as u32,
+                            final_status, req_preview: req_preview.clone(), resp_preview: None,
+                            latency_ms: run_start.elapsed().as_millis() as u32,
                         };
                         return Ok(cache_wrap(state.clone(), messages_openai_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, kind, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
                     }
@@ -1116,7 +1163,8 @@ pub async fn run_messages(
                             requested_model: model.clone(), stream,
                             candidates: cand_init.clone(), attempts: attempts.clone(),
                             final_kind: final_kind.clone(), final_upstream_model: final_upstream.clone(),
-                            final_status, latency_ms: run_start.elapsed().as_millis() as u32,
+                            final_status, req_preview: req_preview.clone(), resp_preview: None,
+                            latency_ms: run_start.elapsed().as_millis() as u32,
                         };
                         return messages_openai_nonstream(&state, resp, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, slot, kind, base_url, api_key, trace).await.map(|r| cache_wrap(state.clone(), r, cache_key, stream, embed_meta));
                     }
@@ -1155,7 +1203,8 @@ pub async fn run_messages(
                             requested_model: model, stream,
                             candidates: cand_init, attempts,
                             final_kind, final_upstream_model: final_upstream,
-                            final_status: 400, latency_ms: run_start.elapsed().as_millis() as u32,
+                            final_status: 400, req_preview: req_preview.clone(), resp_preview: None,
+                            latency_ms: run_start.elapsed().as_millis() as u32,
                         };
                         trace.emit_error(&state, 400).await;
                         return Err(e);
@@ -1171,6 +1220,8 @@ pub async fn run_messages(
         candidates: cand_init, attempts,
         final_kind, final_upstream_model: final_upstream,
         final_status: crate::state::METRIC_STATUS_UNAVAILABLE as i32,
+        req_preview: req_preview.clone(),
+        resp_preview: None,
         latency_ms: run_start.elapsed().as_millis() as u32,
     };
     trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
@@ -1222,6 +1273,8 @@ async fn anthropic_passthrough_nonstream(
     let input = payload.pointer("/usage/input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let output = payload.pointer("/usage/output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     payload["model"] = json!(model);
+    let mut trace = trace;
+    trace.resp_preview = resp_preview_of(state, &payload);
     anth_charge(state, &user, key_id, input, output, multiplier, model, provider_name, upstream_model, ProviderKind::Anthropic, base_url, api_key, Some(trace.request_id.clone()), trace).await;
     let mut out = Json(payload).into_response();
     apply_relay_headers(&mut out, &hdrs);
@@ -1289,6 +1342,8 @@ async fn messages_openai_nonstream(
     let input = oai.pointer("/usage/prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let output = oai.pointer("/usage/completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let payload = crate::translate::openai_to_anthropic_response(&oai, &model);
+    let mut trace = trace;
+    trace.resp_preview = resp_preview_of(state, &payload);
     anth_charge(state, &user, key_id, input, output, multiplier, model, provider_name, upstream_model, kind, base_url, api_key, Some(trace.request_id.clone()), trace).await;
     let mut out = Json(payload).into_response();
     apply_relay_headers(&mut out, &hdrs);
@@ -1674,6 +1729,8 @@ async fn non_stream_response(
     // 补记指标 tokens(OpenAI nonstream)
     let k = UpstreamKey::new(kind, base_url, api_key);
     state.record_metrics_tokens(Some(&k), input as u64, output as u64).await;
+    let mut trace = trace;
+    trace.resp_preview = resp_preview_of(state, &payload);
     trace.emit_success(state, input, output, charged).await;
 
     let mut out = Json(payload).into_response();

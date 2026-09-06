@@ -44,6 +44,18 @@ pub struct PageQuery {
     pub page_size: Option<u32>,
 }
 
+/// GET /admin/api/users 的查询参数(分页 + 关键字搜索)。
+#[derive(Deserialize)]
+pub struct UsersQuery {
+    #[serde(default)]
+    pub page: Option<u32>,
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    /// 搜索关键字:模糊匹配 用户名/手机号/用户ID(大小写不敏感)。
+    #[serde(default)]
+    pub q: Option<String>,
+}
+
 /// 规范化分页参数,返回 (page, page_size, offset)。
 pub fn normalize_page(page: Option<u32>, page_size: Option<u32>) -> (u32, u32, u32) {
     let page = page.unwrap_or(1).max(1);
@@ -124,15 +136,15 @@ pub async fn overview_series(
     Ok(Json(json!({ "granularity": gran, "data": data })))
 }
 
-/// GET /admin/users?page=&page_size= —— 所有用户(余额取内存实时值,分页)。
+/// GET /admin/users?page=&page_size=&q= —— 所有用户(余额取内存实时值,分页,支持关键字搜索)。
 pub async fn list_users(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    axum::extract::Query(q): axum::extract::Query<PageQuery>,
+    axum::extract::Query(q): axum::extract::Query<UsersQuery>,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
     let (page, page_size, offset) = normalize_page(q.page, q.page_size);
-    let (rows, total) = storage::list_users_page(&state.db, page_size as i64, offset as i64)
+    let (rows, total) = storage::list_users_page(&state.db, page_size as i64, offset as i64, q.q.as_deref())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let tz = state.config().defaults.tz_offset_hours;
@@ -2262,6 +2274,12 @@ pub struct RequestLogsQuery {
     /// 检索关键字(request_id / 模型名)。空 = 最近全部。
     #[serde(default)]
     pub q: Option<String>,
+    /// 状态筛选:true=只看失败,false=只看成功,缺省=全部。
+    #[serde(default)]
+    pub failed: Option<bool>,
+    /// 时间范围(小时):只看最近 N 小时,缺省=全部。
+    #[serde(default)]
+    pub hours: Option<u64>,
     #[serde(default)]
     pub page: Option<u32>,
     /// 每页条数,默认 50,最大 200。
@@ -2283,12 +2301,12 @@ pub async fn list_request_logs(
     let offset = (page - 1) * page_size;
     let logs = state
         .request_log
-        .recent(keyword, page_size, offset)
+        .recent(keyword, q.failed, q.hours, page_size, offset)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let total = state
         .request_log
-        .count(keyword)
+        .count(keyword, q.failed, q.hours)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({

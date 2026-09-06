@@ -14,7 +14,14 @@ async function req(path: string, opts: RequestInit = {}) {
   const res = await fetch(path, { ...opts, headers });
   const text = await res.text();
   const data = text ? JSON.parse(text) : {};
-  if (!res.ok) throw new Error(data?.error?.message || res.statusText);
+  if (!res.ok) {
+    // 凭证失效统一处理：清除本地 token 并广播，由 App 切回登录页（登录接口自身的 401 除外）。
+    if (res.status === 401 && !path.includes("/auth/login")) {
+      clearToken();
+      window.dispatchEvent(new Event("relay:auth-expired"));
+    }
+    throw new Error(data?.error?.message || res.statusText);
+  }
   return data;
 }
 
@@ -169,10 +176,11 @@ export const api = {
   overviewSeries: (granularity: "day" | "week" | "month"): Promise<{ granularity: string; data: { ts: number; tokens: number; calls: number }[] }> =>
     req(`/admin/api/overview/series?granularity=${granularity}`),
 
-  users: (page?: number, pageSize?: number): Promise<{ data: UserRow[]; total: number; page: number; page_size: number; total_pages: number }> => {
+  users: (page?: number, pageSize?: number, q?: string): Promise<{ data: UserRow[]; total: number; page: number; page_size: number; total_pages: number }> => {
     const qs = new URLSearchParams();
     if (typeof page === "number") qs.set("page", String(page));
     if (typeof pageSize === "number") qs.set("page_size", String(pageSize));
+    if (q && q.trim()) qs.set("q", q.trim());
     const s = qs.toString();
     return req(`/admin/api/users${s ? "?" + s : ""}`);
   },
@@ -335,11 +343,13 @@ export const api = {
   },
 
   // ---- 请求链路追踪 ----
-  requestLogs: (q?: string, page?: number, pageSize?: number): Promise<{ data: RequestLogRow[]; total: number; page: number; page_size: number; total_pages: number }> => {
+  requestLogs: (q?: string, page?: number, pageSize?: number, failed?: boolean | null, hours?: number | null): Promise<{ data: RequestLogRow[]; total: number; page: number; page_size: number; total_pages: number }> => {
     const qs = new URLSearchParams();
     if (q) qs.set("q", q);
     if (typeof page === "number") qs.set("page", String(page));
     if (typeof pageSize === "number") qs.set("page_size", String(pageSize));
+    if (typeof failed === "boolean") qs.set("failed", String(failed));
+    if (typeof hours === "number") qs.set("hours", String(hours));
     const s = qs.toString();
     return req(`/admin/api/request-logs${s ? "?" + s : ""}`);
   },
@@ -651,6 +661,10 @@ export interface RequestLogRow {
   charged_tokens: number;
   /** unix 秒 */
   ts: number;
+  /** 请求体预览(跟随存储后端:SQLite/PG 落列,ES 落文档字段;可能为 null) */
+  req_body: string | null;
+  /** 响应体预览(同 req_body;可能为 null) */
+  resp_body: string | null;
 }
 
 // ================== 用量分布 ==================

@@ -244,6 +244,13 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         // 用量日志:密钥归因 + 计费口径成本(USD)。
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN key_id TEXT").execute(pool).await;
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN cost_usd REAL").execute(pool).await;
+        // 请求链路:请求/响应体内容预览(跟随存储后端)。
+        let _ = q!("ALTER TABLE request_logs ADD COLUMN req_body TEXT")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE request_logs ADD COLUMN resp_body TEXT")
+            .execute(pool)
+            .await;
         // 模型防重唯一索引:旧库有重复时创建失败则跳过，幂等由 add_model 查询保证。
         let _ = q!("CREATE UNIQUE INDEX IF NOT EXISTS uniq_models_provider_model ON models(provider, upstream_model)")
             .execute(pool)
@@ -995,21 +1002,53 @@ pub async fn list_users(pool: &Db) -> anyhow::Result<Vec<UserRow>> {
     rows.iter().map(row_to_user).collect()
 }
 
-/// 分页版用户列表。返回(当前页, 总条数)。
+/// 分页版用户列表。q 非空时按 用户名/手机号/用户ID 模糊搜索(LOWER 匹配,SQLite/PG 通用)。
+/// 返回(当前页, 总条数)。
 pub async fn list_users_page(
     pool: &Db,
     limit: i64,
     offset: i64,
+    q: Option<&str>,
 ) -> anyhow::Result<(Vec<UserRow>, i64)> {
-    let total: i64 = q!("SELECT COUNT(*) AS c FROM users").fetch_one(pool).await?.get("c");
-    let rows = q!(
+    let kw = q
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("%{}%", s.to_lowercase()));
+    let where_sql = if kw.is_some() {
+        " WHERE (LOWER(username) LIKE ? OR phone LIKE ? OR LOWER(id) LIKE ?)"
+    } else {
+        ""
+    };
+    let count_sql = format!("SELECT COUNT(*) AS c FROM users{where_sql}");
+    let rows_sql = format!(
         "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens, source, created_at
-         FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
-    )
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
+         FROM users{where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    );
+    let total: i64 = match &kw {
+        Some(p) => {
+            q!(&count_sql)
+                .bind(p)
+                .bind(p)
+                .bind(p)
+                .fetch_one(pool)
+                .await?
+                .get("c")
+        }
+        None => q!(&count_sql).fetch_one(pool).await?.get("c"),
+    };
+    let rows = match &kw {
+        Some(p) => {
+            q!(&rows_sql)
+                .bind(p)
+                .bind(p)
+                .bind(p)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(pool)
+                .await?
+        }
+        None => q!(&rows_sql).bind(limit).bind(offset).fetch_all(pool).await?,
+    };
     Ok((rows.iter().map(row_to_user).collect::<anyhow::Result<_>>()?, total))
 }
 
@@ -2377,24 +2416,57 @@ mod tests {
 
         // 设置日/月预算并回读
         update_user(&db, id, None, None, None, None, None, Some(5000), Some(70000)).await.unwrap();
-        let (rows, _) = list_users_page(&db, 10, 0).await.unwrap();
+        let (rows, _) = list_users_page(&db, 10, 0, None).await.unwrap();
         let u = rows.iter().find(|r| r.id == id).unwrap();
         assert_eq!(u.budget_daily_tokens, Some(5000));
         assert_eq!(u.budget_monthly_tokens, Some(70000));
 
         // None 不改动既有预算
         update_user(&db, id, None, None, None, None, None, None, None).await.unwrap();
-        let (rows, _) = list_users_page(&db, 10, 0).await.unwrap();
+        let (rows, _) = list_users_page(&db, 10, 0, None).await.unwrap();
         let u = rows.iter().find(|r| r.id == id).unwrap();
         assert_eq!(u.budget_daily_tokens, Some(5000));
         assert_eq!(u.budget_monthly_tokens, Some(70000));
 
         // Some(0) 表示「不限」
         update_user(&db, id, None, None, None, None, None, Some(0), Some(0)).await.unwrap();
-        let (rows, _) = list_users_page(&db, 10, 0).await.unwrap();
+        let (rows, _) = list_users_page(&db, 10, 0, None).await.unwrap();
         let u = rows.iter().find(|r| r.id == id).unwrap();
         assert_eq!(u.budget_daily_tokens, Some(0));
         assert_eq!(u.budget_monthly_tokens, Some(0));
+    }
+
+    // ---- list_users_page 搜索 ----
+
+    #[tokio::test]
+    async fn list_users_page_search() {
+        let db = test_db().await;
+        let id = admin_create_user(&db, "searcher", "x", None, Some("13900001111"), 0, None, "admin")
+            .await
+            .unwrap();
+
+        // 按用户名搜(大小写不敏感)
+        let (rows, total) = list_users_page(&db, 10, 0, Some("Sear")).await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(rows[0].id, id);
+
+        // 按手机号搜
+        let (rows, total) = list_users_page(&db, 10, 0, Some("1390000")).await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(rows[0].phone.as_deref(), Some("13900001111"));
+
+        // 按用户 ID 搜
+        let id_kw = id.to_string();
+        let (_, total) = list_users_page(&db, 10, 0, Some(&id_kw)).await.unwrap();
+        assert_eq!(total, 1);
+
+        // 无命中
+        let (_, total) = list_users_page(&db, 10, 0, Some("nomatch")).await.unwrap();
+        assert_eq!(total, 0);
+
+        // 空/空白 q 等价于全量列表
+        let (_, total) = list_users_page(&db, 10, 0, Some("  ")).await.unwrap();
+        assert_eq!(total, 1);
     }
 
     // ---- list_providers 分页 ----

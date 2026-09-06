@@ -59,11 +59,19 @@ concurrency_limit = 16
 signup_grant_tokens = 10_000_000   # 新用户赠送 1000 万 token
 
 # 请求链路日志存储后端。
-# store: sqlite(默认,写 request_logs 表)| elasticsearch(预留,暂未实现)。
+# store: sqlite(默认,写 request_logs 表)| elasticsearch(按日索引 <prefix>-YYYY.MM.DD 写入 ES)。
+# 请求/响应体预览跟随存储后端:SQLite/PG 落 request_logs.req_body/resp_body 列,ES 落文档字段。
 [logging]
 store = "sqlite"
-# 预留:ES 连接地址(store=elasticsearch 时用,暂未实现)。
+# body 预览采集上限(字节),0=不采集,默认 8192。
+# body_preview_max_bytes = 8192
+# 链路日志保留天数:超期由后台每 10 分钟分批删除;0=永久保留(默认)。
+# retention_days = 0
+# ES 对接(store=elasticsearch 时生效):
 # elasticsearch_url = "http://127.0.0.1:9200"
+# elasticsearch_index_prefix = "relay-logs"
+# elasticsearch_username = ""
+# elasticsearch_password = ""
 
 # 注:奖励任务(star / issue / 提建议 等)以及 供应商 / 模型 / 模型组 / 路由,
 # 全部由管理后台维护并持久化到数据库,不在此配置;首次启动会自动播种 3 个示例奖励任务。

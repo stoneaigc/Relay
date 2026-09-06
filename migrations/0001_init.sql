@@ -67,10 +67,15 @@ CREATE TABLE IF NOT EXISTS request_logs (
   input_tokens       INTEGER NOT NULL DEFAULT 0,
   output_tokens      INTEGER NOT NULL DEFAULT 0,
   charged_tokens     INTEGER NOT NULL DEFAULT 0,
+  req_body           TEXT,                     -- 请求体内容预览(跟随存储后端,UTF-8 安全截断)
+  resp_body          TEXT,                     -- 响应体内容预览(流式路径暂不采集)
   created_at         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_reqlog_user ON request_logs(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_reqlog_reqid ON request_logs(request_id);
+CREATE INDEX IF NOT EXISTS idx_reqlog_status_created ON request_logs(final_status, created_at);
+CREATE INDEX IF NOT EXISTS idx_reqlog_created ON request_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_user_tokens ON usage_logs(user_id, charged_tokens);
 
 CREATE TABLE IF NOT EXISTS providers (
   name        TEXT PRIMARY KEY,

@@ -19,6 +19,12 @@ import { Switch } from "@/components/ui/switch";
 
 export default function App() {
   const [authed, setAuthed] = useState(!!getToken());
+  // 401 凭证失效统一登出:api 层清除 token 后广播此事件,这里切回登录页。
+  useEffect(() => {
+    const onExpired = () => setAuthed(false);
+    window.addEventListener("relay:auth-expired", onExpired);
+    return () => window.removeEventListener("relay:auth-expired", onExpired);
+  }, []);
   return (
     <>
       <Toaster position="top-center" richColors />
@@ -37,9 +43,12 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
   const [u, setU] = useState("admin");
   const [p, setP] = useState("");
   const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
   const submit = async () => {
+    if (busy) return;
     setErr("");
-    try { const r = await api.login(u, p); setToken(r.token); onSuccess(); } catch { setErr("用户名或密码错误"); }
+    setBusy(true);
+    try { const r = await api.login(u, p); setToken(r.token); onSuccess(); } catch { setErr("用户名或密码错误"); } finally { setBusy(false); }
   };
   return (
     <div className="flex min-h-screen items-center justify-center p-4">
@@ -62,11 +71,25 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
         <CardContent className="space-y-3">
           <Input placeholder="用户名" value={u} onChange={(e) => setU(e.target.value)} />
           <PasswordInput placeholder="密码" value={p} onChange={(e) => setP(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
-          <Button className="w-full" onClick={submit}>登录</Button>
+          <Button className="w-full" disabled={busy} onClick={submit}>登录</Button>
           {err && <p className="text-sm text-destructive">{err}</p>}
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+function NotFoundPanel() {
+  const nav = useNavigate();
+  return (
+    <Card className="mx-auto mt-12 max-w-md">
+      <CardContent className="flex flex-col items-center gap-3 py-10 text-center">
+        <AlertTriangle className="h-8 w-8 text-amber-500" />
+        <div className="text-lg font-semibold">404 · 页面不存在</div>
+        <p className="text-sm text-muted-foreground">该地址没有对应的功能面板,请从左侧导航选择。</p>
+        <Button variant="outline" size="sm" onClick={() => nav("/overview")}>返回概览</Button>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -162,6 +185,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
                 <Route path="/cache" element={<CachePanel />} />
                 <Route path="/docs" element={<ApiDocsPanel />} />
                 <Route path="/settings" element={<SettingsPanel />} />
+                <Route path="*" element={<NotFoundPanel />} />
               </Routes>
             </div>
           </div>
@@ -528,17 +552,29 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
   const [userDlg, setUserDlg] = useState<{ edit: UserRow | null } | null>(null);
   const [chart, setChart] = useState<UserRow | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const qRef = useRef("");
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = async () => {
     try {
-      const [u, g] = await Promise.all([api.users(page, pageSize), api.groups()]);
+      const [u, g] = await Promise.all([api.users(page, pageSize, qRef.current || undefined), api.groups()]);
       setRows(u.data); setGroups(g.data); setTotal(u.total);
     } catch (e: any) { if (String(e.message).includes("auth")) onAuthErr(); }
   };
   useEffect(() => { load(); }, [page, pageSize]);
+  // 卸载时清掉搜索防抖定时器,避免组件销毁后 setState。
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
 
-  const filtered = rows.filter((u) =>
-    !q.trim() || (u.username || "").includes(q.trim()) || (u.phone || "").includes(q.trim()) || u.id.includes(q.trim()));
+  // 服务端搜索:500ms 防抖,搜索范围覆盖全部用户(跨页),而非仅当前页。
+  const onSearch = (v: string) => {
+    setQ(v);
+    qRef.current = v;
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      if (page !== 1) setPage(1);
+      else load();
+    }, 500);
+  };
   const toggle = async (u: UserRow) => { await api.patchUser(u.id, { status: u.status === 0 ? 1 : 0 }); load(); };
   const bindGroup = async (u: UserRow, gid: number) => { await api.patchUser(u.id, { group_id: gid }); load(); };
   const del = (u: UserRow) => setConfirm({
@@ -552,9 +588,9 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
-            <CardTitle className="text-base">所有用户({filtered.length}/{rows.length})</CardTitle>
+            <CardTitle className="text-base">所有用户({total})</CardTitle>
             <div className="flex items-center gap-2">
-              <Input className="w-56" placeholder="搜索手机号 / ID" value={q} onChange={(e) => { setQ(e.target.value); if (page !== 1) setPage(1); }} />
+              <Input className="w-56" placeholder="搜索用户名 / 手机号 / ID" value={q} onChange={(e) => onSearch(e.target.value)} />
               <Button size="sm" onClick={() => setUserDlg({ edit: null })}><Plus className="h-4 w-4" />创建用户</Button>
             </div>
           </div>
@@ -569,7 +605,7 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filtered.map((u) => (
+              {rows.map((u) => (
                 <TableRow key={u.id}>
                   <TableCell>
                     <div className="flex items-center gap-2.5">
@@ -3015,10 +3051,10 @@ function SettingsPanel() {
 // ============================================================
 
 type BreakerTone = "healthy" | "warn" | "broken";
-function breakerTone(fc: number, threshold: number, broken: boolean): BreakerTone {
+function breakerTone(fc: number, _threshold: number, broken: boolean): BreakerTone {
   if (broken) return "broken";
   if (fc === 0) return "healthy";
-  if (fc >= threshold - 1) return "warn";
+  // 任何非零失败计数都值得关注:healthy 与 broken 之间的过渡态统一用告警色。
   return "warn";
 }
 const TONE_CLS: Record<BreakerTone, string> = {
@@ -4374,22 +4410,33 @@ function RequestLogPanel() {
   const [rows, setRows] = useState<RequestLogRow[]>([]);
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
   const [expanded, setExpanded] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
+  const [failed, setFailed] = useState<"all" | "ok" | "fail">("all");
+  const [hours, setHours] = useState<number | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const qRef = useRef("");
 
   const load = async () => {
-    setLoading(true);
+    setLoading(true); setErr("");
     try {
-      const r = await api.requestLogs(qRef.current || undefined, page, pageSize);
+      const r = await api.requestLogs(
+        qRef.current || undefined, page, pageSize,
+        failed === "all" ? null : failed === "fail",
+        hours,
+      );
       setRows(r.data); setTotal(r.total);
+    } catch (e: any) {
+      setErr(e?.message || "加载失败");
     } finally { setLoading(false); }
   };
 
-  useEffect(() => { load(); }, [page, pageSize]);
+  useEffect(() => { load(); }, [page, pageSize, failed, hours]);
+  // 卸载时清掉搜索防抖定时器,避免组件销毁后 setState。
+  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
 
   const onSearch = (v: string) => {
     setQ(v);
@@ -4400,6 +4447,9 @@ function RequestLogPanel() {
       else load();
     }, 500);
   };
+
+  const onFailed = (v: "all" | "ok" | "fail") => { setFailed(v); setPage(1); };
+  const onHours = (v: string) => { setHours(v ? Number(v) : null); setPage(1); };
 
   const fmtTime = (ts: number) => {
     const d = new Date(ts * 1000);
@@ -4424,6 +4474,19 @@ function RequestLogPanel() {
                   onChange={(e) => onSearch(e.target.value)}
                 />
               </div>
+              <select value={failed} onChange={(e) => onFailed(e.target.value as "all" | "ok" | "fail")}
+                className="h-8 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring">
+                <option value="all">全部状态</option>
+                <option value="fail">仅失败</option>
+                <option value="ok">仅成功</option>
+              </select>
+              <select value={hours ?? ""} onChange={(e) => onHours(e.target.value)}
+                className="h-8 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring">
+                <option value="">全部时间</option>
+                <option value="24">最近 24 小时</option>
+                <option value="72">最近 3 天</option>
+                <option value="168">最近 7 天</option>
+              </select>
               <Button size="sm" variant="outline" className="h-8" onClick={() => load()}>
                 <RefreshCw className="h-3.5 w-3.5" />
               </Button>
@@ -4431,7 +4494,12 @@ function RequestLogPanel() {
           </div>
         </CardHeader>
         <CardContent>
-          {loading ? (
+          {err ? (
+            <div className="flex flex-col items-center gap-2 py-8">
+              <p className="text-sm text-destructive">{err}</p>
+              <Button size="sm" variant="outline" onClick={() => load()}>重试</Button>
+            </div>
+          ) : loading ? (
             <p className="text-sm text-muted-foreground">加载中…</p>
           ) : rows.length === 0 ? (
             <p className="text-sm text-muted-foreground">暂无请求记录</p>
@@ -4575,6 +4643,17 @@ function RequestLogPanel() {
                                       );
                                     })}
                                   </div>
+                                </div>
+                              )}
+                              {/* 请求/响应体预览(跟随存储后端;旧记录或未采集时为空) */}
+                              {(r.req_body || r.resp_body) && (
+                                <div className="grid gap-3 md:grid-cols-2">
+                                  {([["请求体", r.req_body], ["响应体", r.resp_body]] as const).map(([label, body]) => body ? (
+                                    <div key={label}>
+                                      <p className="mb-1 text-xs font-medium text-muted-foreground">{label}预览</p>
+                                      <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-background p-2 text-[11px] leading-relaxed text-muted-foreground">{body}</pre>
+                                    </div>
+                                  ) : null)}
                                 </div>
                               )}
                               {/* Tokens 汇总 */}

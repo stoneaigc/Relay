@@ -138,13 +138,17 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
 
     let (usage_tx, usage_rx) = mpsc::channel::<UsageEvent>(4096);
-    // 请求链路日志:按配置选择存储后端(默认 SQLite;ES 预留)。
+    // 请求链路日志:按配置选择存储后端(sqlite=默认写 request_logs 表;elasticsearch=按日索引写入 ES)。
     let (request_log_tx, request_log_rx) = mpsc::channel::<reqlog::RequestLog>(4096);
     let log_store: Arc<dyn reqlog::RequestLogStore> = {
         let store_kind = cfg.logging.store.clone();
-        let es_url = cfg.logging.elasticsearch_url.clone();
         match store_kind.as_str() {
-            "elasticsearch" => Arc::new(reqlog::EsRequestLogStore::new(es_url)),
+            "elasticsearch" => Arc::new(reqlog::EsRequestLogStore::new(
+                cfg.logging.elasticsearch_url.clone(),
+                cfg.logging.elasticsearch_index_prefix.clone(),
+                cfg.logging.elasticsearch_username.clone(),
+                cfg.logging.elasticsearch_password.clone(),
+            )),
             _ => Arc::new(reqlog::SqliteRequestLogStore::new(db.clone())),
         }
     };
@@ -328,6 +332,9 @@ async fn background_task(
     mut req_rx: mpsc::Receiver<reqlog::RequestLog>,
 ) {
     let mut tick = tokio::time::interval(Duration::from_secs(5));
+    // 日志保留清理周期:每 10 分钟检查一次,按 logging.retention_days 删除超期链路日志(0=不清理)。
+    let mut retention_tick = tokio::time::interval(Duration::from_secs(600));
+    let mut calibrate_counter = 0u32;
     loop {
         tokio::select! {
             maybe = rx.recv() => {
@@ -391,8 +398,25 @@ async fn background_task(
             }
             _ = tick.tick() => {
                 flush_dirty(&state).await;
-                calibrate_budgets(&state).await;
+                // calibrate_budgets 对 usage_logs 做聚合扫描,大表下代价高:降频到约每分钟一次。
+                // 请求路径的预算扣减走内存累计,此处只是周期性对齐库内值。
+                calibrate_counter += 1;
+                if calibrate_counter >= 12 {
+                    calibrate_counter = 0;
+                    calibrate_budgets(&state).await;
+                }
                 state.semantic_cache.sweep();
+            }
+            _ = retention_tick.tick() => {
+                // 超期链路日志清理:retention_days=0 时跳过(永久保留)。
+                let days = state.config.load().logging.retention_days as u64;
+                if days > 0 {
+                    match state.request_log.prune(days).await {
+                        Ok(n) if n > 0 => tracing::info!("pruned {} request logs older than {days} days", n),
+                        Ok(_) => {}
+                        Err(e) => tracing::error!("prune request logs failed: {e}"),
+                    }
+                }
             }
         }
     }

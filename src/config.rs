@@ -34,16 +34,36 @@ pub struct Config {
 /// 请求日志存储后端。
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoggingConfig {
-    /// 请求链路日志存储:"sqlite"(默认,写 request_logs 表)| "elasticsearch"(预留)。
+    /// 请求链路日志存储:"sqlite"(默认,写 request_logs 表)| "elasticsearch"(按日索引写入 ES)。
     #[serde(default = "default_log_store")]
     pub store: String,
-    /// 预留:ES 连接地址(store=elasticsearch 时用,暂未实现)。
+    /// ES 连接地址(store=elasticsearch 时用,如 http://127.0.0.1:9200)。
     #[serde(default)]
     pub elasticsearch_url: String,
+    /// ES 索引前缀,按日滚动为 <prefix>-YYYY.MM.DD,默认 relay-logs。
+    #[serde(default)]
+    pub elasticsearch_index_prefix: String,
+    /// ES Basic 认证用户名(可选,留空=匿名)。
+    #[serde(default)]
+    pub elasticsearch_username: String,
+    /// ES Basic 认证密码(可选)。
+    #[serde(default)]
+    pub elasticsearch_password: String,
+    /// 请求/响应体预览采集上限(字节);0=不采集,默认 8192。
+    /// 预览跟随存储后端:SQLite/PG 写 request_logs.req_body/resp_body 列,ES 写文档同名字段。
+    #[serde(default = "default_body_preview")]
+    pub body_preview_max_bytes: usize,
+    /// 请求链路/用量日志保留天数,超期由后台任务分批删除;0=永久保留(默认)。
+    #[serde(default)]
+    pub retention_days: u32,
 }
 
 fn default_log_store() -> String {
     "sqlite".to_string()
+}
+
+fn default_body_preview() -> usize {
+    8192
 }
 
 impl Default for LoggingConfig {
@@ -51,6 +71,11 @@ impl Default for LoggingConfig {
         Self {
             store: default_log_store(),
             elasticsearch_url: String::new(),
+            elasticsearch_index_prefix: String::new(),
+            elasticsearch_username: String::new(),
+            elasticsearch_password: String::new(),
+            body_preview_max_bytes: default_body_preview(),
+            retention_days: 0,
         }
     }
 }
