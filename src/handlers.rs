@@ -538,8 +538,9 @@ pub async fn run_chat(
         // ---- P2:熔断检查 ----
         let ukey = UpstreamKey::new(kind, base_url, api_key);
         if state.breaker_should_skip(&ukey).await {
+            // 跳过的候选也留痕:kind="skipped" + 原因在 error(status=-1 前端渲染为跳过)。
             attempts.push(RequestAttempt {
-                kind: match kind { ProviderKind::Openai => "openai".to_string(), ProviderKind::Anthropic => "anthropic".to_string() },
+                kind: "skipped".to_string(),
                 provider: provider_name.clone(),
                 base_url: base_url.clone(),
                 upstream_model: upstream_model.clone(),
@@ -792,19 +793,19 @@ pub async fn run_chat(
         requested_model: model.clone(), stream,
         candidates: cand_init, attempts,
         final_kind, final_upstream_model: final_upstream,
-        final_status: crate::state::METRIC_STATUS_UNAVAILABLE as i32,
+        final_status: crate::state::METRIC_STATUS_BAD_GATEWAY as i32,
         req_preview: req_preview.clone(),
         resp_preview: None,
         latency_ms: run_start.elapsed().as_millis() as u32,
     };
-    trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
+    trace.emit_error(&state, crate::state::METRIC_STATUS_BAD_GATEWAY as i32).await;
     Err(err)
 }
 
 /// 走完全部候选后的对外错误:有过真实尝试 → AllFailed(带脱敏末次错误);
-/// 从未真正发起请求(无候选/全被熔断跳过) → NoTarget。
+/// 从未真正发起请求(无候选/全被熔断跳过,status 全为 -1) → NoTarget。
 fn exhausted_error(model: &str, attempts: &[RequestAttempt]) -> ApiError {
-    if attempts.is_empty() {
+    if attempts.is_empty() || attempts.iter().all(|a| a.status == -1) {
         return ApiError::NoTarget(model.to_string());
     }
     let last = attempts
@@ -1190,8 +1191,9 @@ pub async fn run_messages(
         // ---- P2:熔断检查 ----
         let ukey = UpstreamKey::new(kind, base_url, api_key);
         if state.breaker_should_skip(&ukey).await {
+            // 跳过的候选也留痕:kind="skipped" + 原因在 error(status=-1 前端渲染为跳过)。
             attempts.push(RequestAttempt {
-                kind: match kind { ProviderKind::Openai => "openai".to_string(), ProviderKind::Anthropic => "anthropic".to_string() },
+                kind: "skipped".to_string(),
                 provider: provider_name.clone(),
                 base_url: base_url.clone(),
                 upstream_model: upstream_model.clone(),
@@ -1412,12 +1414,12 @@ pub async fn run_messages(
         requested_model: model.clone(), stream,
         candidates: cand_init, attempts,
         final_kind, final_upstream_model: final_upstream,
-        final_status: crate::state::METRIC_STATUS_UNAVAILABLE as i32,
+        final_status: crate::state::METRIC_STATUS_BAD_GATEWAY as i32,
         req_preview: req_preview.clone(),
         resp_preview: None,
         latency_ms: run_start.elapsed().as_millis() as u32,
     };
-    trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
+    trace.emit_error(&state, crate::state::METRIC_STATUS_BAD_GATEWAY as i32).await;
     Err(err)
 }
 
@@ -1989,5 +1991,46 @@ fn scan_usage(buf: &mut Vec<u8>, new: &[u8], input: &mut u32, output: &mut u32) 
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn skipped_attempt() -> RequestAttempt {
+        RequestAttempt {
+            kind: "skipped".into(),
+            provider: "p1".into(),
+            base_url: "https://u1".into(),
+            upstream_model: "m".into(),
+            weight: 100,
+            status: -1,
+            latency_ms: 0,
+            error: "breaker open, skip".into(),
+        }
+    }
+
+    #[test]
+    fn exhausted_error_empty_attempts_maps_to_no_target() {
+        assert!(matches!(exhausted_error("gpt-x", &[]), ApiError::NoTarget(_)));
+    }
+
+    #[test]
+    fn exhausted_error_all_breaker_skipped_maps_to_no_target() {
+        // 全被熔断跳过:从未真正发起请求,对外应为 NoTarget 而非带 last_status=-1 的 AllFailed。
+        let attempts = vec![skipped_attempt()];
+        assert!(matches!(exhausted_error("gpt-x", &attempts), ApiError::NoTarget(_)));
+    }
+
+    #[test]
+    fn exhausted_error_with_real_attempts_picks_last_real() {
+        let attempts = vec![
+            RequestAttempt { kind: "openai".into(), provider: "p1".into(), base_url: "https://u1".into(), upstream_model: "m".into(), weight: 100, status: 503, latency_ms: 10, error: "upstream down".into() },
+            RequestAttempt { kind: "skipped".into(), provider: "p2".into(), base_url: "https://u2".into(), upstream_model: "m".into(), weight: 100, status: -1, latency_ms: 0, error: "breaker open, skip".into() },
+        ];
+        let e = exhausted_error("gpt-x", &attempts);
+        // 末尾的 skipped 条目应被过滤,取末次真实尝试(503)。
+        assert!(matches!(e, ApiError::AllFailed { last_status: 503, ref last_error, .. } if last_error == "upstream down"));
     }
 }

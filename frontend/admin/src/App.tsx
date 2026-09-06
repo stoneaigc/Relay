@@ -4754,8 +4754,8 @@ function RequestLogPanel() {
                                         <td className="py-1 mono">{c.weight}</td>
                                         <td className="py-1">
                                           {(() => {
-                                            // 在 attempts 中查找对应候选的状态
-                                            const att = r.attempts.find((a) => a.kind === c.kind && a.upstream_model === c.upstream_model);
+                                            // 在 attempts 中查找对应候选的状态(熔断跳过条目 kind="skipped",按上游模型兜底匹配)
+                                            const att = r.attempts.find((a) => (a.kind === c.kind || a.kind === "skipped") && a.upstream_model === c.upstream_model);
                                             if (att) {
                                               return <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(att.status))}>{attemptStatusLabel(att.status)}</span>;
                                             }
