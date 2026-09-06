@@ -130,6 +130,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // 存量回填:users.token_used_total 死列修复(幂等,只执行一次)。
+    storage::backfill_used_total(&db).await?;
+
     // 冷启动:全量加载用户与 Key 到内存。
     let keys = DashMap::new();
     let users = DashMap::new();
@@ -503,14 +506,18 @@ async fn flush_dirty(state: &AppState) {
         .filter_map(|entry| {
             let u = entry.value();
             if u.dirty.swap(false, Ordering::AcqRel) {
-                Some((u.id, u.token_balance.load(Ordering::Relaxed)))
+                Some((
+                    u.id,
+                    u.token_balance.load(Ordering::Relaxed),
+                    u.token_used_total.load(Ordering::Relaxed),
+                ))
             } else {
                 None
             }
         })
         .collect();
-    for (id, bal) in snapshot {
-        if let Err(e) = storage::flush_balance(&state.db, id, bal).await {
+    for (id, bal, used) in snapshot {
+        if let Err(e) = storage::flush_balance(&state.db, id, bal, used).await {
             tracing::error!("flush balance failed for {}: {e}", id);
             if let Some(u) = state.users.get(&id) {
                 u.dirty.store(true, Ordering::Relaxed); // 回写失败,保留 dirty 下次重试

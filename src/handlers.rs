@@ -321,6 +321,32 @@ async fn run_openai(
     run_chat(state, auth.user, Some(auth.key_id), req).await
 }
 
+/// 入站校验:messages 必须为非空数组,stream/max_tokens 类型必须正确(双协议同规则)。
+/// 无效请求直接 400,不再转发上游(避免白耗 failover 与上游 400 语义混淆)。
+fn validate_chat_payload(req: &Value) -> Result<(), ApiError> {
+    match req.get("messages") {
+        None | Some(Value::Null) => {
+            return Err(ApiError::BadRequest("missing `messages`".into()));
+        }
+        Some(Value::Array(a)) if a.is_empty() => {
+            return Err(ApiError::BadRequest("`messages` 不能为空数组".into()));
+        }
+        Some(Value::Array(_)) => {}
+        Some(_) => return Err(ApiError::BadRequest("`messages` 必须为数组".into())),
+    }
+    if let Some(s) = req.get("stream") {
+        if !s.is_boolean() {
+            return Err(ApiError::BadRequest("`stream` 必须为布尔值".into()));
+        }
+    }
+    if let Some(mt) = req.get("max_tokens") {
+        if !mt.is_u64() {
+            return Err(ApiError::BadRequest("`max_tokens` 必须为正整数".into()));
+        }
+    }
+    Ok(())
+}
+
 /// 数据面核心:对已鉴权的用户执行一次 chat 调用(路由 + 上游 + 计费 + 并发)。
 /// 同时供 `/v1/chat/completions`(Key)与 `/portal/chat`(门户 JWT)复用;门户无密钥传 None。
 pub async fn run_chat(
@@ -366,6 +392,7 @@ pub async fn run_chat(
         }
     }
 
+    validate_chat_payload(&req)?;
     let model = req
         .get("model")
         .and_then(|m| m.as_str())
@@ -759,6 +786,7 @@ pub async fn run_chat(
     }
     // 走完全部候选都没命中(空数组 / 全被熔断 / 全部 Unavailable 转移完 / 没写路由模型):
     fail_global!();
+    let err = exhausted_error(&model, &attempts);
     let trace = RunTrace {
         request_id, user_id: user_id_str, path: run_path,
         requested_model: model.clone(), stream,
@@ -770,7 +798,25 @@ pub async fn run_chat(
         latency_ms: run_start.elapsed().as_millis() as u32,
     };
     trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
-    Err(ApiError::NoTarget(model.clone()))
+    Err(err)
+}
+
+/// 走完全部候选后的对外错误:有过真实尝试 → AllFailed(带脱敏末次错误);
+/// 从未真正发起请求(无候选/全被熔断跳过) → NoTarget。
+fn exhausted_error(model: &str, attempts: &[RequestAttempt]) -> ApiError {
+    if attempts.is_empty() {
+        return ApiError::NoTarget(model.to_string());
+    }
+    let last = attempts
+        .iter()
+        .rev()
+        .find(|a| a.status != -1)
+        .unwrap_or_else(|| attempts.last().expect("attempts 非空"));
+    ApiError::AllFailed {
+        model: model.to_string(),
+        last_error: crate::error::sanitize_upstream_error(&last.error),
+        last_status: last.status,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1360,6 +1406,7 @@ pub async fn run_messages(
         }
     }
     fail_global!();
+    let err = exhausted_error(&model, &attempts);
     let trace = RunTrace {
         request_id, user_id: user_id_str, path: run_path,
         requested_model: model.clone(), stream,
@@ -1371,7 +1418,7 @@ pub async fn run_messages(
         latency_ms: run_start.elapsed().as_millis() as u32,
     };
     trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
-    Err(ApiError::NoTarget(model.clone()))
+    Err(err)
 }
 
 /// 计费 + 用量事件 + 补记指标 tokens(不增加 req 计数 / 不影响成功率与延迟)。

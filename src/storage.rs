@@ -272,7 +272,7 @@ pub async fn load_into_memory(
     keys: &DashMap<String, KeyEntry>,
 ) -> anyhow::Result<()> {
     let rows = q!(
-        "SELECT id, status, token_balance, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens FROM users",
+        "SELECT id, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens FROM users",
     )
     .fetch_all(pool)
     .await?;
@@ -280,13 +280,14 @@ pub async fn load_into_memory(
         let id = Uuid::parse_str(r.get::<String, _>("id").as_str())?;
         let status: i64 = r.get("status");
         let balance: i64 = r.get("token_balance");
+        let used_total: i64 = r.try_get("token_used_total").unwrap_or(0);
         let cl: Option<i64> = r.get("concurrency_limit");
         let mult: f64 = r.try_get("bill_multiplier").unwrap_or(1.0);
         let group_id: i64 = r.try_get::<Option<i64>, _>("group_id").ok().flatten().unwrap_or(0);
         let limit = cl.map(|v| v as u32).unwrap_or(cfg.defaults.concurrency_limit);
         let rpm = r.try_get::<Option<i64>, _>("rpm_limit").ok().flatten().unwrap_or(cfg.defaults.rpm_limit as i64).max(0) as u32;
         let tpm = r.try_get::<Option<i64>, _>("tpm_limit").ok().flatten().unwrap_or(cfg.defaults.tpm_limit as i64).max(0) as u32;
-        let us = Arc::new(UserState::new(id, balance, limit, status as u8, mult, group_id));
+        let us = Arc::new(UserState::new(id, balance, used_total, limit, status as u8, mult, group_id));
         us.set_limits(rpm, tpm);
         let bd = r.try_get::<Option<i64>, _>("budget_daily_tokens").ok().flatten().unwrap_or(0).max(0);
         let bm = r.try_get::<Option<i64>, _>("budget_monthly_tokens").ok().flatten().unwrap_or(0).max(0);
@@ -857,13 +858,41 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
     Ok(routing)
 }
 
-/// 把内存中余额回写一条用户记录。
-pub async fn flush_balance(pool: &Db, user_id: Uuid, balance: i64) -> anyhow::Result<()> {
-    q!("UPDATE users SET token_balance = ? WHERE id = ?")
+/// 把内存中余额与累计消耗回写一条用户记录(同语句原子覆盖)。
+pub async fn flush_balance(
+    pool: &Db,
+    user_id: Uuid,
+    balance: i64,
+    used_total: i64,
+) -> anyhow::Result<()> {
+    q!("UPDATE users SET token_balance = ?, token_used_total = ? WHERE id = ?")
         .bind(balance)
+        .bind(used_total)
         .bind(user_id.to_string())
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// 一次性回填:历史用量聚合到 users.token_used_total(修复死列)。
+/// 以 settings 表 `migration.used_total_backfill` 标记幂等,只执行一次;
+/// 仅统计 status=200 的 usage_logs,与"缓存命中不计费"口径一致。
+pub async fn backfill_used_total(pool: &Db) -> anyhow::Result<()> {
+    const MARKER: &str = "migration.used_total_backfill";
+    let done = load_settings(pool, "migration.").await?;
+    if done.contains_key(MARKER) {
+        return Ok(());
+    }
+    q!(
+        "UPDATE users SET token_used_total = (
+            SELECT COALESCE(SUM(charged_tokens), 0) FROM usage_logs
+            WHERE usage_logs.user_id = users.id AND usage_logs.status = 200
+        )",
+    )
+    .execute(pool)
+    .await?;
+    set_setting(pool, MARKER, &now_iso()).await?;
+    tracing::info!("token_used_total backfilled from usage_logs");
     Ok(())
 }
 

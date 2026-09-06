@@ -234,3 +234,91 @@
 - 后端零开发：消费现有 `GET /admin/api/overview/series`（day/week/month）。
 - 前端概览页手写 SVG 柱状图（零新依赖、token 主题色、粒度切换 + hover tooltip）。
 
+***
+
+## 11. 批 L 计划（2026-09-06 真实环境复盘：语义缓存整改，已拍板）
+
+背景：真实上游全链路测试（REAL_UPSTREAM_TEST.md 问题④）暴露语义缓存四个设计缺陷。复盘拍板四条：**① 路由级 opt-in 默认关；② 仅缓存确定性请求；③ 命中可配折扣率默认免费；④ 进 PLAN 排期**。L2 语义缓存维持现状（embedding 配置 gating，默认关），风险已在记录文档标注。
+
+工作流铁律（每个功能同一闭环）：最小改动、高内聚低耦合 → cargo test 全绿 → UI/API 走查 → 对抗式审查 → git 提交（中文消息）。
+
+### L1 路由级缓存 opt-in（默认关）
+- 迁移：routes 表加 `cache_enabled INTEGER DEFAULT 0`（SQLite/PG 双迁移）。
+- 后端：AddRoute / 更新路由结构加 `cache: Option<bool>`（缺省 false）；RouteCandidate 透传 cache_enabled。
+- 判定链改为：全局 enabled（总闸）&& 路由 cache_enabled && eligible(...)。
+- UI：添加/编辑路由表单加「响应缓存」开关（说明文案：命中后重复请求回放缓存响应）；路由表格加缓存徽标（复用现有标签风格）。
+
+### L2 仅缓存确定性请求
+- 新增 `deterministic(req)`：temperature 存在且 ≤ 0.001，或带 seed —— 满足其一才可缓存；**缺省 temperature（=1）视为非确定性不可缓存**（文档明示）。OpenAI/Anthropic 两面同规则。
+- 判定链并入 eligible；单测覆盖缺省/0/0.7/seed 各分支。
+- UI：路由表单缓存开关旁注明「仅缓存 temperature=0 或带 seed 的请求」。
+
+### L3 命中计费：可配折扣率，默认免费
+- 配置：TOML `[cache_semantic] billing_ratio`（默认 0.0=免费，(0,1]=按比例计费）+ 管理端设置项 `cache.billing_ratio`（DB 优先，风格同现有 cache.*）。
+- 计费：命中时 charged = round((entry.input + entry.output) × multiplier × billing_ratio)；input/output tokens 照实入日志（用 Entry 已存原始 tokens），不再写 0/0/0。
+- 口径：final_kind 用 `cache`（L1 精确）/ `semantic`（L2）区分命中类型；管理端日志页与门户 usage 兼容展示。
+- UI：门户 usage 明细命中行加「缓存」徽标与折扣价说明；管理端缓存设置区加计费比例输入（0~1，0=免费）。
+
+### L4 逃生口与健壮性（小项合并）
+- 调用方请求头 `x-relay-cache-control: no-cache`：跳过读缓存与写缓存（尊重调用方，缺省不传=按路由配置走）。
+- cache_wrap 缓冲上限：流式累积超 4MB 即放弃缓存继续透传（当前是收完才判，极端响应内存放大）。
+- 命中回放头细分：`x-relay-cache: HIT (exact)` / `HIT (semantic)`；MISS 不变。
+- 测试：no-cache 头跳过、超限不缓存、折扣计费数值断言。
+
+## 12. 批 M 计划（2026-09-06 真实环境复盘第二批：剩余 11 项整改，已拍板）
+
+> 来源：REAL_UPSTREAM_TEST.md 问题清单（④缓存已入批 L，其余 11 项本轮拍板）。
+> 关键拍板四项：①错误透传=脱敏摘要；⑥默认 8KB 预览+保留 30 天；⑦历史用量回填；⑨流式免总超时。
+> 定性修正三处：⑧定价体系齐全（纯配置缺失非代码缺陷）；⑨代码无 10s 超时（实为 120s 硬编码）；⑫series 压根没有 days 参数（非参数无效）。
+
+### M1 正确性（P0）
+
+#### M1-1 ②入站校验
+- chat_completions / run_messages 入口：`messages` 必须为非空数组（双协议同规则）；`stream`/`max_tokens` 类型检查；失败返回 400 标准 OpenAI/Anthropic 错误体。
+- 单测：空数组 / 缺失 / 非数组 / stream 非布尔 4 例。
+
+#### M1-2 ⑦token_used_total 死列修复
+- 扣费 SQL 改同语句原子更新：`SET token_balance = token_balance - ?, token_used_total = token_used_total + ?`；调用失败退款对称减；管理端手动充值不动该列。
+- 存量回填：启动迁移执行一次幂等 `UPDATE users SET token_used_total = (SELECT COALESCE(SUM(charged_tokens),0) FROM usage_logs WHERE user_id = users.id AND status=200)`。
+- 验证：调用 2 次后 /portal/me 的 used_total = Σcharged，管理端用户列表口径一致。
+
+#### M1-3 ①错误语义：AllFailed 与 NoTarget 分离
+- 新增 `ApiError::AllFailed { model, last_error, last_status }` → 502，error_type=upstream_error；message = "all upstream candidates failed for `{model}`: last {status} {脱敏摘要}"。
+- 脱敏：抹 base_url / api_key / Authorization；上游 message 内嵌 URL 二次正则清洗；摘要截断 200 字符。
+- `NoTarget` 仅保留「路由无候选」场景（routing.rs）；handlers 两处 fail_global!（L761/L1374 附近）改抛 AllFailed，携带末次 attempts 错误。
+- 测试：坏上游 failover 耗尽 → 502 且 body 含上游 401 摘要、不含内网地址。
+
+#### M1-4 ⑧未定价模型可见性（纯 UI）
+- 模型表格「未定价」徽标（input/output 任一为空）；成本概览存在未定价模型时提示「N 个模型未设价，成本统计偏低」；导入模型表单支持批量填价。
+- 定价计算链不动。
+
+### M2 一致性（P1）
+
+#### M2-1 ③PatchRoute 真部分更新
+- 新增 PatchRoute（全字段 Option），storage update_route 动态 SET；参照 models 更新端点的 `Option<Option<T>>` 模式（admin.rs:1041）；前端保持全量提交兼容。
+
+#### M2-2 ⑤attempts 全程留痕
+- run_chat / run_messages：每候选进入尝试前 push（被熔断/不合格跳过的记 kind="skipped" 附原因），成功后回填 status=200 + latency；零表结构变更（RunTrace 已有管道）。
+
+#### M2-3 ⑨超时可配 + 流式免总超时
+- TOML `[proxy] upstream_timeout_secs=300` / `connect_timeout_secs=10`（config.rs 新字段；遵守「配置只留 TOML」铁律）。
+- client 构建：connect_timeout 全局；非流式请求 per-call 总超时；流式请求不设总超时（连接建立后靠上游自然结束/对端断开兜底）。
+
+### M3 可观测与体验（P2）
+
+#### M3-1 ⑥日志预览/保留设置
+- 管理端「系统设置」暴露 body_preview_max_bytes / retention_days；代码默认改 8KB / 30 天（TOML 未显式配置时）。
+
+#### M3-2 ⑫series days 参数
+- portal series 与 admin user series 端点加 `?days=`（clamp 7~90，默认 30）；门户仪表盘 + 管理端用户详情加 7/30/90 切换。
+
+#### M3-3 ⑩Modal sticky footer
+- Modal 组件统一 sticky footer + 内容区滚动（一处 CSS）。
+
+#### M3-4 ⑪全局 401 跳登录
+- admin/portal api.ts：响应 401 → 清 token → 跳登录页（排除登录接口自身）。
+
+### 执行顺序与验证
+- 顺序：M1-1 → M1-2 → M1-3 → M2-1 → M2-2 → M2-3 → M1-4 → M3-1..4。
+- 每项交付走标准 DoD（cargo test + 前端 build + UI 走查）；M1-2/M1-3 用 mock 上游故障注入复测 t3/t5/t6 场景。
+

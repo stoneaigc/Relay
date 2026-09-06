@@ -127,7 +127,7 @@ pub async fn register(
     let id = storage::admin_create_user(&state.db, email, &pwhash, Some(email), None, grant, active_group, "email")
         .await
         .map_err(|_| ApiError::BadRequest("该邮箱已注册".into()))?;
-    let us = Arc::new(UserState::new(id, grant, limit, 0, 1.0, active_group.unwrap_or(0)));
+    let us = Arc::new(UserState::new(id, grant, 0, limit, 0, 1.0, active_group.unwrap_or(0)));
     us.set_limits(rpm, tpm);
     state.users.insert(id, us);
     let token = jwt::issue(&secret, &id.to_string(), "portal", ttl)?;

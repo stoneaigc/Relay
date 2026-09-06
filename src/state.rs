@@ -39,6 +39,8 @@ pub struct KeyEntry {
 pub struct UserState {
     pub id: Uuid,
     pub token_balance: AtomicI64,
+    /// 累计消耗 charged tokens(仅计费请求;缓存命中不计),随 flush 与余额同批落库。
+    pub token_used_total: AtomicI64,
     pub in_flight: AtomicU32,
     pub concurrency_limit: AtomicU32,
     pub status: AtomicU8,
@@ -84,6 +86,7 @@ impl UserState {
     pub fn new(
         id: Uuid,
         balance: i64,
+        used_total: i64,
         concurrency_limit: u32,
         status: u8,
         bill_multiplier: f64,
@@ -92,6 +95,7 @@ impl UserState {
         Self {
             id,
             token_balance: AtomicI64::new(balance),
+            token_used_total: AtomicI64::new(used_total),
             in_flight: AtomicU32::new(0),
             concurrency_limit: AtomicU32::new(concurrency_limit),
             status: AtomicU8::new(status),
@@ -247,9 +251,16 @@ impl UserState {
         self.token_balance.load(Ordering::Relaxed)
     }
 
+    pub fn used_total(&self) -> i64 {
+        self.token_used_total.load(Ordering::Relaxed)
+    }
+
     /// 扣减 token,并标记需落盘。允许扣到负数(让本次请求完成,下次再拒)。
+    /// 同时累计消耗量,与余额共享 dirty 标记、同批落库。
     pub fn deduct(&self, amount: i64) {
         self.token_balance.fetch_sub(amount, Ordering::Relaxed);
+        self.token_used_total
+            .fetch_add(amount.max(0), Ordering::Relaxed);
         self.dirty.store(true, Ordering::Relaxed);
     }
 
@@ -1362,7 +1373,7 @@ mod tests {
     // --- 周期预算:累计 / 耗尽 / 滚动重置 ---
     #[test]
     fn budget_daily_exhausted() {
-        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 1.0, 0);
+        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 0, 1.0, 0);
         u.set_budgets(1000, 0);
         assert_eq!(u.budget_status(8), BudgetStatus::Ok);
         u.record_budget(600, 8);
@@ -1373,7 +1384,7 @@ mod tests {
 
     #[test]
     fn budget_monthly_exhausted() {
-        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 1.0, 0);
+        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 0, 1.0, 0);
         u.set_budgets(0, 1500);
         u.record_budget(1500, 8);
         assert_eq!(u.budget_status(8), BudgetStatus::MonthlyExhausted);
@@ -1381,7 +1392,7 @@ mod tests {
 
     #[test]
     fn budget_window_rollover_resets_counters() {
-        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 1.0, 0);
+        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 0, 1.0, 0);
         u.set_budgets(1000, 2000);
         u.record_budget(1000, 8);
         assert_eq!(u.budget_status(8), BudgetStatus::DailyExhausted);

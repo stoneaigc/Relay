@@ -268,7 +268,7 @@ pub async fn create_user(
         .await
         .ok();
     }
-    let us = Arc::new(UserState::new(id, grant, limit, 0, 1.0, gid.unwrap_or(0)));
+    let us = Arc::new(UserState::new(id, grant, 0, limit, 0, 1.0, gid.unwrap_or(0)));
     us.set_limits(
         body.rpm_limit.map(|v| v.max(0) as u32).unwrap_or(default_rpm),
         body.tpm_limit.map(|v| v.max(0) as u32).unwrap_or(default_tpm),
