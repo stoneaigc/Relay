@@ -947,7 +947,7 @@ function ModelsPanel() {
                         {m.input_price != null && m.output_price != null ? (
                           <span className="font-mono text-xs text-muted-foreground" title="每 1M tokens 输入/输出单价">${m.input_price.toFixed(2)} / ${m.output_price.toFixed(2)}</span>
                         ) : (
-                          <span className="text-xs text-muted-foreground/60" title="未手动定价时按内置默认价表计费">未定价</span>
+                          <Badge variant="muted" className="border-amber-500/30 bg-amber-500/15 text-amber-600" title="未定价模型按内置默认价表计费,成本统计可能偏低;点击右侧 $ 按钮设置">未定价</Badge>
                         )}
                       </div>
                       <div className="flex items-center gap-2">
@@ -1032,6 +1032,8 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
   const [fetching, setFetching] = useState(false);
   const [err, setErr] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [inputPrice, setInputPrice] = useState("");
+  const [outputPrice, setOutputPrice] = useState("");
 
   const TEMPLATES: Record<string, { kind: string; base_url: string }> = {
     custom: { kind: "", base_url: "" },
@@ -1071,11 +1073,16 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
   const submit = async () => {
     setErr(""); setSubmitting(true);
     try {
+      const ip = inputPrice.trim() === "" ? null : Number(inputPrice);
+      const op = outputPrice.trim() === "" ? null : Number(outputPrice);
+      if ((ip != null && (!Number.isFinite(ip) || ip < 0)) || (op != null && (!Number.isFinite(op) || op < 0))) {
+        setErr("单价必须是非负数字"); setSubmitting(false); return;
+      }
       if (selectedModels.size > 0) {
-        const items = [...selectedModels].map((m) => ({ upstream_model: m, label: m }));
+        const items = [...selectedModels].map((m) => ({ upstream_model: m, label: m, input_price: ip, output_price: op }));
         await api.addModelsBatch({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, models: items });
       } else {
-        await api.addModel({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, upstream_model: "custom-model" });
+        await api.addModel({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, upstream_model: "custom-model", input_price: ip, output_price: op });
       }
       onSaved(); onClose();
     } catch (e: any) { setErr(e.message); }
@@ -1113,6 +1120,12 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
           </div>
           <div><label className="mb-1 block text-xs text-muted-foreground">API Key (可选)</label>
             <Input type="password" placeholder="sk-..." value={apiKey} onChange={(e) => setApiKey(e.target.value)} /></div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="mb-1 block text-xs text-muted-foreground">输入单价 $/1M tokens (可选)</label>
+              <Input type="number" min="0" step="0.000001" placeholder="留空用内置默认价表" value={inputPrice} onChange={(e) => setInputPrice(e.target.value)} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">输出单价 $/1M tokens (可选)</label>
+              <Input type="number" min="0" step="0.000001" placeholder="留空用内置默认价表" value={outputPrice} onChange={(e) => setOutputPrice(e.target.value)} /></div>
+          </div>
           <Button type="button" variant="outline" size="sm" onClick={doFetch} disabled={fetching || !baseUrl.trim()} className="w-full">
             <Search className="h-4 w-4 mr-1" />{fetching ? "探测中..." : "探测模型列表"}
           </Button>
@@ -2471,16 +2484,29 @@ function BreakdownBars({ title, rows, metric }: { title: string; rows: UsageBrea
 }
 
 function UsagePanel() {
+  const navigate = useNavigate();
   const [rows, setRows] = useState<any[]>([]);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
   const [total, setTotal] = useState(0);
   const [bd, setBd] = useState<UsageBreakdownResp | null>(null);
   const [metric, setMetric] = useState<"tokens" | "cost">("tokens");
+  const [allModels, setAllModels] = useState<ModelRow[]>([]);
   useEffect(() => { api.usage(page, pageSize).then((r) => { setRows(r.data); setTotal(r.total); }); }, [page, pageSize]);
   useEffect(() => { api.usageBreakdown().then(setBd).catch(() => { /* 静默,下轮刷新重试 */ }); }, []);
+  useEffect(() => { api.models().then((r) => setAllModels(r.data)).catch(() => { /* 静默 */ }); }, []);
+  const unpricedCount = allModels.filter((m) => m.input_price == null || m.output_price == null).length;
   return (
     <div className="space-y-5">
+      {unpricedCount > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-700">
+          <span className="flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            {unpricedCount} 个模型未设价，成本统计偏低（未定价模型按内置默认价表或 $0 计）
+          </span>
+          <button className="shrink-0 text-xs font-medium underline-offset-2 hover:underline" onClick={() => navigate("/models")}>去定价 →</button>
+        </div>
+      )}
       <Card>
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-3">
