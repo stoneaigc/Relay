@@ -29,6 +29,37 @@ pub struct Config {
     /// Prometheus 指标导出(GET /metrics)配置。
     #[serde(default)]
     pub metrics: MetricsConfig,
+    /// 数据面代理转发超时([proxy] 段)。
+    #[serde(default)]
+    pub proxy: ProxyConfig,
+}
+
+/// 数据面代理转发超时配置。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProxyConfig {
+    /// 非流式请求的总超时(秒),默认 300;流式请求不设总超时。
+    #[serde(default = "default_upstream_timeout_secs")]
+    pub upstream_timeout_secs: u64,
+    /// 连接建立超时(秒),全局生效(含流式),默认 10。
+    #[serde(default = "default_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+}
+
+fn default_upstream_timeout_secs() -> u64 {
+    300
+}
+
+fn default_connect_timeout_secs() -> u64 {
+    10
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            upstream_timeout_secs: default_upstream_timeout_secs(),
+            connect_timeout_secs: default_connect_timeout_secs(),
+        }
+    }
 }
 
 /// 请求日志存储后端。

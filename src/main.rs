@@ -139,8 +139,9 @@ async fn main() -> anyhow::Result<()> {
     storage::load_into_memory(&db, &cfg, &users, &keys).await?;
     tracing::info!("loaded {} users, {} keys into memory", users.len(), keys.len());
 
+    // 数据面 HTTP 客户端:仅设全局连接超时([proxy].connect_timeout_secs);请求总超时按流式/非流式在转发层区分设置。
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .connect_timeout(Duration::from_secs(cfg.proxy.connect_timeout_secs))
         .build()?;
 
     let (usage_tx, usage_rx) = mpsc::channel::<UsageEvent>(4096);
