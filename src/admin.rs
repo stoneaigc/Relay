@@ -1371,27 +1371,47 @@ pub async fn add_routes_batch(
     Ok(Json(json!({ "ok": true, "ids": ids })))
 }
 
-/// PATCH /admin/routes/:id —— 编辑组内路由。
+/// PATCH /admin/routes/:id 请求体:全字段可选,缺省=不改动(真部分更新,防止全量提交覆盖未带字段)。
+#[derive(Deserialize)]
+pub struct PatchRoute {
+    #[serde(default)]
+    pub public_name: Option<String>,
+    #[serde(default)]
+    pub model_id: Option<i64>,
+    #[serde(default)]
+    pub weight: Option<i64>,
+    #[serde(default)]
+    pub multiplier: Option<f64>,
+}
+
+/// PATCH /admin/routes/:id —— 编辑组内路由(真部分更新:缺省字段不改动;前端全量提交天然兼容)。
 pub async fn update_route(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<i64>,
-    Json(body): Json<AddRoute>,
+    Json(body): Json<PatchRoute>,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
-    if body.public_name.trim().is_empty() {
-        return Err(ApiError::BadRequest("public_name required".into()));
+    let public_name = body.public_name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if body.public_name.is_some() && public_name.is_none() {
+        return Err(ApiError::BadRequest("public_name cannot be empty".into()));
     }
-    storage::update_route(
-        &state.db,
-        id,
-        body.public_name.trim(),
-        body.model_id,
-        body.weight.unwrap_or(100),
-        body.multiplier.unwrap_or(1.0),
-    )
-    .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if let Some(w) = body.weight {
+        if w < 0 {
+            return Err(ApiError::BadRequest("weight must be >= 0".into()));
+        }
+    }
+    if let Some(m) = body.multiplier {
+        if !m.is_finite() || m < 0.0 {
+            return Err(ApiError::BadRequest("multiplier must be a finite number >= 0".into()));
+        }
+    }
+    if body.public_name.is_none() && body.model_id.is_none() && body.weight.is_none() && body.multiplier.is_none() {
+        return Err(ApiError::BadRequest("at least one field required".into()));
+    }
+    storage::patch_route(&state.db, id, public_name, body.model_id, body.weight, body.multiplier)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;
     Ok(Json(json!({ "ok": true })))
 }

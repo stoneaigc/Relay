@@ -618,10 +618,22 @@ pub async fn add_route(pool: &Db, group_id: i64, public_name: &str, model_id: i6
     Ok(r.get::<i64, _>("id"))
 }
 
-pub async fn update_route(pool: &Db, id: i64, public_name: &str, model_id: i64, weight: i64, multiplier: f64) -> anyhow::Result<()> {
-    q!("UPDATE group_routes SET public_name = ?, model_id = ?, weight = ?, multiplier = ? WHERE id = ?")
-        .bind(public_name).bind(model_id).bind(weight).bind(multiplier).bind(id)
-        .execute(pool).await?;
+/// 真部分更新:只 SET 传入的字段(动态拼 SET 子句,经 pq 适配占位符,SQLite/Postgres 双后端兼容)。
+pub async fn patch_route(pool: &Db, id: i64, public_name: Option<&str>, model_id: Option<i64>, weight: Option<i64>, multiplier: Option<f64>) -> anyhow::Result<()> {
+    let mut sets: Vec<&str> = Vec::new();
+    if public_name.is_some() { sets.push("public_name = ?"); }
+    if model_id.is_some() { sets.push("model_id = ?"); }
+    if weight.is_some() { sets.push("weight = ?"); }
+    if multiplier.is_some() { sets.push("multiplier = ?"); }
+    if sets.is_empty() { return Ok(()); } // handler 已挡空更新,storage 层双保险 no-op
+    let sql = format!("UPDATE group_routes SET {} WHERE id = ?", sets.join(", "));
+    let sql = pq(&sql);
+    let mut q = sqlx::query(&sql);
+    if let Some(pn) = public_name { q = q.bind(pn.to_string()); }
+    if let Some(mid) = model_id { q = q.bind(mid); }
+    if let Some(w) = weight { q = q.bind(w); }
+    if let Some(m) = multiplier { q = q.bind(m); }
+    q.bind(id).execute(pool).await?;
     Ok(())
 }
 
@@ -2276,6 +2288,48 @@ mod tests {
         let (gid3, over3) = import_group(&db, "grp2", "weighted_random", &[], &[]).await.unwrap();
         assert!(!over3);
         assert_ne!(gid3, gid);
+    }
+
+    // ---- patch_route(真部分更新) ----
+
+    #[tokio::test]
+    async fn patch_route_partial_update_only_touches_given_fields() {
+        let db = test_db().await;
+        let (prov, _) = find_or_create_provider(&db, "openai", "https://api.test.com", Some("sk-x")).await.unwrap();
+        let m1 = add_model(&db, &prov, "gpt-a", None, None, None).await.unwrap();
+        let m2 = add_model(&db, &prov, "gpt-b", None, None, None).await.unwrap();
+        let gid = add_group(&db, "grp").await.unwrap();
+        let rid = add_route(&db, gid, "pub-a", m1, 80, 1.5).await.unwrap();
+
+        // 只改 weight:其余字段不动
+        patch_route(&db, rid, None, None, Some(30), None).await.unwrap();
+        let routes = list_routes(&db, gid).await.unwrap();
+        assert_eq!(routes[0]["public_name"].as_str(), Some("pub-a"));
+        assert_eq!(routes[0]["model_id"].as_i64(), Some(m1));
+        assert_eq!(routes[0]["weight"].as_i64(), Some(30));
+        assert_eq!(routes[0]["multiplier"].as_f64(), Some(1.5));
+
+        // 改 public_name + model_id,weight/multiplier 保持
+        patch_route(&db, rid, Some("pub-b"), Some(m2), None, None).await.unwrap();
+        let routes = list_routes(&db, gid).await.unwrap();
+        assert_eq!(routes[0]["public_name"].as_str(), Some("pub-b"));
+        assert_eq!(routes[0]["model_id"].as_i64(), Some(m2));
+        assert_eq!(routes[0]["weight"].as_i64(), Some(30));
+        assert_eq!(routes[0]["multiplier"].as_f64(), Some(1.5));
+
+        // 全字段(前端全量提交兼容路径)
+        patch_route(&db, rid, Some("pub-c"), Some(m1), Some(10), Some(2.0)).await.unwrap();
+        let routes = list_routes(&db, gid).await.unwrap();
+        assert_eq!(routes[0]["public_name"].as_str(), Some("pub-c"));
+        assert_eq!(routes[0]["model_id"].as_i64(), Some(m1));
+        assert_eq!(routes[0]["weight"].as_i64(), Some(10));
+        assert_eq!(routes[0]["multiplier"].as_f64(), Some(2.0));
+
+        // 空更新:handler 已挡,storage 层 no-op 不报错也不改值
+        patch_route(&db, rid, None, None, None, None).await.unwrap();
+        let routes = list_routes(&db, gid).await.unwrap();
+        assert_eq!(routes[0]["weight"].as_i64(), Some(10));
+        assert_eq!(routes[0]["multiplier"].as_f64(), Some(2.0));
     }
 
     // ---- cache_vectors(L2 向量)----

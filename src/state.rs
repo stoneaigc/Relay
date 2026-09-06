@@ -251,10 +251,6 @@ impl UserState {
         self.token_balance.load(Ordering::Relaxed)
     }
 
-    pub fn used_total(&self) -> i64 {
-        self.token_used_total.load(Ordering::Relaxed)
-    }
-
     /// 扣减 token,并标记需落盘。允许扣到负数(让本次请求完成,下次再拒)。
     /// 同时累计消耗量,与余额共享 dirty 标记、同批落库。
     pub fn deduct(&self, amount: i64) {
