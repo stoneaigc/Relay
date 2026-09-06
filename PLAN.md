@@ -210,3 +210,27 @@
    - `/v1/embeddings` 对外转发端点（当前 embedding 模块仅服务语义缓存内部与管理端测试，无对外数据面端点）
    - 管理操作审计日志（管理端变更操作留痕；现有仅失败请求审计）
 
+***
+
+## 10. 批 K 计划（2026-09-06 拍板：三项完善 + 趋势图）
+
+工作流铁律（每个功能同一闭环）：最小改动、高内聚低耦合 → cargo test 全绿 → UI/API 走查（自己交互检查主流程）→ 对抗式审查（找问题自修）→ git 提交（中文消息）。
+
+### K1 `/v1/embeddings` 对外端点
+- embedding.rs：新增 `embed_batch(http, base_url, api_key, model, texts, timeout)`（一次请求多向量）；现 `embed()` 改为 embed_batch 单文本包装，保持语义缓存 3s 超时与行为不变。
+- handlers.rs：`pub async fn embeddings`（authenticate 鉴权 → input 支持 string|string[] 空校验 → `config.embedding.usable()` 否则配置错误响应 → embed_batch 对外 30s 超时 → OpenAI list 响应格式；不计费但记请求日志）。
+- main.rs：`/v1/embeddings` POST 路由。
+
+### K2 管理操作审计
+- 新表 `admin_audit_logs`（SQLite/PG 双迁移）：method/path/status/ip/耗时/actor。
+- axum `from_fn` 中间件：变更方法 POST/PUT/PATCH/DELETE + 登录端点，零侵入 handler。
+- `GET /admin/api/audit-logs` 分页查询；前端审计页（导航 + 表格 + 分页）；固定保留期后台清理任务。
+
+### K3 登录防爆破
+- AppState 挂 `LoginGuard`（DashMap 内存滑动窗口，风格同 RPM/TPM limiter）。
+- 三入口：admin login（按 IP）、portal password_login（IP+username）、send_email_code（IP+email）；5 次失败锁 15 分钟，429 中文提示，成功清零。
+
+### K4 用量趋势图
+- 后端零开发：消费现有 `GET /admin/api/overview/series`（day/week/month）。
+- 前端概览页手写 SVG 柱状图（零新依赖、token 主题色、粒度切换 + hover tooltip）。
+

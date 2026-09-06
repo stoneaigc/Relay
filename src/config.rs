@@ -183,7 +183,12 @@ impl Default for EmbeddingConfig {
 impl EmbeddingConfig {
     /// 是否已具备调用条件(开关开启且 base_url/model 齐备)。
     pub fn usable(&self) -> bool {
-        self.enabled && !self.base_url.is_empty() && !self.model.is_empty()
+        self.enabled && self.service_ready()
+    }
+
+    /// 对外 /v1/embeddings 端点就绪条件:服务地址与模型已配置(enabled 仅约束 L2 语义缓存)。
+    pub fn service_ready(&self) -> bool {
+        !self.base_url.is_empty() && !self.model.is_empty()
     }
 }
 

@@ -42,19 +42,27 @@ pub fn embed_text(req: &Value) -> Option<String> {
     Some(s)
 }
 
-/// 调用 OpenAI 兼容 /embeddings,返回向量。超时 3s,失败即 Err。
-pub async fn embed(
+/// 一次 embedding 批量调用的结果:向量(顺序与输入一致)+ 上游用量 tokens。
+pub struct EmbedBatch {
+    pub vectors: Vec<Vec<f32>>,
+    pub prompt_tokens: u32,
+}
+
+/// 调用 OpenAI 兼容 /embeddings,一次请求多向量;超时由调用方按场景设定
+/// (语义缓存旁路 3s / 对外端点 30s)。返回向量顺序与输入一一对应,数量不符视为失败。
+pub async fn embed_batch(
     http: &reqwest::Client,
     base_url: &str,
     api_key: &str,
     model: &str,
-    text: &str,
-) -> anyhow::Result<Vec<f32>> {
+    texts: &[String],
+    timeout_secs: u64,
+) -> anyhow::Result<EmbedBatch> {
     let url = format!("{}/embeddings", base_url.trim_end_matches('/'));
     let mut rb = http
         .post(&url)
-        .timeout(std::time::Duration::from_secs(3))
-        .json(&serde_json::json!({ "model": model, "input": [text] }));
+        .timeout(std::time::Duration::from_secs(timeout_secs))
+        .json(&serde_json::json!({ "model": model, "input": texts }));
     if !api_key.is_empty() {
         rb = rb.bearer_auth(api_key);
     }
@@ -64,19 +72,51 @@ pub async fn embed(
         anyhow::bail!("embeddings 上游返回 {status}");
     }
     let v: Value = resp.json().await?;
-    let arr = v
-        .pointer("/data/0/embedding")
-        .and_then(|e| e.as_array())
-        .ok_or_else(|| anyhow::anyhow!("embeddings 响应缺少 data[0].embedding"))?;
-    let mut vec = Vec::with_capacity(arr.len());
-    for x in arr {
-        let f = x.as_f64().ok_or_else(|| anyhow::anyhow!("embedding 含非数值"))?;
-        vec.push(f as f32);
+    let data = v
+        .get("data")
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| anyhow::anyhow!("embeddings 响应缺少 data 数组"))?;
+    if data.len() != texts.len() {
+        anyhow::bail!(
+            "embeddings 返回 {} 条向量,与输入 {} 条不符",
+            data.len(),
+            texts.len()
+        );
     }
-    if vec.is_empty() {
-        anyhow::bail!("embedding 为空");
+    let mut vectors = Vec::with_capacity(data.len());
+    for item in data {
+        let arr = item
+            .get("embedding")
+            .and_then(|e| e.as_array())
+            .ok_or_else(|| anyhow::anyhow!("embeddings 响应缺少 embedding 字段"))?;
+        let mut vec = Vec::with_capacity(arr.len());
+        for x in arr {
+            let f = x.as_f64().ok_or_else(|| anyhow::anyhow!("embedding 含非数值"))?;
+            vec.push(f as f32);
+        }
+        if vec.is_empty() {
+            anyhow::bail!("embedding 为空");
+        }
+        vectors.push(vec);
     }
-    Ok(vec)
+    let prompt_tokens = v
+        .pointer("/usage/prompt_tokens")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as u32;
+    Ok(EmbedBatch { vectors, prompt_tokens })
+}
+
+/// 单文本快捷调用(语义缓存旁路专用):固定 3s 超时,失败即 Err,不得影响主请求路径。
+pub async fn embed(
+    http: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    text: &str,
+) -> anyhow::Result<Vec<f32>> {
+    let texts = [text.to_string()];
+    let mut batch = embed_batch(http, base_url, api_key, model, &texts, 3).await?;
+    Ok(batch.vectors.remove(0))
 }
 
 /// 暴力余弦相似度;长度不一致或零向量时返回 0(视为不相似,不命中)。

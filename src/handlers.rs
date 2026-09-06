@@ -151,6 +151,152 @@ pub async fn list_models(
     Ok(Json(json!({ "object": "list", "data": data })))
 }
 
+/// POST /v1/embeddings 对外单请求 input 条数上限:防止单请求放大上游成本。
+const MAX_EMBEDDING_INPUTS: usize = 64;
+/// 对外 embeddings 转发超时(秒);语义缓存旁路仍走 embed() 的 3s 短超时。
+const EMBEDDING_TIMEOUT_SECS: u64 = 30;
+
+/// POST /v1/embeddings —— OpenAI 兼容 embedding 转发(API Key 鉴权)。
+/// 实际模型固定为网关配置的 embedding 服务;不计费(价格表无 embedding 项),照常记请求日志与指标。
+pub async fn embeddings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    match run_embeddings(&state, &headers, &body).await {
+        Ok(r) => r,
+        Err(e) => e.into_response(),
+    }
+}
+
+/// 解析 OpenAI embeddings 入参:input 支持 string | string[];空 / 超量 / 超长 / 非字符串均拒绝。
+fn embed_inputs(v: &Value) -> Result<Vec<String>, ApiError> {
+    let texts: Vec<String> = match v.get("input") {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .map(|x| x.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| ApiError::BadRequest("`input` 数组元素必须为字符串".into()))?,
+        _ => return Err(ApiError::BadRequest("missing or invalid `input`".into())),
+    };
+    if texts.is_empty() || texts.iter().any(|t| t.trim().is_empty()) {
+        return Err(ApiError::BadRequest("`input` 不能为空".into()));
+    }
+    if texts.len() > MAX_EMBEDDING_INPUTS {
+        return Err(ApiError::BadRequest(format!("`input` 最多 {MAX_EMBEDDING_INPUTS} 条")));
+    }
+    for t in &texts {
+        if t.chars().count() > crate::embedding::MAX_EMBED_CHARS {
+            return Err(ApiError::BadRequest(format!(
+                "单条 input 超过 {} 字符上限",
+                crate::embedding::MAX_EMBED_CHARS
+            )));
+        }
+    }
+    Ok(texts)
+}
+
+async fn run_embeddings(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<Response, ApiError> {
+    let req_start = std::time::Instant::now();
+    let result = embeddings_inner(state, headers, body).await;
+    match &result {
+        Ok(_) => {
+            state
+                .record_metrics_request(None, crate::state::METRIC_STATUS_OK, req_start.elapsed())
+                .await;
+        }
+        Err(_) => {
+            state.record_metrics_request(None, 400, req_start.elapsed()).await;
+        }
+    }
+    result
+}
+
+async fn embeddings_inner(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<Response, ApiError> {
+    let auth = authenticate(state, headers)?;
+    let user = auth.user;
+    if user.balance() <= 0 {
+        return Err(ApiError::InsufficientBalance);
+    }
+    if !user.try_rpm() {
+        return Err(ApiError::TooManyRequests);
+    }
+    let ec = state.config.load().embedding.clone();
+    if !ec.service_ready() {
+        return Err(ApiError::Unavailable("embedding 服务未配置".into()));
+    }
+
+    let v: Value = serde_json::from_slice(body)
+        .map_err(|e| ApiError::BadRequest(format!("invalid JSON: {e}")))?;
+    // model 字段按 OpenAI 规范必填;网关固定转发到配置的 embedding 模型,忽略其取值。
+    if v.get("model").and_then(|m| m.as_str()).is_none() {
+        return Err(ApiError::BadRequest("missing `model`".into()));
+    }
+    let texts = embed_inputs(&v)?;
+    let request_id = format!("req_{}", &uuid::Uuid::new_v4().to_string()[..24]);
+    let req_preview = reqlog::body_preview(body, state.config.load().logging.body_preview_max_bytes);
+
+    let mut trace = RunTrace {
+        request_id: request_id.clone(),
+        user_id: user.id.to_string(),
+        path: "embeddings",
+        requested_model: ec.model.clone(),
+        stream: false,
+        candidates: Vec::new(),
+        attempts: Vec::new(),
+        final_kind: Some("embedding".into()),
+        final_upstream_model: Some(ec.model.clone()),
+        final_status: 200,
+        latency_ms: 0,
+        req_preview,
+        resp_preview: None,
+    };
+    let started = std::time::Instant::now();
+    match crate::embedding::embed_batch(
+        &state.http,
+        &ec.base_url,
+        &ec.api_key,
+        &ec.model,
+        &texts,
+        EMBEDDING_TIMEOUT_SECS,
+    )
+    .await
+    {
+        Ok(batch) => {
+            trace.latency_ms = started.elapsed().as_millis() as u32;
+            trace.emit_success(state, batch.prompt_tokens, 0, 0).await;
+            let data: Vec<Value> = batch
+                .vectors
+                .iter()
+                .enumerate()
+                .map(|(i, e)| json!({ "object": "embedding", "index": i, "embedding": e }))
+                .collect();
+            Ok(Json(json!({
+                "object": "list",
+                "data": data,
+                "model": ec.model,
+                "usage": { "prompt_tokens": batch.prompt_tokens, "total_tokens": batch.prompt_tokens }
+            }))
+            .into_response())
+        }
+        Err(e) => {
+            trace.latency_ms = started.elapsed().as_millis() as u32;
+            trace.final_status = 503;
+            trace.emit_error(state, 503).await;
+            Err(ApiError::Unavailable(format!("embedding 上游失败: {e}")))
+        }
+    }
+}
+
 /// POST /v1/chat/completions —— OpenAI 兼容入口(API Key 鉴权)。
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,

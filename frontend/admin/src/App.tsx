@@ -4540,7 +4540,13 @@ function RequestLogPanel() {
                         <TableCell className="mono text-xs text-muted-foreground">{r.user_id.slice(0, 8)}</TableCell>
                         <TableCell className="text-xs">{r.requested_model}</TableCell>
                         <TableCell>
-                          <Badge variant={r.path === "chat" ? "default" : "muted"} className="text-[10px]">
+                          <Badge
+                            variant={r.path === "chat" ? "default" : "muted"}
+                            className={cn(
+                              "text-[10px]",
+                              r.path === "embeddings" && "bg-emerald-500/10 text-emerald-700 ring-1 ring-emerald-500/20",
+                            )}
+                          >
                             {r.path}
                           </Badge>
                         </TableCell>

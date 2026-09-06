@@ -86,6 +86,24 @@ const MODELS_RESP = `{
   ]
 }`;
 
+const EMBED_CURL = `curl ${BASE}/v1/embeddings \\
+  -H "Authorization: Bearer rk_live_xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "text-embedding-3-small",
+    "input": ["向量检索让语义搜索成为可能", "第二条文本"]
+  }'`;
+
+const EMBED_RESP = `{
+  "object": "list",
+  "data": [
+    { "object": "embedding", "index": 0, "embedding": [0.0023, -0.0091, "…"] },
+    { "object": "embedding", "index": 1, "embedding": [0.0114, 0.0047, "…"] }
+  ],
+  "model": "text-embedding-3-small",
+  "usage": { "prompt_tokens": 14, "total_tokens": 14 }
+}`;
+
 const STREAM_PY = `stream = client.chat.completions.create(
     model="chat",
     messages=[{"role": "user", "content": "写一首七言绝句"}],
@@ -323,6 +341,11 @@ export default function ApiDocsPanel() {
               <TableCell className="text-muted-foreground">Anthropic 协议消息(<K>max_tokens</K> 必填;SDK 自动带 <K>anthropic-version</K>)</TableCell>
             </TableRow>
             <TableRow>
+              <TableCell><MethodBadge m="POST" /></TableCell>
+              <TableCell><K>/v1/embeddings</K></TableCell>
+              <TableCell className="text-muted-foreground">OpenAI 兼容 embedding,<K>input</K> 支持 string 或数组;模型由网关统一配置,不计费</TableCell>
+            </TableRow>
+            <TableRow>
               <TableCell><MethodBadge m="GET" /></TableCell>
               <TableCell><K>/healthz</K></TableCell>
               <TableCell className="text-muted-foreground">健康检查(无需鉴权)</TableCell>
@@ -331,6 +354,8 @@ export default function ApiDocsPanel() {
         </Table>
         <CodeBlock title="GET /v1/models 响应" code={MODELS_RESP} />
         <CodeBlock title="POST /v1/chat/completions 响应(非流式)" code={CHAT_RESP} />
+        <CodeBlock title="POST /v1/embeddings 请求" code={EMBED_CURL} />
+        <CodeBlock title="POST /v1/embeddings 响应" code={EMBED_RESP} />
         <p className="text-sm text-muted-foreground">
           计费按上游实际返回的 token 用量结算,叠加模型级与用户级倍率;用量明细可在门户「用量明细」实时查看。
         </p>

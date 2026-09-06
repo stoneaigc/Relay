@@ -303,6 +303,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/models", get(handlers::list_models))
         .route("/v1/chat/completions", post(handlers::chat_completions))
         .route("/v1/messages", post(handlers::messages))
+        .route("/v1/embeddings", post(handlers::embeddings))
         .nest("/portal/api", portal_api)
         .nest("/admin/api", admin_api)
         .with_state(Arc::clone(&state))
