@@ -201,20 +201,43 @@ const SOURCE_LABEL: Record<string, string> = {
   admin: "管理员", phone: "手机号", wechat: "微信", alipay: "支付宝", email: "邮箱",
 };
 
-function LineChart({ points }: { points: { ts: number; tokens: number }[] }) {
-  const W = 600, H = 160, pad = 10;
+/// 手写 SVG 柱状图(零依赖):hover 高亮 + 顶部 tooltip,供趋势卡与用户弹窗复用。
+function LineChart({ points, fmtX }: { points: { ts: number; tokens: number; calls?: number }[]; fmtX?: (ts: number) => string }) {
+  const [hi, setHi] = useState<number | null>(null);
+  const W = 600, H = 160, pad = 6;
   const n = points.length;
   const max = Math.max(...points.map((p) => p.tokens), 1);
-  const x = (i: number) => (n <= 1 ? W / 2 : pad + (i * (W - 2 * pad)) / (n - 1));
-  const y = (v: number) => H - pad - (v / max) * (H - 2 * pad);
-  const line = points.map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(p.tokens).toFixed(1)}`).join(" ");
-  const area = n > 0 ? `${line} L${x(n - 1).toFixed(1)},${H - pad} L${x(0).toFixed(1)},${H - pad} Z` : "";
+  const slot = n > 0 ? (W - 2 * pad) / n : W;
+  const bw = Math.min(18, slot * 0.65);
+  const fmt = fmtX ?? ((ts: number) => { const d = new Date(ts * 1000); return `${d.getMonth() + 1}/${d.getDate()}`; });
+  const hov = hi != null && hi >= 0 && hi < n ? hi : null;
+  const tip = hov != null ? points[hov] : null;
+  const tipLeft = hov != null ? Math.min(Math.max(((pad + hov * slot + slot / 2) / W) * 100, 12), 88) : 0;
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="w-full" style={{ height: H }}>
-      <path d={area} fill="var(--color-primary)" opacity="0.12" />
-      <path d={line} fill="none" stroke="var(--color-primary)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
-      {points.map((p, i) => p.tokens > 0 ? <circle key={i} cx={x(i)} cy={y(p.tokens)} r="2.5" fill="var(--color-primary)" /> : null)}
-    </svg>
+    <div className="relative">
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="w-full" style={{ height: H }}>
+        {points.map((p, i) => {
+          const h = Math.max((p.tokens / max) * (H - 2 * pad), 3);
+          return p.tokens > 0 ? (
+            <rect key={i} x={pad + i * slot + (slot - bw) / 2} y={H - pad - h} width={bw} height={h} rx="2"
+              fill="var(--color-primary)" opacity={hov === null || hov === i ? 1 : 0.35} />
+          ) : null;
+        })}
+        <rect x="0" y="0" width={W} height={H} fill="transparent" onMouseLeave={() => setHi(null)}
+          onMouseMove={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            const i = Math.floor(((e.clientX - r.left) / r.width) * n);
+            setHi(Math.min(Math.max(i, 0), n - 1));
+          }} />
+      </svg>
+      {tip && (
+        <div className="pointer-events-none absolute top-0 -translate-x-1/2 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs shadow-md"
+          style={{ left: `${tipLeft}%`, background: "var(--color-primary)", color: "var(--color-primary-foreground)" }}>
+          <div className="font-medium">{fmt(tip.ts)}</div>
+          <div className="opacity-80">{tip.tokens.toLocaleString()} tokens{tip.calls != null ? ` · ${tip.calls.toLocaleString()} 次` : ""}</div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -233,7 +256,7 @@ function UserChartDialog({ user, onClose }: { user: UserRow | null; onClose: () 
         </DialogHeader>
         {data.length === 0 ? <p className="text-sm text-muted-foreground">加载中或暂无数据…</p> : (
           <div>
-            <LineChart points={data} />
+            <LineChart points={data} fmtX={fmt} />
             <div className="mt-1 flex justify-between text-xs text-muted-foreground">
               <span>{fmt(data[0].ts)}</span>
               <span>峰值 {peak.toLocaleString()} / 天</span>
@@ -432,7 +455,7 @@ function TrendCard() {
           <p className="py-10 text-center text-sm text-muted-foreground">该时间范围暂无消耗</p>
         ) : (
           <>
-            <LineChart points={data} />
+            <LineChart points={data} fmtX={fmtX} />
             <div className="mt-1 flex justify-between text-xs text-muted-foreground">
               <span>{fmtX(data[0].ts)}</span>
               <span>共 {total.toLocaleString()} tokens · 峰值 {peak.toLocaleString()} / {peakUnit}</span>
