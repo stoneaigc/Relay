@@ -6,6 +6,7 @@ pub mod config;
 mod email;
 mod embedding;
 mod error;
+mod guard;
 mod handlers;
 mod jwt;
 mod portal;
@@ -185,6 +186,7 @@ async fn main() -> anyhow::Result<()> {
         request_log_tx,
         audit_log: Arc::new(audit::SqliteAuditStore::new(db.clone())),
         audit_tx,
+        login_guard: Arc::new(guard::LoginGuard::default()),
     });
 
     // 后台:用量落盘 + 请求链路落库 + 周期性余额回写。

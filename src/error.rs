@@ -10,6 +10,9 @@ use serde_json::json;
 pub enum ApiError {
     #[error("missing or malformed Authorization")]
     Unauthorized,
+    /// 登录凭据错误。统一文案不区分用户名/密码,避免枚举信息泄露。
+    #[error("用户名或密码错误")]
+    InvalidCredentials,
     #[error("api key is invalid or revoked")]
     InvalidKey,
     #[error("account disabled")]
@@ -24,6 +27,9 @@ pub enum ApiError {
     NoTarget(String),
     #[error("concurrency limit exceeded")]
     TooManyRequests,
+    /// 登录防爆破/防轰炸触发。中文消息直接透出给前端。
+    #[error("{0}")]
+    TooManyAttempts(String),
     #[error("bad request: {0}")]
     BadRequest(String),
     #[error("upstream error: {0}")]
@@ -41,14 +47,14 @@ pub enum ApiError {
 impl ApiError {
     fn status(&self) -> StatusCode {
         match self {
-            ApiError::Unauthorized | ApiError::InvalidKey => StatusCode::UNAUTHORIZED,
+            ApiError::Unauthorized | ApiError::InvalidCredentials | ApiError::InvalidKey => StatusCode::UNAUTHORIZED,
             ApiError::AccountDisabled => StatusCode::FORBIDDEN,
             ApiError::InsufficientBalance => StatusCode::PAYMENT_REQUIRED,
             ApiError::ModelNotFound(_) | ApiError::ModelNotAllowed(_) => StatusCode::NOT_FOUND,
             ApiError::NoTarget(_) => StatusCode::BAD_GATEWAY,
             ApiError::Upstream(_) => StatusCode::BAD_GATEWAY,
             ApiError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-            ApiError::TooManyRequests | ApiError::BudgetExhausted(_) => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::TooManyRequests | ApiError::TooManyAttempts(_) | ApiError::BudgetExhausted(_) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -56,11 +62,11 @@ impl ApiError {
 
     fn error_type(&self) -> &'static str {
         match self {
-            ApiError::Unauthorized | ApiError::InvalidKey => "authentication_error",
+            ApiError::Unauthorized | ApiError::InvalidCredentials | ApiError::InvalidKey => "authentication_error",
             ApiError::AccountDisabled => "permission_error",
             ApiError::InsufficientBalance | ApiError::BudgetExhausted(_) => "insufficient_quota",
             ApiError::ModelNotFound(_) | ApiError::ModelNotAllowed(_) => "not_found_error",
-            ApiError::TooManyRequests => "rate_limit_error",
+            ApiError::TooManyRequests | ApiError::TooManyAttempts(_) => "rate_limit_error",
             ApiError::BadRequest(_) => "invalid_request_error",
             ApiError::NoTarget(_) | ApiError::Upstream(_) => "upstream_error",
             ApiError::Unavailable(_) => "upstream_error",
@@ -84,11 +90,11 @@ impl ApiError {
 
     fn anthropic_error_type(&self) -> &'static str {
         match self {
-            ApiError::Unauthorized | ApiError::InvalidKey => "authentication_error",
+            ApiError::Unauthorized | ApiError::InvalidCredentials | ApiError::InvalidKey => "authentication_error",
             ApiError::AccountDisabled => "permission_error",
             ApiError::InsufficientBalance => "api_error",
             ApiError::ModelNotFound(_) | ApiError::ModelNotAllowed(_) => "not_found_error",
-            ApiError::TooManyRequests | ApiError::BudgetExhausted(_) => "rate_limit_error",
+            ApiError::TooManyRequests | ApiError::TooManyAttempts(_) | ApiError::BudgetExhausted(_) => "rate_limit_error",
             ApiError::BadRequest(_) => "invalid_request_error",
             ApiError::NoTarget(_) | ApiError::Upstream(_) | ApiError::Unavailable(_) => "api_error",
             ApiError::Internal(_) => "internal_error",

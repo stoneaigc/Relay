@@ -1,6 +1,11 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::{extract::State, http::HeaderMap, Json};
+use axum::{
+    extract::{ConnectInfo, State},
+    http::HeaderMap,
+    Json,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -30,12 +35,25 @@ pub struct SendCode {
 /// POST /portal/auth/email/send_code —— 发送注册验证码到邮箱。
 pub async fn send_email_code(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<SendCode>,
 ) -> Result<Json<Value>, ApiError> {
     let email = body.email.trim().to_lowercase();
     if !email.contains('@') || email.len() < 3 {
         return Err(ApiError::BadRequest("邮箱格式不正确".into()));
     }
+    // 防轰炸:IP 与邮箱双标识,每次发码均计数(发码消耗资源,成功也不清零)。
+    let ip_key = format!("code:{}", addr.ip());
+    let email_key = format!("codee:{email}");
+    for k in [&ip_key, &email_key] {
+        if let Some(secs) = state.login_guard.locked_for(k) {
+            return Err(ApiError::TooManyAttempts(format!(
+                "请求过于频繁,请 {secs} 秒后再试"
+            )));
+        }
+    }
+    state.login_guard.record_failure(&ip_key);
+    state.login_guard.record_failure(&email_key);
     // 限频:60 秒内不重复发。缓存值为 "{发送时刻}:{code哈希}"。
     let code_key = format!("email_code:{email}");
     if let Some(v) = state.cache.get(&code_key).await.map_err(|e| ApiError::Internal(e.to_string()))? {
@@ -168,24 +186,48 @@ pub struct PwLogin {
 /// POST /portal/auth/login —— 用户名 + 密码登录(管理端创建的用户)。
 pub async fn password_login(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<PwLogin>,
 ) -> Result<Json<Value>, ApiError> {
+    // 防爆破:IP 与用户名双标识,5 次失败锁 15 分钟(用户名不存在也计数,防枚举)。
+    let ip_key = format!("pw:{}", addr.ip());
+    let user_key = format!("pwu:{}", body.username.trim().to_lowercase());
+    for k in [&ip_key, &user_key] {
+        if let Some(secs) = state.login_guard.locked_for(k) {
+            return Err(ApiError::TooManyAttempts(format!(
+                "失败次数过多,请 {secs} 秒后再试"
+            )));
+        }
+    }
+    let fail = |state: &AppState| {
+        state.login_guard.record_failure(&ip_key);
+        state.login_guard.record_failure(&user_key);
+    };
     let (secret, ttl) = {
         let cfg = state.config();
         (cfg.auth.jwt_secret.clone(), cfg.auth.session_ttl_secs)
     };
-    let (id, pwhash) = storage::find_user_by_username(&state.db, body.username.trim())
+    let (id, pwhash) = match storage::find_user_by_username(&state.db, body.username.trim())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or(ApiError::Unauthorized)?;
+    {
+        Some(v) => v,
+        None => {
+            fail(&state);
+            return Err(ApiError::InvalidCredentials);
+        }
+    };
     if pwhash.as_deref() != Some(storage::hash_password(&body.password).as_str()) {
-        return Err(ApiError::Unauthorized);
+        fail(&state);
+        return Err(ApiError::InvalidCredentials);
     }
     if let Some(u) = state.user(&id) {
         if !u.is_active() {
             return Err(ApiError::AccountDisabled);
         }
     }
+    state.login_guard.clear(&ip_key);
+    state.login_guard.clear(&user_key);
     let token = jwt::issue(&secret, &id.to_string(), "portal", ttl)?;
     Ok(Json(json!({ "token": token, "user": { "id": id } })))
 }

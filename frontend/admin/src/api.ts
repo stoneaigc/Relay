@@ -20,7 +20,9 @@ async function req(path: string, opts: RequestInit = {}) {
       clearToken();
       window.dispatchEvent(new Event("relay:auth-expired"));
     }
-    throw new Error(data?.error?.message || res.statusText);
+    const err: any = new Error(data?.error?.message || res.statusText);
+    err.status = res.status;
+    throw err;
   }
   return data;
 }

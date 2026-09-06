@@ -48,7 +48,7 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
     if (busy) return;
     setErr("");
     setBusy(true);
-    try { const r = await api.login(u, p); setToken(r.token); onSuccess(); } catch { setErr("用户名或密码错误"); } finally { setBusy(false); }
+    try { const r = await api.login(u, p); setToken(r.token); onSuccess(); } catch (e: any) { setErr(e?.status === 429 ? e.message : "用户名或密码错误"); } finally { setBusy(false); }
   };
   return (
     <div className="flex min-h-screen items-center justify-center p-4">

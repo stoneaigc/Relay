@@ -1,8 +1,9 @@
+use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    extract::{ConnectInfo, Path, State},
     http::HeaderMap,
     response::IntoResponse,
     Json,
@@ -81,8 +82,16 @@ pub struct AdminLogin {
 /// POST /admin/auth/login
 pub async fn login(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<AdminLogin>,
 ) -> Result<axum::response::Response, ApiError> {
+    // 防爆破:按 IP 滑动窗口计数,5 次失败锁 15 分钟。
+    let guard_key = format!("adm:{}", addr.ip());
+    if let Some(secs) = state.login_guard.locked_for(&guard_key) {
+        return Err(ApiError::TooManyAttempts(format!(
+            "失败次数过多,请 {secs} 秒后再试"
+        )));
+    }
     let (ok, secret, ttl) = {
         let cfg = state.config();
         (
@@ -92,8 +101,10 @@ pub async fn login(
         )
     };
     if !ok {
-        return Err(ApiError::Unauthorized);
+        state.login_guard.record_failure(&guard_key);
+        return Err(ApiError::InvalidCredentials);
     }
+    state.login_guard.clear(&guard_key);
     let token = jwt::issue(&secret, &body.username, "admin", ttl)?;
     // 响应头回传真实用户名,供审计中间件覆盖 anonymous(响应头客户端不可伪造)。
     let mut resp = Json(json!({ "token": token })).into_response();

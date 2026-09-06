@@ -464,6 +464,8 @@ pub struct AppState {
     pub audit_log: Arc<dyn crate::audit::AuditStore>,
     /// 审计异步落库 channel。
     pub audit_tx: mpsc::Sender<crate::audit::AdminAuditLog>,
+    /// 登录防爆破滑动窗口。
+    pub login_guard: Arc<crate::guard::LoginGuard>,
 }
 
 impl AppState {
@@ -1545,6 +1547,7 @@ mod tests {
             request_log_tx: log_tx,
             audit_log: Arc::new(crate::audit::SqliteAuditStore::new(db2)),
             audit_tx,
+            login_guard: Arc::new(crate::guard::LoginGuard::default()),
         });
 
         let key_a = UpstreamKey::new(ProviderKind::Openai, "http://a", Some("ka"));

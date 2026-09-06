@@ -130,7 +130,8 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
         : await api.resetPassword(account.trim(), code.trim(), password);
       setToken(r.token); onSuccess();
     } catch (e: any) {
-      setErr(mode === "login" ? "用户名 / 邮箱或密码错误" : e.message);
+      // 登录模式:401 显示通用文案;429 等其它错误透出后端提示(如防爆破锁定)。
+      setErr(mode === "login" && e?.status !== 429 ? "用户名 / 邮箱或密码错误" : e.message);
     } finally { setLoading(false); }
   };
 
