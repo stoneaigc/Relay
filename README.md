@@ -206,6 +206,8 @@ RELAY_ADMIN__PASSWORD=your-admin-password
 RELAY_DATABASE__TYPE=sqlite
 ```
 
+也可以把变量放进项目根目录的 **`.env` 文件**（模板见 `.env.example`；`.env` 已被 `.gitignore` 排除，不会误提交）。加载优先级：**进程环境变量 > `.env` > `config/default.toml`**（同名时高优先级覆盖低优先级；`.env` 不存在时静默跳过）。
+
 主要配置段：
 
 | 段 | 关键项 | 说明 |

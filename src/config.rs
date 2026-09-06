@@ -404,8 +404,13 @@ pub enum ProviderKind {
 }
 
 impl Config {
-    /// 从 config/default.toml + 环境变量加载。
+    /// 从 .env 文件 + config/default.toml + 环境变量加载。
+    ///
+    /// 优先级(低→高):config/default.toml → .env → 进程环境变量。
+    /// .env 不存在时静默跳过;命名规则:前缀 `RELAY_`,`__` 分隔层级(如 RELAY_LOGGING__STORE)。
     pub fn load() -> anyhow::Result<Self> {
+        // .env 可选:文件缺失或格式异常都不阻断启动;真实密钥应放在 .env 或进程环境变量中。
+        let _ = dotenvy::dotenv();
         let cfg: Config = Figment::new()
             .merge(Toml::file("config/default.toml"))
             .merge(Env::prefixed("RELAY_").split("__"))
@@ -438,5 +443,35 @@ mod tests {
     fn attempt_cap_zero_retries_means_unlimited() {
         let d = Defaults { max_retries: 0, ..Defaults::default() };
         assert_eq!(d.attempt_cap(20), 20);
+    }
+
+    #[derive(Deserialize)]
+    struct TestServer {
+        bind: String,
+    }
+
+    #[derive(Deserialize)]
+    struct TestCfg {
+        server: TestServer,
+    }
+
+    #[test]
+    fn dotenv_loads_and_env_wins() {
+        // 用唯一前缀 RELAYZ_TEST_ 避免与其他测试的环境变量竞态;
+        // 变量命名与真实规则一致:前缀 + 层级 `__` 分隔(RELAYZ_TEST_SERVER__BIND → server.bind)。
+        dotenvy::from_read_override("RELAYZ_TEST_SERVER__BIND=from-dotenv\n".as_bytes()).unwrap();
+        let v: TestCfg = Figment::new()
+            .merge(Env::prefixed("RELAYZ_TEST_").split("__"))
+            .extract()
+            .unwrap();
+        assert_eq!(v.server.bind, "from-dotenv");
+        // 进程环境变量优先级高于 .env。
+        std::env::set_var("RELAYZ_TEST_SERVER__BIND", "from-env");
+        let v: TestCfg = Figment::new()
+            .merge(Env::prefixed("RELAYZ_TEST_").split("__"))
+            .extract()
+            .unwrap();
+        assert_eq!(v.server.bind, "from-env");
+        std::env::remove_var("RELAYZ_TEST_SERVER__BIND");
     }
 }

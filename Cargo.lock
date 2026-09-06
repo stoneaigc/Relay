@@ -1826,6 +1826,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "dashmap",
+ "dotenvy",
  "figment",
  "futures",
  "hex",
