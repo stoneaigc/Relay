@@ -18,7 +18,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 figment = { version = "0.10", features = ["toml", "env"] }
-dotenvy = "0.15"
 futures = "0.3"
 bytes = "1"
 rand = "0.8"
