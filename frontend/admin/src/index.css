@@ -44,3 +44,15 @@ body {
 .mono {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
+
+/* Modal 统一 sticky footer:DialogContent 整体滚动(max-h-[85dvh]),底部最后一个操作行吸底常驻。 */
+[data-dialog-content] > div[class*="justify-end"][class*="gap-2"]:last-of-type,
+[data-dialog-content] > div[class*="justify-between"][class*="gap-2"]:last-of-type {
+  position: sticky;
+  bottom: 0;
+  margin: 0 -1.5rem -1.5rem;
+  padding: 1rem 1.5rem 1.5rem;
+  background: var(--color-card);
+  border-top: 1px solid var(--color-border);
+  border-radius: 0 0 0.75rem 0.75rem;
+}

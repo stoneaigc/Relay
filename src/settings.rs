@@ -242,3 +242,26 @@ pub fn apply_embedding_settings(cfg: &mut Config, kv: &HashMap<String, String>, 
 pub fn has_embedding_key(kv: &HashMap<String, String>) -> bool {
     kv.get(K_EMB_API_KEY_ENC).map(|s| !s.is_empty()).unwrap_or(false)
 }
+
+/// settings 表里日志相关 key 的前缀。
+pub const LOG_PREFIX: &str = "logging.";
+pub const K_LOG_PREVIEW: &str = "logging.body_preview_max_bytes";
+pub const K_LOG_RETENTION: &str = "logging.retention_days";
+
+/// 把 DB 里的 logging.* 覆盖到内存 Config.logging(DB 优先于配置文件)。
+/// 解析失败时静默保持原值,与 fallback.* 行为一致。
+pub fn apply_logging_settings(cfg: &mut Config, kv: &HashMap<String, String>) {
+    let mut lc = cfg.logging.clone();
+
+    if let Some(v) = kv.get(K_LOG_PREVIEW) {
+        if let Ok(n) = v.parse::<usize>() {
+            lc.body_preview_max_bytes = n;
+        }
+    }
+    if let Some(v) = kv.get(K_LOG_RETENTION) {
+        if let Ok(n) = v.parse::<u32>() {
+            lc.retention_days = n;
+        }
+    }
+    cfg.logging = lc;
+}

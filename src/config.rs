@@ -84,8 +84,8 @@ pub struct LoggingConfig {
     /// 预览跟随存储后端:SQLite/PG 写 request_logs.req_body/resp_body 列,ES 写文档同名字段。
     #[serde(default = "default_body_preview")]
     pub body_preview_max_bytes: usize,
-    /// 请求链路/用量日志保留天数,超期由后台任务分批删除;0=永久保留(默认)。
-    #[serde(default)]
+    /// 请求链路/用量日志保留天数,超期由后台任务分批删除;0=永久保留(默认 30 天)。
+    #[serde(default = "default_retention_days")]
     pub retention_days: u32,
 }
 
@@ -97,6 +97,10 @@ fn default_body_preview() -> usize {
     8192
 }
 
+fn default_retention_days() -> u32 {
+    30
+}
+
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
@@ -106,7 +110,7 @@ impl Default for LoggingConfig {
             elasticsearch_username: String::new(),
             elasticsearch_password: String::new(),
             body_preview_max_bytes: default_body_preview(),
-            retention_days: 0,
+            retention_days: default_retention_days(),
         }
     }
 }

@@ -132,6 +132,12 @@ pub struct SeriesQuery {
     pub granularity: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct DaysQuery {
+    #[serde(default)]
+    pub days: Option<u32>,
+}
+
 /// GET /admin/overview/series?granularity=day|week|month —— 全站消耗趋势。
 pub async fn overview_series(
     State(state): State<Arc<AppState>>,
@@ -421,15 +427,17 @@ pub async fn delete_user(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// GET /admin/users/:id/series —— 该用户最近 N 天每日消耗(默认 30 天)。
+/// GET /admin/users/:id/series?days= —— 该用户最近 N 天每日消耗(默认 30,7~90)。
 pub async fn user_series(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
+    axum::extract::Query(q): axum::extract::Query<DaysQuery>,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
     let tz = state.config().defaults.tz_offset_hours;
-    let data = storage::user_daily_series(&state.db, id, 30, tz)
+    let days = q.days.unwrap_or(30).clamp(7, 90);
+    let data = storage::user_daily_series(&state.db, id, days as i64, tz)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({ "data": data })))
@@ -1846,6 +1854,79 @@ pub async fn save_cache_settings(
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let mut new_cfg = (**state.config()).clone();
     crate::settings::apply_cache_settings(&mut new_cfg, &kv);
+    state.config.store(Arc::new(new_cfg));
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---- 系统配置:日志 ----
+
+/// GET /admin/settings/logging -- 回显日志配置(DB 优先,否则配置文件值)。
+pub async fn get_logging_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let kv = storage::load_settings(&state.db, crate::settings::LOG_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let cfg = state.config();
+    let lc = &cfg.logging;
+    let body_preview_max_bytes = kv
+        .get(crate::settings::K_LOG_PREVIEW)
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(lc.body_preview_max_bytes);
+    let retention_days = kv
+        .get(crate::settings::K_LOG_RETENTION)
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(lc.retention_days);
+    Ok(Json(json!({
+        "body_preview_max_bytes": body_preview_max_bytes,
+        "retention_days": retention_days,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct LoggingSettingsBody {
+    /// 请求/响应体预览采集上限(字节);0=不采集。
+    pub body_preview_max_bytes: usize,
+    /// 日志保留天数;0=永久保留。
+    pub retention_days: u32,
+}
+
+/// 校验日志配置合理范围。
+fn validate_logging(b: &LoggingSettingsBody) -> Result<(), ApiError> {
+    if b.body_preview_max_bytes > 1_048_576 {
+        return Err(ApiError::BadRequest("预览上限需在 0~1048576 字节(1MB)之间".into()));
+    }
+    if b.retention_days > 365 {
+        return Err(ApiError::BadRequest("保留天数需在 0~365 之间(0=永久)".into()));
+    }
+    Ok(())
+}
+
+/// POST /admin/settings/logging -- 保存日志配置,刷新内存 Config。
+pub async fn save_logging_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<LoggingSettingsBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    validate_logging(&body)?;
+
+    let items: Vec<(String, String)> = vec![
+        (crate::settings::K_LOG_PREVIEW.to_string(), body.body_preview_max_bytes.to_string()),
+        (crate::settings::K_LOG_RETENTION.to_string(), body.retention_days.to_string()),
+    ];
+    storage::set_settings(&state.db, &items)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // 重建内存 Config:从 DB 重读 logging.* 覆盖当前快照,store() 刷新。
+    let kv = storage::load_settings(&state.db, crate::settings::LOG_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut new_cfg = (**state.config()).clone();
+    crate::settings::apply_logging_settings(&mut new_cfg, &kv);
     state.config.store(Arc::new(new_cfg));
     Ok(Json(json!({ "ok": true })))
 }

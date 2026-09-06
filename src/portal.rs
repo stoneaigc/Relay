@@ -398,14 +398,22 @@ pub async fn chat(
     crate::handlers::run_chat(Arc::clone(&state), user, None, body).await
 }
 
-/// GET /portal/series —— 当前用户最近 30 天每日消耗(曲线)。
+/// GET /portal/series?days= —— 当前用户最近 N 天每日消耗(曲线,默认 30,7~90)。
+#[derive(Deserialize)]
+pub struct SeriesDaysQuery {
+    #[serde(default)]
+    pub days: Option<u32>,
+}
+
 pub async fn series(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<SeriesDaysQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let uid = portal_user(&state, &headers)?;
     let tz = state.config().defaults.tz_offset_hours;
-    let data = storage::user_daily_series(&state.db, uid, 30, tz)
+    let days = q.days.unwrap_or(30).clamp(7, 90);
+    let data = storage::user_daily_series(&state.db, uid, days as i64, tz)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({ "data": data })))

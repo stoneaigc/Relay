@@ -129,6 +129,15 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("loaded {} embedding settings from DB", kv.len());
         }
     }
+    {
+        let kv = storage::load_settings(&db, settings::LOG_PREFIX)
+            .await
+            .map_err(|e| anyhow::anyhow!("load settings: {e}"))?;
+        if !kv.is_empty() {
+            settings::apply_logging_settings(&mut cfg, &kv);
+            tracing::info!("loaded {} logging settings from DB", kv.len());
+        }
+    }
 
     // 存量回填:users.token_used_total 死列修复(幂等,只执行一次)。
     storage::backfill_used_total(&db).await?;
@@ -295,6 +304,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/cache/clear", post(admin::cache_clear))
         .route("/settings/embedding", get(admin::get_embedding_settings).post(admin::save_embedding_settings))
         .route("/settings/embedding/test", post(admin::test_embedding))
+        .route("/settings/logging", get(admin::get_logging_settings).post(admin::save_logging_settings))
         // ---- 上游治理仪表盘 ----
         .route("/upstreams", get(admin::list_upstreams))
         .route("/upstreams/reset", post(admin::reset_all_breakers))

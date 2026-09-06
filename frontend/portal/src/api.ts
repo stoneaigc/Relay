@@ -15,6 +15,11 @@ async function req(path: string, opts: RequestInit = {}) {
   const text = await res.text();
   const data = text ? JSON.parse(text) : {};
   if (!res.ok) {
+    // 全局 401:登录态失效时清 token 并广播,由 App 监听跳回登录页(排除登录/注册等匿名接口)。
+    if (res.status === 401 && !path.includes("/auth/")) {
+      clearToken();
+      window.dispatchEvent(new Event("relay:auth-expired"));
+    }
     const err: any = new Error(data?.error?.message || res.statusText);
     err.status = res.status;
     throw err;
@@ -48,7 +53,8 @@ export const api = {
     req("/portal/api/keys/rotate", { method: "POST", body: JSON.stringify({ interface_kind }) }),
   models: (): Promise<{ data: string[] }> => req("/portal/api/models"),
   summary: (): Promise<{ granted: number; used: number; balance: number }> => req("/portal/api/summary"),
-  series: (): Promise<{ data: { ts: number; tokens: number; calls: number }[] }> => req("/portal/api/series"),
+  series: (days?: number): Promise<{ data: { ts: number; tokens: number; calls: number }[] }> =>
+    req(`/portal/api/series${typeof days === "number" ? `?days=${days}` : ""}`),
   usage: (page?: number, pageSize?: number): Promise<{ data: any[]; total: number; page: number; page_size: number; total_pages: number }> => {
     const qs = new URLSearchParams();
     if (typeof page === "number") qs.set("page", String(page));

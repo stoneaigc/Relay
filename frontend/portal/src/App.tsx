@@ -80,6 +80,12 @@ function LineChart({ points }: { points: { ts: number; tokens: number }[] }) {
 
 export default function App() {
   const [authed, setAuthed] = useState(!!getToken());
+  // 全局 401:api 层广播 relay:auth-expired,这里统一清 token 回登录页。
+  useEffect(() => {
+    const onExpired = () => { clearToken(); setAuthed(false); };
+    window.addEventListener("relay:auth-expired", onExpired);
+    return () => window.removeEventListener("relay:auth-expired", onExpired);
+  }, []);
   if (!authed) return <Login onSuccess={() => setAuthed(true)} />;
   return (
     <BrowserRouter basename="/portal">
@@ -225,6 +231,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [usagePageSize, setUsagePageSize] = useState(20);
   const [models, setModels] = useState<string[]>([]);
   const [series, setSeries] = useState<{ ts: number; tokens: number; calls: number }[]>([]);
+  const [seriesDays, setSeriesDays] = useState(30);
   const [reveal, setReveal] = useState<{ kind: string; key: string } | null>(null);
 
   const loadUsage = async () => {
@@ -237,11 +244,15 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
 
   const refresh = async () => {
     try {
-      const [me, k, m, s, ser] = await Promise.all([api.me(), api.keys(), api.models(), api.summary(), api.series()]);
-      setPhone(me.phone || "—"); setKeys(k.data); setModels(m.data); setSummary(s); setSeries(ser.data);
+      const [me, k, m, s] = await Promise.all([api.me(), api.keys(), api.models(), api.summary()]);
+      setPhone(me.phone || "—"); setKeys(k.data); setModels(m.data); setSummary(s);
     } catch (e: any) { if (String(e.message).includes("auth")) onLogout(); }
   };
   useEffect(() => { refresh(); }, []);
+
+  useEffect(() => {
+    api.series(seriesDays).then((ser) => setSeries(ser.data)).catch(() => {});
+  }, [seriesDays]);
 
   const sidebar = (
     <>
@@ -358,7 +369,20 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                     </CardContent>
                   </Card>
                   <Card>
-                    <CardHeader><CardTitle className="text-base">用量趋势(近 30 天)</CardTitle></CardHeader>
+                    <CardHeader>
+                      <div className="flex items-center justify-between gap-3">
+                        <CardTitle className="text-base">用量趋势</CardTitle>
+                        <div className="flex gap-1">
+                          {[7, 30, 90].map((d) => (
+                            <button key={d} onClick={() => setSeriesDays(d)}
+                              className={cn("rounded-md px-2 py-0.5 text-xs transition-colors",
+                                d === seriesDays ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:text-foreground")}>
+                              {d}天
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </CardHeader>
                     <CardContent>
                       {series.length === 0 ? <p className="text-sm text-muted-foreground">暂无数据</p> : (
                         <>

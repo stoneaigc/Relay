@@ -191,8 +191,8 @@ export const api = {
   patchUser: (id: string, body: any) =>
     req(`/admin/api/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteUser: (id: string) => req(`/admin/api/users/${id}`, { method: "DELETE" }),
-  userSeries: (id: string): Promise<{ data: { ts: number; tokens: number; calls: number }[] }> =>
-    req(`/admin/api/users/${id}/series`),
+  userSeries: (id: string, days?: number): Promise<{ data: { ts: number; tokens: number; calls: number }[] }> =>
+    req(`/admin/api/users/${id}/series${typeof days === "number" ? `?days=${days}` : ""}`),
   userUsage: (id: string, page?: number, pageSize?: number): Promise<{ data: any[]; total: number; page: number; page_size: number; total_pages: number }> => {
     const qs = new URLSearchParams();
     if (typeof page === "number") qs.set("page", String(page));
@@ -318,6 +318,11 @@ export const api = {
     body: EmbeddingSettingsBody & { test_text?: string },
   ): Promise<{ ok: boolean; dim?: number; error?: string }> =>
     req("/admin/api/settings/embedding/test", { method: "POST", body: JSON.stringify(body) }),
+
+  // ---- 日志设置 ----
+  loggingSettings: (): Promise<LoggingSettingsResp> => req("/admin/api/settings/logging"),
+  saveLoggingSettings: (body: LoggingSettingsBody) =>
+    req("/admin/api/settings/logging", { method: "POST", body: JSON.stringify(body) }),
 
   // ---- 上游治理(熔断器 + 并发槽仪表盘) ----
   listUpstreams: (): Promise<UpstreamsResp> => req("/admin/api/upstreams"),
@@ -504,6 +509,15 @@ export interface EmbeddingSettingsResp {
   /** 是否已配置 api_key(不回显明文) */
   has_key: boolean;
 }
+
+export interface LoggingSettingsResp {
+  /** 请求/响应体预览采集上限(字节);0=不采集 */
+  body_preview_max_bytes: number;
+  /** 日志保留天数;0=永久保留 */
+  retention_days: number;
+}
+
+export interface LoggingSettingsBody extends LoggingSettingsResp {}
 
 export interface EmbeddingSettingsBody {
   enabled: boolean;

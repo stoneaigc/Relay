@@ -243,7 +243,13 @@ function LineChart({ points, fmtX }: { points: { ts: number; tokens: number; cal
 
 function UserChartDialog({ user, onClose }: { user: UserRow | null; onClose: () => void }) {
   const [data, setData] = useState<{ ts: number; tokens: number; calls: number }[]>([]);
-  useEffect(() => { if (user) { setData([]); api.userSeries(user.id).then((r) => setData(r.data)); } }, [user]);
+  const [days, setDays] = useState(30);
+  useEffect(() => {
+    if (user) {
+      setData([]);
+      api.userSeries(user.id, days).then((r) => setData(r.data));
+    }
+  }, [user, days]);
   const fmt = (ts: number) => { const d = new Date(ts * 1000); return `${d.getMonth() + 1}/${d.getDate()}`; };
   const total = data.reduce((a, p) => a + p.tokens, 0);
   const peak = Math.max(0, ...data.map((d) => d.tokens));
@@ -252,8 +258,17 @@ function UserChartDialog({ user, onClose }: { user: UserRow | null; onClose: () 
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>{user?.username || user?.phone || "用户"} · 用量趋势</DialogTitle>
-          <DialogDescription>最近 30 天 · 共 {total.toLocaleString()} tokens</DialogDescription>
+          <DialogDescription>共 {total.toLocaleString()} tokens</DialogDescription>
         </DialogHeader>
+        <div className="flex items-center justify-end gap-1">
+          {[7, 30, 90].map((d) => (
+            <button key={d} onClick={() => setDays(d)}
+              className={cn("rounded-md px-2 py-0.5 text-xs transition-colors",
+                d === days ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:text-foreground")}>
+              {d}天
+            </button>
+          ))}
+        </div>
         {data.length === 0 ? <p className="text-sm text-muted-foreground">加载中或暂无数据…</p> : (
           <div>
             <LineChart points={data} fmtX={fmt} />
@@ -2780,6 +2795,12 @@ function SettingsPanel() {
   const [embNote, setEmbNote] = useState("");
   const [embErr, setEmbErr] = useState("");
   const [embTesting, setEmbTesting] = useState<null | "loading" | { ok: boolean; msg: string }>(null);
+  // 日志(预览与保留)
+  const [logPreview, setLogPreview] = useState(8192);
+  const [logRetention, setLogRetention] = useState(30);
+  const [logSaving, setLogSaving] = useState(false);
+  const [logNote, setLogNote] = useState("");
+  const [logErr, setLogErr] = useState("");
 
   const load = async () => {
     setLoading(true);
@@ -2807,6 +2828,9 @@ function SettingsPanel() {
         setEmbEnabled(r.enabled); setEmbBaseUrl(r.base_url); setEmbModel(r.model);
         setEmbHasKey(r.has_key); setEmbKey("");
       })
+      .catch(() => { /* 回退默认值 */ });
+    api.loggingSettings()
+      .then((r) => { setLogPreview(r.body_preview_max_bytes); setLogRetention(r.retention_days); })
       .catch(() => { /* 回退默认值 */ });
   }, []);
 
@@ -2901,6 +2925,22 @@ function SettingsPanel() {
     } catch (e: any) {
       setEmbTesting({ ok: false, msg: e.message });
     }
+  };
+
+  const saveLogging = async () => {
+    setLogErr(""); setLogNote("");
+    if (logPreview < 0 || logPreview > 1048576) { setLogErr("预览上限需在 0~1048576 字节(1MB)之间"); return; }
+    if (logRetention < 0 || logRetention > 365) { setLogErr("保留天数需在 0~365 之间(0=永久)"); return; }
+    setLogSaving(true);
+    try {
+      await api.saveLoggingSettings({
+        body_preview_max_bytes: Math.floor(logPreview),
+        retention_days: Math.floor(logRetention),
+      });
+      setLogNote("已保存,即时生效。");
+    } catch (e: any) {
+      setLogErr(e.message);
+    } finally { setLogSaving(false); }
   };
 
   return (
@@ -3090,6 +3130,35 @@ function SettingsPanel() {
             )}
             {embNote && <span className="text-xs text-success">{embNote}</span>}
             {embErr && <span className="text-xs text-destructive">{embErr}</span>}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-base">日志采集与保留</CardTitle>
+            <Badge variant={logRetention > 0 ? "success" : "muted"}>
+              {logRetention > 0 ? `保留 ${logRetention} 天` : "永久保留"}
+            </Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-xs text-muted-foreground">
+            控制「请求链路」中请求/响应体预览的采集上限与日志保留天数。预览上限 0 表示不采集正文(仅存元数据);保留天数 0 表示永久保留,超期日志由后台任务分批清理。
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div><label className="mb-1 block text-xs text-muted-foreground">正文预览上限(字节,0=不采集)</label>
+              <Input type="number" min={0} max={1048576} value={logPreview}
+                onChange={(e) => setLogPreview(Number(e.target.value))} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">保留天数(0=永久,最大 365)</label>
+              <Input type="number" min={0} max={365} value={logRetention}
+                onChange={(e) => setLogRetention(Number(e.target.value))} /></div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+            <Button onClick={saveLogging} disabled={logSaving}>{logSaving ? "保存中…" : "保存配置"}</Button>
+            {logNote && <span className="text-xs text-success">{logNote}</span>}
+            {logErr && <span className="text-xs text-destructive">{logErr}</span>}
           </div>
         </CardContent>
       </Card>
