@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen } from "lucide-react";
-import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp } from "./api";
+import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -100,6 +100,7 @@ const NAV: { path: string; label: string; icon: any }[] = [
   { path: "/upstreams", label: "上游治理", icon: Zap },
   { path: "/metrics", label: "接口指标", icon: Activity },
   { path: "/request-logs", label: "请求链路", icon: GitBranch },
+  { path: "/audit", label: "操作审计", icon: ShieldCheck },
   { path: "/groups", label: "模型组", icon: Layers },
   { path: "/rewards", label: "奖励审核", icon: Gift },
   { path: "/reward-tasks", label: "奖励设置", icon: Star },
@@ -179,6 +180,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
                 <Route path="/upstreams" element={<UpstreamsPanel />} />
                 <Route path="/metrics" element={<MetricsPanel />} />
                 <Route path="/request-logs" element={<RequestLogPanel />} />
+                <Route path="/audit" element={<AuditPanel />} />
                 <Route path="/rewards" element={<RewardsPanel />} />
                 <Route path="/reward-tasks" element={<RewardTasksPanel />} />
                 <Route path="/usage" element={<UsagePanel />} />
@@ -4404,6 +4406,104 @@ function attemptStatusLabel(status: number): string {
   if (status === 503) return "503 不可用";
   if (status === 0) return "未尝试";
   return `${status}`;
+}
+
+// 变更方法配色:DELETE 红(最危险)、PUT/PATCH 黄(修改)、POST 靛(新建)。
+function auditMethodColor(m: string): string {
+  if (m === "DELETE") return "bg-rose-500/10 text-rose-700 ring-1 ring-rose-500/20";
+  if (m === "PUT" || m === "PATCH") return "bg-amber-500/10 text-amber-700 ring-1 ring-amber-500/20";
+  return "bg-indigo-500/10 text-indigo-700 ring-1 ring-indigo-500/20";
+}
+
+function AuditPanel() {
+  const [rows, setRows] = useState<AuditLogRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
+
+  const load = async () => {
+    setLoading(true); setErr("");
+    try {
+      const r = await api.auditLogs(page, pageSize);
+      setRows(r.data); setTotal(r.total);
+    } catch (e: any) {
+      setErr(e?.message || "加载失败");
+    } finally { setLoading(false); }
+  };
+
+  useEffect(() => { load(); }, [page, pageSize]);
+
+  const fmtTime = (ts: number) => new Date(ts * 1000).toLocaleString("zh-CN", { hour12: false });
+
+  return (
+    <div className="space-y-5">
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">操作审计({loading ? "…" : total})</CardTitle>
+              <p className="mt-1 text-xs text-muted-foreground">记录管理端全部变更操作(POST/PUT/PATCH/DELETE),含登录尝试。</p>
+            </div>
+            <Button size="sm" variant="outline" className="h-8" onClick={() => load()}>
+              <RefreshCw className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {err ? (
+            <div className="flex flex-col items-center gap-2 py-8">
+              <p className="text-sm text-destructive">{err}</p>
+              <Button size="sm" variant="outline" onClick={() => load()}>重试</Button>
+            </div>
+          ) : loading ? (
+            <p className="text-sm text-muted-foreground">加载中…</p>
+          ) : rows.length === 0 ? (
+            <p className="text-sm text-muted-foreground">暂无审计记录</p>
+          ) : (
+            <>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>时间</TableHead>
+                    <TableHead>操作者</TableHead>
+                    <TableHead>方法</TableHead>
+                    <TableHead>路径</TableHead>
+                    <TableHead>状态</TableHead>
+                    <TableHead>IP</TableHead>
+                    <TableHead className="text-right">耗时</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {rows.map((r, i) => (
+                    <TableRow key={i}>
+                      <TableCell className="mono text-xs whitespace-nowrap">{fmtTime(r.ts)}</TableCell>
+                      <TableCell className="text-xs font-medium">{r.actor}</TableCell>
+                      <TableCell>
+                        <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold", auditMethodColor(r.method))}>
+                          {r.method}
+                        </span>
+                      </TableCell>
+                      <TableCell className="mono max-w-[320px] truncate text-xs" title={r.path}>{r.path}</TableCell>
+                      <TableCell>
+                        <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(r.status))}>
+                          {r.status}
+                        </span>
+                      </TableCell>
+                      <TableCell className="mono text-xs text-muted-foreground">{r.ip}</TableCell>
+                      <TableCell className="text-right text-xs whitespace-nowrap">{r.latency_ms}ms</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+              <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={setPage} onPageSizeChange={(s) => { setPage(1); setPageSize(s); }} />
+            </>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
 }
 
 function RequestLogPanel() {

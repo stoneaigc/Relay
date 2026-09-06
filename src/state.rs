@@ -460,6 +460,10 @@ pub struct AppState {
     pub request_log: Arc<dyn crate::reqlog::RequestLogStore>,
     /// 请求链路异步落库 channel(避免热路径阻塞)。
     pub request_log_tx: mpsc::Sender<crate::reqlog::RequestLog>,
+    /// 管理操作审计存储。
+    pub audit_log: Arc<dyn crate::audit::AuditStore>,
+    /// 审计异步落库 channel。
+    pub audit_tx: mpsc::Sender<crate::audit::AdminAuditLog>,
 }
 
 impl AppState {
@@ -1519,6 +1523,7 @@ mod tests {
 
         let (usage_tx, _usage_rx) = mpsc::channel(16);
         let (log_tx, _log_rx) = mpsc::channel(16);
+        let (audit_tx, _audit_rx) = mpsc::channel(16);
         let state = Arc::new(AppState {
             config: ArcSwap::from_pointee(cfg),
             routing: ArcSwap::from_pointee(routing),
@@ -1536,8 +1541,10 @@ mod tests {
             tz_offset_secs: 28800,
             audit_failures: AsyncMutex::new(VecDeque::new()),
             metrics: MetricsStore::default(),
-            request_log: Arc::new(SqliteRequestLogStore::new(db2)),
+            request_log: Arc::new(SqliteRequestLogStore::new(db2.clone())),
             request_log_tx: log_tx,
+            audit_log: Arc::new(crate::audit::SqliteAuditStore::new(db2)),
+            audit_tx,
         });
 
         let key_a = UpstreamKey::new(ProviderKind::Openai, "http://a", Some("ka"));

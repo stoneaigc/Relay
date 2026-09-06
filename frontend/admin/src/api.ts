@@ -353,7 +353,26 @@ export const api = {
     const s = qs.toString();
     return req(`/admin/api/request-logs${s ? "?" + s : ""}`);
   },
+
+  // ---- 管理操作审计 ----
+  auditLogs: (page?: number, pageSize?: number): Promise<{ data: AuditLogRow[]; total: number; page: number; page_size: number; total_pages: number }> => {
+    const qs = new URLSearchParams();
+    if (typeof page === "number") qs.set("page", String(page));
+    if (typeof pageSize === "number") qs.set("page_size", String(pageSize));
+    const s = qs.toString();
+    return req(`/admin/api/audit-logs${s ? "?" + s : ""}`);
+  },
 };
+
+export interface AuditLogRow {
+  actor: string;
+  method: string;
+  path: string;
+  status: number;
+  ip: string;
+  latency_ms: number;
+  ts: number;
+}
 
 export type EvidenceType = "screenshot" | "link" | "text" | "none";
 

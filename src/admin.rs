@@ -82,7 +82,7 @@ pub struct AdminLogin {
 pub async fn login(
     State(state): State<Arc<AppState>>,
     Json(body): Json<AdminLogin>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     let (ok, secret, ttl) = {
         let cfg = state.config();
         (
@@ -95,7 +95,12 @@ pub async fn login(
         return Err(ApiError::Unauthorized);
     }
     let token = jwt::issue(&secret, &body.username, "admin", ttl)?;
-    Ok(Json(json!({ "token": token })))
+    // 响应头回传真实用户名,供审计中间件覆盖 anonymous(响应头客户端不可伪造)。
+    let mut resp = Json(json!({ "token": token })).into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&body.username) {
+        resp.headers_mut().insert(crate::audit::AUDIT_ACTOR_HEADER, v);
+    }
+    Ok(resp)
 }
 
 /// GET /admin/overview —— 概览统计(累计)。
@@ -2307,6 +2312,47 @@ pub async fn list_request_logs(
     let total = state
         .request_log
         .count(keyword, q.failed, q.hours)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({
+        "data": logs,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages(total, page_size),
+    })))
+}
+
+// ======================== 管理操作审计 ========================
+
+#[derive(Deserialize)]
+pub struct AuditLogsQuery {
+    #[serde(default)]
+    pub page: Option<u32>,
+    /// 每页条数,默认 50,最大 200。
+    #[serde(default)]
+    pub page_size: Option<u32>,
+}
+
+/// GET /admin/api/audit-logs?page=&page_size= —— 管理操作审计(倒序,分页)。
+/// 记录 admin 面所有变更请求(POST/PUT/PATCH/DELETE):操作者/方法/路径/状态/IP/耗时。
+pub async fn list_audit_logs(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<AuditLogsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let page = q.page.unwrap_or(1).max(1);
+    let page_size = q.page_size.unwrap_or(50).clamp(1, 200);
+    let offset = (page - 1) * page_size;
+    let logs = state
+        .audit_log
+        .recent(page_size, offset)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let total = state
+        .audit_log
+        .count()
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({

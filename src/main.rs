@@ -1,4 +1,5 @@
 mod admin;
+mod audit;
 mod auth;
 mod cache;
 pub mod config;
@@ -19,6 +20,7 @@ mod storage;
 mod translate;
 
 use std::collections::VecDeque;
+use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -140,6 +142,8 @@ async fn main() -> anyhow::Result<()> {
     let (usage_tx, usage_rx) = mpsc::channel::<UsageEvent>(4096);
     // 请求链路日志:按配置选择存储后端(sqlite=默认写 request_logs 表;elasticsearch=按日索引写入 ES)。
     let (request_log_tx, request_log_rx) = mpsc::channel::<reqlog::RequestLog>(4096);
+    // 管理操作审计:admin 面变更请求经中间件采集,后台任务落库(量小,通道收窄)。
+    let (audit_tx, audit_rx) = mpsc::channel::<audit::AdminAuditLog>(1024);
     let log_store: Arc<dyn reqlog::RequestLogStore> = {
         let store_kind = cfg.logging.store.clone();
         match store_kind.as_str() {
@@ -166,7 +170,7 @@ async fn main() -> anyhow::Result<()> {
         keys,
         users,
         http,
-        db,
+        db: db.clone(),
         usage_tx,
         cache,
         semantic_cache: crate::semantic_cache::SemanticCache::new(),
@@ -179,10 +183,17 @@ async fn main() -> anyhow::Result<()> {
         metrics: crate::state::MetricsStore::default(),
         request_log: log_store,
         request_log_tx,
+        audit_log: Arc::new(audit::SqliteAuditStore::new(db.clone())),
+        audit_tx,
     });
 
     // 后台:用量落盘 + 请求链路落库 + 周期性余额回写。
-    tokio::spawn(background_task(Arc::clone(&state), usage_rx, request_log_rx));
+    tokio::spawn(background_task(
+        Arc::clone(&state),
+        usage_rx,
+        request_log_rx,
+        audit_rx,
+    ));
 
     // 后台:延迟优先策略的 P50 快照周期刷新(独立于落盘任务,15s 一次,只读内存桶)。
     tokio::spawn({
@@ -287,7 +298,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/metrics", get(admin::metrics_dashboard))
         .route("/metrics/overview", get(admin::metrics_overview))
         // 请求链路追踪
-        .route("/request-logs", get(admin::list_request_logs));
+        .route("/request-logs", get(admin::list_request_logs))
+        // 管理操作审计
+        .route("/audit-logs", get(admin::list_audit_logs))
+        // 审计中间件:包裹全部 admin 路由,仅变更方法落库。
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            audit::audit_middleware,
+        ));
 
     // SPA 静态资源(未命中的子路径回退到 index.html,交给前端路由)。
     let spa = |dir: &str| {
@@ -316,7 +334,8 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Relay listening on {}", bind);
 
     let shutdown_state = Arc::clone(&state);
-    axum::serve(listener, app)
+    // with_connect_info:中间件经 ConnectInfo 提取客户端 IP。
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("shutting down, flushing balances...");
@@ -331,6 +350,7 @@ async fn background_task(
     state: Arc<AppState>,
     mut rx: mpsc::Receiver<UsageEvent>,
     mut req_rx: mpsc::Receiver<reqlog::RequestLog>,
+    mut audit_rx: mpsc::Receiver<audit::AdminAuditLog>,
 ) {
     let mut tick = tokio::time::interval(Duration::from_secs(5));
     // 日志保留清理周期:每 10 分钟检查一次,按 logging.retention_days 删除超期链路日志(0=不清理)。
@@ -397,6 +417,17 @@ async fn background_task(
                     None => break,
                 }
             }
+            a = audit_rx.recv() => {
+                // 审计量小(管理操作低频):逐条落库即可。
+                match a {
+                    Some(a) => {
+                        if let Err(e) = state.audit_log.write(&a).await {
+                            tracing::error!("write audit log failed: {e}");
+                        }
+                    }
+                    None => break,
+                }
+            }
             _ = tick.tick() => {
                 flush_dirty(&state).await;
                 // calibrate_budgets 对 usage_logs 做聚合扫描,大表下代价高:降频到约每分钟一次。
@@ -416,6 +447,11 @@ async fn background_task(
                         Ok(n) if n > 0 => tracing::info!("pruned {} request logs older than {days} days", n),
                         Ok(_) => {}
                         Err(e) => tracing::error!("prune request logs failed: {e}"),
+                    }
+                    match state.audit_log.prune(days).await {
+                        Ok(n) if n > 0 => tracing::info!("pruned {} audit logs older than {days} days", n),
+                        Ok(_) => {}
+                        Err(e) => tracing::error!("prune audit logs failed: {e}"),
                     }
                 }
             }

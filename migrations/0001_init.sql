@@ -179,3 +179,16 @@ CREATE TABLE IF NOT EXISTS cache_vectors (
 );
 CREATE INDEX IF NOT EXISTS idx_cache_vectors_scope ON cache_vectors(model, provider);
 
+-- 管理操作审计:admin 面所有变更请求(POST/PUT/PATCH/DELETE)统一落库。
+CREATE TABLE IF NOT EXISTS admin_audit_logs (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  actor      TEXT NOT NULL,                -- 操作者(admin 用户名);无 token 请求(登录)为 anonymous
+  method     TEXT NOT NULL,                -- POST | PUT | PATCH | DELETE
+  path       TEXT NOT NULL,                -- 请求路径(如 /admin/api/users)
+  status     INTEGER NOT NULL,             -- 响应状态码
+  ip         TEXT NOT NULL DEFAULT '',     -- 客户端 IP
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON admin_audit_logs(created_at);
+
