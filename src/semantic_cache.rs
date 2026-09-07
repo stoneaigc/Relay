@@ -32,8 +32,8 @@ const RECENT_CAP: usize = 200;
 const EVENTS_CAP: usize = 6000;
 /// 缓存条目上限(超出由后台 sweep 逐出,热路径不检查)。
 const MAX_ENTRIES: usize = 2048;
-/// 单条缓存响应体上限(超大响应不缓存,防内存放大)。
-const MAX_BODY: usize = 4 * 1024 * 1024;
+/// 单条缓存响应体上限(超大响应不缓存,防内存放大;cache_wrap 累积过程同步检查)。
+pub(crate) const MAX_BODY: usize = 4 * 1024 * 1024;
 
 /// 一条缓存的响应。
 #[derive(Debug, Clone)]
@@ -354,11 +354,26 @@ fn usage_from(v: &Value) -> (u32, u32) {
     (input, output)
 }
 
-/// 回放缓存命中:原字节 + 原 Content-Type + x-relay-cache: HIT + 透传头。
-pub fn replay_response(entry: Entry, provider: &str, request_id: &str) -> Response {
+/// 判定请求是否确定性:temperature <= 0.001 或显式带 seed(缺省都不算,宁可不缓存)。
+pub fn deterministic(req: &serde_json::Value) -> bool {
+    if let Some(t) = req.get("temperature").and_then(|v| v.as_f64()) {
+        if t <= 0.001 {
+            return true;
+        }
+    }
+    matches!(req.get("seed"), Some(v) if !v.is_null())
+}
+
+/// 命中扣费:tokens 照实入日志,charged 按路由倍率 × 用户倍率 × 折扣率取整。
+pub fn cache_charged(input: u32, output: u32, multiplier: f64, user_multiplier: f64, billing_ratio: f64) -> i64 {
+    ((input as f64 + output as f64) * multiplier * user_multiplier * billing_ratio).round() as i64
+}
+
+/// 回放缓存命中:原字节 + 原 Content-Type + x-relay-cache: HIT (类型) + 透传头。
+pub fn replay_response(entry: Entry, provider: &str, request_id: &str, hit_type: &str) -> Response {
     let mut resp = Response::builder()
         .header("content-type", entry.content_type)
-        .header("x-relay-cache", "HIT")
+        .header("x-relay-cache", format!("HIT ({hit_type})"))
         .body(Body::from(entry.body))
         .expect("static replay response parts");
     if let Ok(hv) = axum::http::HeaderValue::from_str(provider) {
@@ -418,6 +433,38 @@ mod tests {
         assert!(!eligible(&empty, 3));
         let none = json!({"prompt":"x"});
         assert!(!eligible(&none, 3));
+    }
+
+    #[test]
+    fn deterministic_four_branches() {
+        let missing = json!({"messages":[{"role":"user","content":"hi"}]});
+        assert!(!deterministic(&missing));
+        let zero = json!({"temperature": 0});
+        assert!(deterministic(&zero));
+        let tiny = json!({"temperature": 0.0005});
+        assert!(deterministic(&tiny));
+        let hot = json!({"temperature": 0.7});
+        assert!(!deterministic(&hot));
+        let seeded = json!({"temperature": 0.9, "seed": 42});
+        assert!(deterministic(&seeded));
+        let null_seed = json!({"seed": null});
+        assert!(!deterministic(&null_seed));
+    }
+
+    #[test]
+    fn cache_charged_scales_with_ratio() {
+        // (100+200) × 1.5 × 2.0 × 0.5 = 450
+        assert_eq!(cache_charged(100, 200, 1.5, 2.0, 0.5), 450);
+        assert_eq!(cache_charged(100, 200, 1.5, 2.0, 0.0), 0);
+        assert_eq!(cache_charged(10, 20, 1.0, 1.0, 1.0), 30);
+    }
+
+    #[test]
+    fn replay_header_marks_hit_type() {
+        let resp = replay_response(entry("{\"ok\":1}", 3600), "prov", "req-1", "exact");
+        assert_eq!(resp.headers().get("x-relay-cache").unwrap().to_str().unwrap(), "HIT (exact)");
+        let resp2 = replay_response(entry("{\"ok\":2}", 3600), "prov", "req-1", "semantic");
+        assert_eq!(resp2.headers().get("x-relay-cache").unwrap().to_str().unwrap(), "HIT (semantic)");
     }
 
     #[test]

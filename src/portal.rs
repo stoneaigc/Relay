@@ -394,8 +394,8 @@ pub async fn chat(
 ) -> Result<axum::response::Response, ApiError> {
     let uid = portal_user(&state, &headers)?;
     let user = state.user(&uid).ok_or(ApiError::InvalidKey)?;
-    // 门户对话走 JWT 鉴权,无 API Key,密钥维度记 None。
-    crate::handlers::run_chat(Arc::clone(&state), user, None, body).await
+    // 门户对话走 JWT 鉴权,无 API Key,密钥维度记 None;门户入口不提供缓存逃生口。
+    crate::handlers::run_chat(Arc::clone(&state), user, None, body, false).await
 }
 
 /// GET /portal/series?days= —— 当前用户最近 N 天每日消耗(曲线,默认 30,7~90)。

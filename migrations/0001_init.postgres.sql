@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS group_routes (
   model_id    BIGINT NOT NULL,
   weight      BIGINT NOT NULL DEFAULT 100,
   multiplier  DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+  cache_enabled BIGINT NOT NULL DEFAULT 0,    -- 路由级语义缓存 opt-in(1=参与缓存判定)
   created_at  TEXT NOT NULL
 );
 

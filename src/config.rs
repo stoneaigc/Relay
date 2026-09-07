@@ -180,12 +180,16 @@ pub struct CacheSemanticConfig {
     /// 超过该消息条数的多轮对话跳过缓存。
     #[serde(default = "default_cs_multi_turn")]
     pub multi_turn_max: usize,
+    /// 命中计费折扣率(0.0=免费,1.0=全额;与模型倍率/用户倍率相乘)。
+    #[serde(default = "default_cs_billing_ratio")]
+    pub billing_ratio: f64,
 }
 
 fn default_cs_enabled() -> bool { true }
 fn default_cs_ttl() -> u64 { 3600 }
 fn default_cs_threshold() -> f64 { 0.8 }
 fn default_cs_multi_turn() -> usize { 3 }
+fn default_cs_billing_ratio() -> f64 { 0.0 }
 
 /// L2 embedding 供应商配置(OpenAI 兼容接口通吃):POST {base_url}/embeddings。
 #[derive(Debug, Clone, Deserialize)]
@@ -234,6 +238,7 @@ impl Default for CacheSemanticConfig {
             ttl_secs: default_cs_ttl(),
             similarity_threshold: default_cs_threshold(),
             multi_turn_max: default_cs_multi_turn(),
+            billing_ratio: default_cs_billing_ratio(),
         }
     }
 }

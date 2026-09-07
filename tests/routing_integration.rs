@@ -50,9 +50,9 @@ fn make_test_routing() -> Routing {
     let mut chat_routes = HashMap::new();
     // "chat" 对外模型名 → 3 条路由
     chat_routes.insert("chat".into(), vec![
-        Target { model_id: 1, weight: 50, multiplier: 1.5 },  // OpenAI GPT-4o
-        Target { model_id: 3, weight: 30, multiplier: 1.0 },  // DeepSeek V3
-        Target { model_id: 5, weight: 20, multiplier: 2.0 },  // Claude Sonnet 4
+        Target { model_id: 1, weight: 50, multiplier: 1.5, cache_enabled: true },  // OpenAI GPT-4o(验证字段透传)
+        Target { model_id: 3, weight: 30, multiplier: 1.0, cache_enabled: false },  // DeepSeek V3
+        Target { model_id: 5, weight: 20, multiplier: 2.0, cache_enabled: false },  // Claude Sonnet 4
     ]);
     groups.insert(1, chat_routes);
 
@@ -110,7 +110,7 @@ fn priority_deduplicates_same_upstream() {
     let mut rt = make_test_routing();
     // 给 chat 加一条重复的 OpenAI GPT-4o(不同 model_id 但相同上游)
     rt.groups.get_mut(&1).unwrap().get_mut("chat").unwrap()
-        .push(Target { model_id: 100, weight: 10, multiplier: 1.0 });
+        .push(Target { model_id: 100, weight: 10, multiplier: 1.0, cache_enabled: false });
     // model_id=100 没有对应的 ModelDef,会被跳过;但如果添加了就要去重
     // 用另一个 model_id 指向同一个 provider+model 来测试去重
     rt.models.insert(100, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into(), input_price: None, output_price: None });
@@ -306,7 +306,7 @@ fn different_public_names_independent_routing() {
     let mut rt = make_test_routing();
     // 添加 "fast" 对外模型名,只绑一个模型
     rt.groups.get_mut(&1).unwrap().insert("fast".into(), vec![
-        Target { model_id: 2, weight: 100, multiplier: 0.8 }, // GPT-4o-mini
+        Target { model_id: 2, weight: 100, multiplier: 0.8, cache_enabled: false }, // GPT-4o-mini
     ]);
 
     let rr1 = dashmap::DashMap::new();
@@ -358,7 +358,7 @@ fn latency_aware_dedup_still_applies() {
     let mut rt = make_test_routing();
     // 加一条与 model_id=1 相同上游的新路由(不同 model_id),延迟优先下也应去重
     rt.groups.get_mut(&1).unwrap().get_mut("chat").unwrap()
-        .push(Target { model_id: 101, weight: 1, multiplier: 1.0 });
+        .push(Target { model_id: 101, weight: 1, multiplier: 1.0, cache_enabled: false });
     rt.models.insert(101, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into(), input_price: None, output_price: None });
     let lat = dashmap::DashMap::new();
     lat.insert("p-openai".to_string(), 100u64);

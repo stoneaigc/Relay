@@ -408,7 +408,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                         <TableHeader>
                           <TableRow>
                             <TableHead>模型</TableHead><TableHead>供应商</TableHead>
-                            <TableHead>输入</TableHead><TableHead>输出</TableHead><TableHead>计费</TableHead><TableHead>状态</TableHead>
+                            <TableHead>输入</TableHead><TableHead>输出</TableHead><TableHead>计费</TableHead>
+                            <TableHead>缓存</TableHead><TableHead>状态</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -416,7 +417,15 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                             <TableRow key={i}>
                               <TableCell className="mono">{r.model}</TableCell><TableCell>{r.provider}</TableCell>
                               <TableCell>{r.input_tokens}</TableCell><TableCell>{r.output_tokens}</TableCell>
-                              <TableCell className="mono">{r.charged_tokens}</TableCell><TableCell>{r.status}</TableCell>
+                              <TableCell className="mono">{r.charged_tokens}</TableCell>
+                              <TableCell>
+                                {r.kind === "cache"
+                                  ? <Badge variant="success" title="精确命中缓存,按折扣率计费">精确</Badge>
+                                  : r.kind === "semantic"
+                                    ? <Badge variant="default" title="语义相似命中缓存,按折扣率计费">语义</Badge>
+                                    : <span className="text-xs text-muted-foreground">—</span>}
+                              </TableCell>
+                              <TableCell>{r.status}</TableCell>
                             </TableRow>
                           ))}
                         </TableBody>

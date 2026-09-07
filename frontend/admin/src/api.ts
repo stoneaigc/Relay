@@ -138,6 +138,8 @@ export interface RouteRow {
   provider: string;
   upstream_model: string;
   label: string | null;
+  /** L1 路由级语义缓存 opt-in */
+  cache_enabled: boolean;
 }
 
 export interface ImportRoutePayload {
@@ -243,11 +245,11 @@ export const api = {
   deleteTimeRule: (groupId: number, ruleId: number) => req(`/admin/api/groups/${groupId}/time-rules/${ruleId}`, { method: "DELETE" }),
 
   routes: (groupId: number): Promise<{ data: RouteRow[] }> => req(`/admin/api/groups/${groupId}/routes`),
-  addRoute: (groupId: number, body: { public_name: string; model_id: number; weight?: number; multiplier?: number }) =>
+  addRoute: (groupId: number, body: { public_name: string; model_id: number; weight?: number; multiplier?: number; cache?: boolean }) =>
     req(`/admin/api/groups/${groupId}/routes`, { method: "POST", body: JSON.stringify(body) }),
-  addRoutesBatch: (groupId: number, body: { routes: { public_name: string; model_id: number; weight?: number; multiplier?: number }[] }): Promise<{ ok: boolean; ids?: number[] }> =>
+  addRoutesBatch: (groupId: number, body: { routes: { public_name: string; model_id: number; weight?: number; multiplier?: number }[]; cache?: boolean }): Promise<{ ok: boolean; ids?: number[] }> =>
     req(`/admin/api/groups/${groupId}/routes/batch`, { method: "POST", body: JSON.stringify(body) }),
-  updateRoute: (id: number, body: { public_name: string; model_id: number; weight?: number; multiplier?: number }) =>
+  updateRoute: (id: number, body: { public_name: string; model_id: number; weight?: number; multiplier?: number; cache?: boolean }) =>
     req(`/admin/api/routes/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteRoute: (id: number) => req(`/admin/api/routes/${id}`, { method: "DELETE" }),
   batchDeleteRoutes: (ids: number[]) =>
@@ -496,6 +498,8 @@ export interface CacheSettingsResp {
   similarity_threshold: number;
   /** 消息条数超过该值的多轮对话跳过缓存 */
   multi_turn_max: number;
+  /** L3 命中计费折扣率 0.0~1.0(0=命中免费,1=照常计费) */
+  billing_ratio: number;
 }
 
 export interface CacheSettingsBody extends CacheSettingsResp {}

@@ -33,6 +33,8 @@ pub struct Target {
     pub model_id: i64,
     pub weight: u32,
     pub multiplier: f64,
+    /// 路由级语义缓存 opt-in(与全局开关/确定性判定 AND)。
+    pub cache_enabled: bool,
 }
 
 /// 高峰/低谷时段规则:按「星期 + 时间段」驱动计费倍率与路由权重覆盖。
@@ -119,6 +121,8 @@ pub struct Resolved {
     pub api_key: Option<String>,
     pub upstream_model: String,
     pub multiplier: f64,
+    /// 路由级语义缓存 opt-in(与全局开关/确定性判定 AND)。
+    pub cache_enabled: bool,
     /// 该候选在路由中的权重(负载均衡权重,供链路展示)。
     pub weight: u32,
     /// 高峰/低谷时段倍率系数(无命中时段=1.0),已计入 multiplier;此处保留原始值供展示。
@@ -179,7 +183,7 @@ impl Routing {
         let strategy = self.group_strategy.get(&group_id).copied().unwrap_or(Strategy::WeightedRandom);
         // 时段覆盖权重时,不透传原权重给排序,单独构造一份带覆盖权重的 targets 快照。
         let weighted_targets: Option<Vec<Target>> = rule.as_ref().map(|_| {
-            targets.iter().map(|t| Target { model_id: t.model_id, weight: eff_weight(t), multiplier: t.multiplier }).collect()
+            targets.iter().map(|t| Target { model_id: t.model_id, weight: eff_weight(t), multiplier: t.multiplier, cache_enabled: t.cache_enabled }).collect()
         });
         let sort_targets: &[Target] = weighted_targets.as_deref().unwrap_or(targets);
         let order = match strategy {
@@ -211,6 +215,7 @@ impl Routing {
                 weight: eff_weight(t),
                 time_multiplier,
                 time_slot: time_slot.clone(),
+                cache_enabled: t.cache_enabled,
             });
         }
         if out.is_empty() {
@@ -452,7 +457,7 @@ mod tests {
 
     #[test]
     fn priority_single_target() {
-        let targets = vec![Target { model_id: 1, weight: 100, multiplier: 1.0 }];
+        let targets = vec![Target { model_id: 1, weight: 100, multiplier: 1.0, cache_enabled: false }];
         let order = order_by_priority(&targets);
         assert_eq!(order, vec![0]);
     }
@@ -460,9 +465,9 @@ mod tests {
     #[test]
     fn priority_descending_by_weight() {
         let targets = vec![
-            Target { model_id: 1, weight: 10, multiplier: 1.0 },
-            Target { model_id: 2, weight: 50, multiplier: 1.0 },
-            Target { model_id: 3, weight: 30, multiplier: 1.0 },
+            Target { model_id: 1, weight: 10, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 50, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 3, weight: 30, multiplier: 1.0, cache_enabled: false },
         ];
         let order = order_by_priority(&targets);
         // 50 > 30 > 10 → indices 1, 2, 0
@@ -472,9 +477,9 @@ mod tests {
     #[test]
     fn priority_equal_weights_stable_order() {
         let targets = vec![
-            Target { model_id: 1, weight: 100, multiplier: 1.0 },
-            Target { model_id: 2, weight: 100, multiplier: 1.0 },
-            Target { model_id: 3, weight: 100, multiplier: 1.0 },
+            Target { model_id: 1, weight: 100, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 100, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 3, weight: 100, multiplier: 1.0, cache_enabled: false },
         ];
         let order = order_by_priority(&targets);
         // 相同权重时保持原序(0,1,2)
@@ -491,8 +496,8 @@ mod tests {
     #[test]
     fn priority_zero_weight() {
         let targets = vec![
-            Target { model_id: 1, weight: 0, multiplier: 1.0 },
-            Target { model_id: 2, weight: 50, multiplier: 1.0 },
+            Target { model_id: 1, weight: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 50, multiplier: 1.0, cache_enabled: false },
         ];
         let order = order_by_priority(&targets);
         assert_eq!(order, vec![1, 0]);
@@ -503,9 +508,9 @@ mod tests {
     #[test]
     fn shuffle_weighted_covers_all() {
         let targets = vec![
-            Target { model_id: 1, weight: 10, multiplier: 1.0 },
-            Target { model_id: 2, weight: 20, multiplier: 1.0 },
-            Target { model_id: 3, weight: 30, multiplier: 1.0 },
+            Target { model_id: 1, weight: 10, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 20, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 3, weight: 30, multiplier: 1.0, cache_enabled: false },
         ];
         let order = shuffle_weighted(&targets);
         assert_eq!(order.len(), 3);
@@ -516,7 +521,7 @@ mod tests {
 
     #[test]
     fn shuffle_weighted_single() {
-        let targets = vec![Target { model_id: 1, weight: 100, multiplier: 1.0 }];
+        let targets = vec![Target { model_id: 1, weight: 100, multiplier: 1.0, cache_enabled: false }];
         let order = shuffle_weighted(&targets);
         assert_eq!(order, vec![0]);
     }
@@ -534,9 +539,9 @@ mod tests {
         models.insert(2, mdl("gpt-4o", None, None)); // 2.5+10.0 = 12.5
         models.insert(3, mdl("custom-x", None, None)); // 未定价
         let targets = vec![
-            Target { model_id: 2, weight: 1, multiplier: 1.0 },
-            Target { model_id: 1, weight: 1, multiplier: 1.0 },
-            Target { model_id: 3, weight: 1, multiplier: 1.0 },
+            Target { model_id: 2, weight: 1, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 3, weight: 1, multiplier: 1.0, cache_enabled: false },
         ];
         let order = order_by_cost(&targets, &models);
         assert_eq!(order, vec![1, 0, 2]);
@@ -548,8 +553,8 @@ mod tests {
         models.insert(1, mdl("gpt-4o-mini", None, None)); // 0.75 × 1.0
         models.insert(2, mdl("gpt-4o", None, None)); // 12.5 × 0.05 = 0.625
         let targets = vec![
-            Target { model_id: 1, weight: 1, multiplier: 1.0 },
-            Target { model_id: 2, weight: 1, multiplier: 0.05 },
+            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, multiplier: 0.05, cache_enabled: false },
         ];
         let order = order_by_cost(&targets, &models);
         assert_eq!(order, vec![1, 0]);
@@ -562,9 +567,9 @@ mod tests {
         models.insert(2, mdl("gpt-4o-mini", None, None));
         // 模型未登记也应视为未定价
         let targets = vec![
-            Target { model_id: 1, weight: 1, multiplier: 1.0 },
-            Target { model_id: 2, weight: 1, multiplier: 1.0 },
-            Target { model_id: 99, weight: 1, multiplier: 1.0 },
+            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 99, weight: 1, multiplier: 1.0, cache_enabled: false },
         ];
         let order = order_by_cost(&targets, &models);
         // 唯一定价者第一;两个未定价(INFINITY)之间同价随机,只能断言集合
@@ -581,9 +586,9 @@ mod tests {
         models.insert(2, mdl("gpt-4o", None, None));
         models.insert(3, mdl("custom-x", None, None));
         let targets = vec![
-            Target { model_id: 1, weight: 1, multiplier: 1.0 },
-            Target { model_id: 2, weight: 1, multiplier: 1.0 },
-            Target { model_id: 3, weight: 1, multiplier: 1.0 },
+            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 3, weight: 1, multiplier: 1.0, cache_enabled: false },
         ];
         let order = order_by_cost(&targets, &models);
         let mut sorted = order.clone();
@@ -598,8 +603,8 @@ mod tests {
         models.insert(1, mdl("gpt-4o", Some(0.0), Some(0.0)));
         models.insert(2, mdl("gpt-4o-mini", None, None)); // 0.75
         let targets = vec![
-            Target { model_id: 1, weight: 1, multiplier: 1.0 },
-            Target { model_id: 2, weight: 1, multiplier: 1.0 },
+            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, multiplier: 1.0, cache_enabled: false },
         ];
         let order = order_by_cost(&targets, &models);
         assert_eq!(order, vec![0, 1]);
@@ -633,9 +638,9 @@ mod tests {
         }
         let lat = lat_map(&[("p-openai", 800), ("p-deepseek", 200), ("p-anthropic", 450)]);
         let targets = vec![
-            Target { model_id: 1, weight: 1, multiplier: 1.0 },
-            Target { model_id: 2, weight: 1, multiplier: 1.0 },
-            Target { model_id: 3, weight: 1, multiplier: 1.0 },
+            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 3, weight: 1, multiplier: 1.0, cache_enabled: false },
         ];
         let order = order_by_latency(&targets, &models, &lat);
         // P50 升序:deepseek(200) < anthropic(450) < openai(800)
@@ -653,8 +658,8 @@ mod tests {
         models.insert(2, m2);
         let lat = lat_map(&[("p-openai", 800)]);
         let targets = vec![
-            Target { model_id: 2, weight: 1, multiplier: 1.0 },
-            Target { model_id: 1, weight: 1, multiplier: 1.0 },
+            Target { model_id: 2, weight: 1, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
         ];
         let order = order_by_latency(&targets, &models, &lat);
         // 有数据的在前,无数据(u64::MAX)殿后
@@ -672,8 +677,8 @@ mod tests {
         models.insert(2, m2);
         let lat = dashmap::DashMap::new();
         let targets = vec![
-            Target { model_id: 1, weight: 1, multiplier: 1.0 },
-            Target { model_id: 2, weight: 1, multiplier: 1.0 },
+            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, multiplier: 1.0, cache_enabled: false },
         ];
         let order = order_by_latency(&targets, &models, &lat);
         // 全部无数据:同值随机,但必须覆盖全部索引
@@ -686,7 +691,7 @@ mod tests {
     fn latency_order_single_target() {
         let models = HashMap::new();
         let lat = dashmap::DashMap::new();
-        let targets = vec![Target { model_id: 1, weight: 1, multiplier: 1.0 }];
+        let targets = vec![Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false }];
         let order = order_by_latency(&targets, &models, &lat);
         assert_eq!(order, vec![0]);
     }

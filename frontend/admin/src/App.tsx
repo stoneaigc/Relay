@@ -1506,7 +1506,7 @@ function GroupsPanel() {
                   </TableHead>
                   <TableHead>对外模型名</TableHead><TableHead>→ 实际模型</TableHead>
                   <TableHead>{curStrategy === "priority" ? "优先级" : "权重"}</TableHead>
-                  <TableHead>倍率</TableHead><TableHead className="text-right">操作</TableHead>
+                  <TableHead>倍率</TableHead><TableHead>缓存</TableHead><TableHead className="text-right">操作</TableHead>
                 </TableRow></TableHeader>
                 <TableBody>
                   {(() => {
@@ -1535,6 +1535,11 @@ function GroupsPanel() {
                             ) : r.weight}
                           </TableCell>
                           <TableCell><Badge variant={r.multiplier === 1 ? "muted" : "default"}>×{r.multiplier}</Badge></TableCell>
+                          <TableCell>
+                            {r.cache_enabled
+                              ? <Badge variant="success" title="语义缓存已开启:精确/语义命中时按全局折扣率计费;x-relay-cache-control: no-cache 可跳过">缓存</Badge>
+                              : <Badge variant="muted" title="该路由未启用语义缓存(全局缓存开启后仍需路由级 opt-in)">—</Badge>}
+                          </TableCell>
                           <TableCell className="text-right">
                             <RowActions actions={[
                               { label: "编辑", icon: <Pencil className="h-4 w-4" />, onClick: () => setRouteDlg({ edit: r }) },
@@ -1545,7 +1550,7 @@ function GroupsPanel() {
                   );
                     });
                   })()}
-                  {routes.length === 0 && <TableRow><TableCell colSpan={6} className="text-sm text-muted-foreground">该组暂无路由</TableCell></TableRow>}
+                  {routes.length === 0 && <TableRow><TableCell colSpan={7} className="text-sm text-muted-foreground">该组暂无路由</TableCell></TableRow>}
                 </TableBody>
               </Table>
             </>
@@ -1740,6 +1745,8 @@ function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
   const [modelId, setModelId] = useState<number | "">("");
   const [weight, setWeight] = useState("100");
   const [mult, setMult] = useState("1");
+  const [useCache, setUseCache] = useState(false);
+  const [batchCache, setBatchCache] = useState(false);
   const [err, setErr] = useState("");
   // 批量模式
   const [selectedModels, setSelectedModels] = useState<Set<number>>(new Set());
@@ -1750,9 +1757,10 @@ function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
       if (edit) {
         setPublicName(edit.public_name); setModelId(edit.model_id);
         setWeight(String(edit.weight)); setMult(String(edit.multiplier));
+        setUseCache(edit.cache_enabled);
       } else {
         setPublicName(""); setModelId(models[0]?.id ?? "");
-        setWeight("100"); setMult("1");
+        setWeight("100"); setMult("1"); setUseCache(false); setBatchCache(false);
         setSelectedModels(new Set()); setRouteRows(new Map()); setSelectedProvider("");
       }
       setErr("");
@@ -1783,16 +1791,16 @@ function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
     setErr(""); setSubmitting(true);
     try {
       if (edit) {
-        await api.updateRoute(edit.id, { public_name: publicName.trim(), model_id: Number(modelId), weight: Number(weight) || 100, multiplier: Number(mult) || 1 });
+        await api.updateRoute(edit.id, { public_name: publicName.trim(), model_id: Number(modelId), weight: Number(weight) || 100, multiplier: Number(mult) || 1, cache: useCache });
       } else if (selectedModels.size > 0) {
         const routes = [...selectedModels].map(id => {
           const row = routeRows.get(id);
           return { public_name: row?.public_name || "", model_id: id, weight: Number(row?.weight) || 100, multiplier: Number(row?.multiplier) || 1 };
         }).filter(r => r.public_name.trim());
         if (routes.length === 0) { setErr("请至少填写一个对外模型名"); setSubmitting(false); return; }
-        await api.addRoutesBatch(groupId, { routes });
+        await api.addRoutesBatch(groupId, { routes, cache: batchCache });
       } else {
-        await api.addRoute(groupId, { public_name: publicName.trim(), model_id: Number(modelId), weight: Number(weight) || 100, multiplier: Number(mult) || 1 });
+        await api.addRoute(groupId, { public_name: publicName.trim(), model_id: Number(modelId), weight: Number(weight) || 100, multiplier: Number(mult) || 1, cache: useCache });
       }
       onSaved(); onClose();
     } catch (e: any) { setErr(e.message); }
@@ -1875,6 +1883,13 @@ function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
                 <div><label className="mb-1 block text-xs text-muted-foreground">权重</label><Input value={weight} onChange={(e) => setWeight(e.target.value)} /></div>
                 <div><label className="mb-1 block text-xs text-muted-foreground">倍率</label><Input value={mult} onChange={(e) => setMult(e.target.value)} /></div>
               </div>
+              <div className="flex items-center justify-between gap-4 rounded-lg border bg-muted/30 px-3 py-2.5">
+                <div className="space-y-0.5">
+                  <p className="text-xs font-medium">语义缓存</p>
+                  <p className="text-[11px] text-muted-foreground">开启后该路由的确定性请求(temperature≤0.001 或带 seed)可命中缓存,按全局折扣率计费。</p>
+                </div>
+                <Switch checked={useCache} onCheckedChange={setUseCache} aria-label="切换语义缓存" />
+              </div>
             </>
           ) : (
             /* 新建模式:选供应商 → 选模型 → 配置映射 */
@@ -1932,6 +1947,13 @@ function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
                         </div>
                       );
                     })}
+                  </div>
+                  <div className="flex items-center justify-between gap-4 rounded-lg border bg-muted/30 px-3 py-2.5">
+                    <div className="space-y-0.5">
+                      <p className="text-xs font-medium">语义缓存(本批全部路由)</p>
+                      <p className="text-[11px] text-muted-foreground">开启后本批路由均启用语义缓存,命中时按全局折扣率计费。</p>
+                    </div>
+                    <Switch checked={batchCache} onCheckedChange={setBatchCache} aria-label="切换本批语义缓存" />
                   </div>
                 </div>
               )}
@@ -2782,6 +2804,7 @@ function SettingsPanel() {
   const [cacheTtl, setCacheTtl] = useState(3600);
   const [cacheThreshold, setCacheThreshold] = useState(0.8);
   const [cacheMultiTurn, setCacheMultiTurn] = useState(3);
+  const [cacheBilling, setCacheBilling] = useState(0);
   const [cacheSaving, setCacheSaving] = useState(false);
   const [cacheNote, setCacheNote] = useState("");
   const [cacheErr, setCacheErr] = useState("");
@@ -2821,6 +2844,7 @@ function SettingsPanel() {
       .then((r) => {
         setCacheEnabled(r.enabled); setCacheTtl(r.ttl_secs);
         setCacheThreshold(r.similarity_threshold); setCacheMultiTurn(r.multi_turn_max);
+        setCacheBilling(r.billing_ratio ?? 0);
       })
       .catch(() => { /* 回退默认值 */ });
     api.embeddingSettings()
@@ -2882,6 +2906,7 @@ function SettingsPanel() {
   const saveCache = async () => {
     setCacheErr(""); setCacheNote("");
     if (cacheTtl < 1 || cacheTtl > 604800) { setCacheErr("TTL 需在 1~604800 秒(7 天)之间"); return; }
+    if (cacheBilling < 0 || cacheBilling > 1) { setCacheErr("命中计费折扣率需在 0.0~1.0 之间"); return; }
     setCacheSaving(true);
     try {
       await api.saveCacheSettings({
@@ -2889,6 +2914,7 @@ function SettingsPanel() {
         ttl_secs: Math.floor(cacheTtl),
         similarity_threshold: cacheThreshold,
         multi_turn_max: cacheMultiTurn,
+        billing_ratio: cacheBilling,
       });
       setCacheNote(cacheEnabled ? "已保存,即时生效。" : "已保存:缓存已关闭,所有请求直接回源。");
     } catch (e: any) {
@@ -3042,7 +3068,7 @@ function SettingsPanel() {
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-xs text-muted-foreground">
-            相同请求(按模型/供应商隔离)在 TTL 内直接回放缓存响应,命中免费不计费;响应头 X-Relay-Cache 标记 HIT/MISS。多轮对话消息数超过阈值后自动跳过缓存。
+            确定性请求(temperature≤0.001 或带 seed)在 TTL 内命中缓存直接回放,并按下方「命中计费折扣率」扣费(tokens 照实入账);响应头 X-Relay-Cache 标记 HIT (exact)/HIT (semantic)/MISS,请求头 x-relay-cache-control: no-cache 可跳过缓存。命中还要求路由级开关已启用(路由页「缓存」徽标)。
           </p>
           <div className="flex items-center justify-between gap-4 rounded-xl border bg-muted/30 px-4 py-3">
             <div className="space-y-0.5">
@@ -3075,6 +3101,14 @@ function SettingsPanel() {
                 value={cacheMultiTurn}
                 onChange={(e) => setCacheMultiTurn(Math.max(1, Math.floor(Number(e.target.value) || 1)))} />
               <p className="mt-1 text-[11px] text-muted-foreground">消息条数超过该值的长对话跳过缓存,避免低质命中。</p>
+            </div>
+            <div className="sm:col-span-2">
+              <label className="mb-1 block text-xs text-muted-foreground">命中计费折扣率(0.0 ~ 1.0,当前 <span className="mono font-medium text-foreground">{cacheBilling.toFixed(2)}</span>)</label>
+              <input type="range" min="0" max="1" step="0.05" value={cacheBilling}
+                onChange={(e) => setCacheBilling(Number(e.target.value))}
+                disabled={!cacheEnabled} aria-label="命中计费折扣率"
+                className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary disabled:cursor-not-allowed disabled:opacity-50" />
+              <p className="mt-1 text-[11px] text-muted-foreground">命中回放时的扣费 = 实际 tokens × 用户倍率 × 折扣率。0 表示命中免费,1 表示照常计费;tokens 始终按实际值入账。</p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 border-t pt-4">

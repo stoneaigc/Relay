@@ -174,6 +174,8 @@ pub const K_CACHE_ENABLED: &str = "cache.enabled";
 pub const K_CACHE_TTL: &str = "cache.ttl_secs";
 pub const K_CACHE_THRESHOLD: &str = "cache.similarity_threshold";
 pub const K_CACHE_MULTI_TURN: &str = "cache.multi_turn_max";
+/// L3 命中计费折扣率(0.0=命中不扣费,1.0=照常计费)。
+pub const K_CACHE_BILLING: &str = "cache.billing_ratio";
 
 /// 把 DB 里的 cache.* 覆盖到内存 Config.cache_semantic(DB 优先于配置文件)。
 /// 解析失败时静默保持原值,与 fallback.* 行为一致。
@@ -198,6 +200,13 @@ pub fn apply_cache_settings(cfg: &mut Config, kv: &HashMap<String, String>) {
     if let Some(v) = kv.get(K_CACHE_MULTI_TURN) {
         if let Ok(n) = v.parse::<usize>() {
             cs.multi_turn_max = n;
+        }
+    }
+    if let Some(v) = kv.get(K_CACHE_BILLING) {
+        if let Ok(f) = v.parse::<f64>() {
+            if (0.0..=1.0).contains(&f) {
+                cs.billing_ratio = f;
+            }
         }
     }
     cfg.cache_semantic = cs;

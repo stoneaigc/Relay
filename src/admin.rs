@@ -1327,6 +1327,9 @@ pub struct AddRoute {
     pub model_id: i64,
     pub weight: Option<i64>,
     pub multiplier: Option<f64>,
+    /// 路由级语义缓存 opt-in(缺省 false,与全局开关/确定性判定 AND)。
+    #[serde(default)]
+    pub cache: Option<bool>,
 }
 
 /// POST /admin/groups/:id/routes —— 对外模型名 -> 指定模型。
@@ -1347,6 +1350,7 @@ pub async fn add_route(
         body.model_id,
         body.weight.unwrap_or(100),
         body.multiplier.unwrap_or(1.0),
+        body.cache.unwrap_or(false),
     )
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -1370,7 +1374,7 @@ pub async fn add_routes_batch(
     let mut ids = Vec::new();
     for r in &body.routes {
         if r.public_name.trim().is_empty() { continue; }
-        let id = storage::add_route(&state.db, group_id, r.public_name.trim(), r.model_id, r.weight.unwrap_or(100), r.multiplier.unwrap_or(1.0))
+        let id = storage::add_route(&state.db, group_id, r.public_name.trim(), r.model_id, r.weight.unwrap_or(100), r.multiplier.unwrap_or(1.0), r.cache.unwrap_or(false))
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
         ids.push(id);
@@ -1390,6 +1394,9 @@ pub struct PatchRoute {
     pub weight: Option<i64>,
     #[serde(default)]
     pub multiplier: Option<f64>,
+    /// 路由级语义缓存 opt-in(缺省=不改动)。
+    #[serde(default)]
+    pub cache: Option<bool>,
 }
 
 /// PATCH /admin/routes/:id —— 编辑组内路由(真部分更新:缺省字段不改动;前端全量提交天然兼容)。
@@ -1414,10 +1421,10 @@ pub async fn update_route(
             return Err(ApiError::BadRequest("multiplier must be a finite number >= 0".into()));
         }
     }
-    if body.public_name.is_none() && body.model_id.is_none() && body.weight.is_none() && body.multiplier.is_none() {
+    if body.public_name.is_none() && body.model_id.is_none() && body.weight.is_none() && body.multiplier.is_none() && body.cache.is_none() {
         return Err(ApiError::BadRequest("at least one field required".into()));
     }
-    storage::patch_route(&state.db, id, public_name, body.model_id, body.weight, body.multiplier)
+    storage::patch_route(&state.db, id, public_name, body.model_id, body.weight, body.multiplier, body.cache)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;
@@ -1550,6 +1557,9 @@ pub struct ImportRoute {
     pub weight: i64,
     #[serde(default = "import_default_multiplier")]
     pub multiplier: f64,
+    /// 路由级语义缓存 opt-in(缺省 false,兼容旧导出 JSON)。
+    #[serde(default)]
+    pub cache: Option<bool>,
 }
 
 fn import_default_weight() -> i64 { 100 }
@@ -1575,7 +1585,7 @@ pub struct ImportBody {
 struct ResolvedGroup {
     name: String,
     strategy: String,
-    routes: Vec<(String, i64, i64, f64)>,
+    routes: Vec<(String, i64, i64, f64, bool)>,
     rules: Vec<storage::TimeRuleInput>,
     missing: Vec<Value>,
     action: &'static str,
@@ -1605,7 +1615,7 @@ async fn resolve_import(state: &AppState, body: &ImportBody) -> Result<Vec<Resol
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             match model_id {
-                Some(mid) => routes.push((pn, mid, r.weight, r.multiplier)),
+                Some(mid) => routes.push((pn, mid, r.weight, r.multiplier, r.cache.unwrap_or(false))),
                 None => missing.push(json!({
                     "public_name": pn, "kind": r.kind,
                     "base_url": r.base_url, "upstream_model": r.upstream_model,
@@ -1795,11 +1805,16 @@ pub async fn get_cache_settings(
         .get(crate::settings::K_CACHE_MULTI_TURN)
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(cs.multi_turn_max);
+    let billing_ratio = kv
+        .get(crate::settings::K_CACHE_BILLING)
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(cs.billing_ratio);
     Ok(Json(json!({
         "enabled": enabled,
         "ttl_secs": ttl_secs,
         "similarity_threshold": similarity_threshold,
         "multi_turn_max": multi_turn_max,
+        "billing_ratio": billing_ratio,
     })))
 }
 
@@ -1813,6 +1828,8 @@ pub struct CacheSettingsBody {
     pub similarity_threshold: f64,
     /// 消息条数超过该值的多轮对话跳过缓存。
     pub multi_turn_max: usize,
+    /// 命中计费折扣率(0.0=命中不扣费,1.0=照常计费)。
+    pub billing_ratio: f64,
 }
 
 /// 校验缓存配置合理范围。
@@ -1825,6 +1842,9 @@ fn validate_cache(b: &CacheSettingsBody) -> Result<(), ApiError> {
     }
     if b.multi_turn_max == 0 || b.multi_turn_max > 100 {
         return Err(ApiError::BadRequest("多轮阈值需在 1~100 之间".into()));
+    }
+    if !(0.0..=1.0).contains(&b.billing_ratio) {
+        return Err(ApiError::BadRequest("命中计费折扣率需在 0.0~1.0 之间".into()));
     }
     Ok(())
 }
@@ -1843,6 +1863,7 @@ pub async fn save_cache_settings(
         (crate::settings::K_CACHE_TTL.to_string(), body.ttl_secs.to_string()),
         (crate::settings::K_CACHE_THRESHOLD.to_string(), body.similarity_threshold.to_string()),
         (crate::settings::K_CACHE_MULTI_TURN.to_string(), body.multi_turn_max.to_string()),
+        (crate::settings::K_CACHE_BILLING.to_string(), body.billing_ratio.to_string()),
     ];
     storage::set_settings(&state.db, &items)
         .await

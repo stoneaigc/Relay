@@ -310,6 +310,14 @@ pub async fn chat_completions(
     }
 }
 
+/// L4 逃生口:请求头 `x-relay-cache-control: no-cache` 时跳过语义缓存读/写(不区分大小写)。
+fn no_cache_requested(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-relay-cache-control")
+        .and_then(|v| v.to_str().ok())
+        .map_or(false, |v| v.trim().eq_ignore_ascii_case("no-cache"))
+}
+
 async fn run_openai(
     state: Arc<AppState>,
     headers: HeaderMap,
@@ -318,7 +326,8 @@ async fn run_openai(
     let auth = authenticate(&state, &headers)?;
     let req: Value = serde_json::from_slice(&body)
         .map_err(|e| ApiError::BadRequest(format!("invalid json: {e}")))?;
-    run_chat(state, auth.user, Some(auth.key_id), req).await
+    let no_cache = no_cache_requested(&headers);
+    run_chat(state, auth.user, Some(auth.key_id), req, no_cache).await
 }
 
 /// 入站校验:messages 必须为非空数组,stream/max_tokens 类型必须正确(双协议同规则)。
@@ -354,6 +363,7 @@ pub async fn run_chat(
     user: Arc<crate::state::UserState>,
     key_id: Option<uuid::Uuid>,
     req: Value,
+    no_cache: bool,
 ) -> Result<Response, ApiError> {
     // 全局计时器:用于 catch-all 失败路径写指标(成功率 / RPS / 延迟)
     let req_start = std::time::Instant::now();
@@ -422,10 +432,13 @@ pub async fn run_chat(
     let cand_init = init_candidates(&candidates);
     // failover 策略:fallback 关闭只试首个候选;max_retries 限制尝试候选数(0=不限)。
     let attempt_cap = state.config.load().defaults.attempt_cap(candidates.len());
-    // 语义缓存:开关关闭或消息条数超阈值时整体跳过(不记 miss)。
+    // 语义缓存:全局关/带 no-cache 逃生口/消息超阈值/非确定性请求(temperature>0 且无 seed)时整体跳过(不记 miss)。
     let cache_ok = {
         let cs = state.config.load().cache_semantic.clone();
-        cs.enabled && crate::semantic_cache::eligible(&req, cs.multi_turn_max)
+        cs.enabled
+            && !no_cache
+            && crate::semantic_cache::eligible(&req, cs.multi_turn_max)
+            && crate::semantic_cache::deterministic(&req)
     };
     let mut cache_missed = false;
     // L2 语义查找只做一次(首个未命中 candidate);输入文本循环外抽取一次复用。
@@ -447,8 +460,8 @@ pub async fn run_chat(
         let (provider_name, base_url, api_key, upstream_model, multiplier) =
             (&r.provider, &r.base_url, r.api_key.as_deref(), &r.upstream_model, r.multiplier);
 
-        // ---- 语义缓存查找:先于熔断/并发检查,命中即免费回放 ----
-        let cache_key = if cache_ok {
+        // ---- 语义缓存查找:先于熔断/并发检查,命中即回放;L1 还需路由级 opt-in(cache_enabled) ----
+        let cache_key = if cache_ok && r.cache_enabled {
             Some(crate::semantic_cache::make_key(
                 run_path, &model, provider_name, upstream_model, stream, &req,
             ))
@@ -473,6 +486,21 @@ pub async fn run_chat(
                 state
                     .record_metrics_request(None, crate::state::METRIC_STATUS_OK, req_start.elapsed())
                     .await;
+                // 命中扣费(L3):tokens 照实入日志,charged 按 路由倍率×用户倍率×折扣率 取整。
+                let input = entry.input_tokens;
+                let output = entry.output_tokens;
+                let charged = crate::semantic_cache::cache_charged(
+                    input, output, multiplier, user.bill_multiplier(),
+                    state.config.load().cache_semantic.billing_ratio,
+                );
+                user.deduct(charged);
+                user.record_tokens(input.saturating_add(output));
+                let _ = state.usage_tx.send(UsageEvent {
+                    user_id: user.id, key_id, cost_usd: 0.0, model: model.clone(),
+                    provider: provider_name.clone(), upstream_model: upstream_model.clone(),
+                    input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200,
+                    request_id: Some(request_id.clone()),
+                }).await;
                 let trace = RunTrace {
                     request_id: request_id.clone(),
                     user_id: user_id_str.clone(),
@@ -488,8 +516,8 @@ pub async fn run_chat(
                     resp_preview: None,
                     latency_ms: run_start.elapsed().as_millis() as u32,
                 };
-                trace.emit_success(&state, 0, 0, 0).await;
-                return Ok(crate::semantic_cache::replay_response(entry, provider_name, &request_id));
+                trace.emit_success(&state, input, output, charged).await;
+                return Ok(crate::semantic_cache::replay_response(entry, provider_name, &request_id, "exact"));
             }
             // L2 语义查找:相似度达阈值即免费回放(embedding 失败自动降级 miss)。
             if !l2_tried {
@@ -509,6 +537,21 @@ pub async fn run_chat(
                         state
                             .record_metrics_request(None, crate::state::METRIC_STATUS_OK, req_start.elapsed())
                             .await;
+                        // 命中扣费(L3):tokens 照实入日志,charged 按 路由倍率×用户倍率×折扣率 取整。
+                        let input = entry.input_tokens;
+                        let output = entry.output_tokens;
+                        let charged = crate::semantic_cache::cache_charged(
+                            input, output, multiplier, user.bill_multiplier(),
+                            state.config.load().cache_semantic.billing_ratio,
+                        );
+                        user.deduct(charged);
+                        user.record_tokens(input.saturating_add(output));
+                        let _ = state.usage_tx.send(UsageEvent {
+                            user_id: user.id, key_id, cost_usd: 0.0, model: model.clone(),
+                            provider: provider_name.clone(), upstream_model: upstream_model.clone(),
+                            input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200,
+                            request_id: Some(request_id.clone()),
+                        }).await;
                         let trace = RunTrace {
                             request_id: request_id.clone(),
                             user_id: user_id_str.clone(),
@@ -517,15 +560,15 @@ pub async fn run_chat(
                             stream,
                             candidates: cand_init.clone(),
                             attempts: Vec::new(),
-                            final_kind: Some("cache".into()),
+                            final_kind: Some("semantic".into()),
                             final_upstream_model: Some(upstream_model.clone()),
                             final_status: 200,
                             req_preview: req_preview.clone(),
                             resp_preview: None,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        trace.emit_success(&state, 0, 0, 0).await;
-                        return Ok(crate::semantic_cache::replay_response(entry, provider_name, &request_id));
+                        trace.emit_success(&state, input, output, charged).await;
+                        return Ok(crate::semantic_cache::replay_response(entry, provider_name, &request_id, "semantic"));
                     }
                 }
             }
@@ -1012,7 +1055,8 @@ async fn run_anthropic(
     let auth = authenticate(&state, &headers)?;
     let req: Value = serde_json::from_slice(&body)
         .map_err(|e| ApiError::BadRequest(format!("invalid json: {e}")))?;
-    run_messages(state, auth.user, Some(auth.key_id), req).await
+    let no_cache = no_cache_requested(&headers);
+    run_messages(state, auth.user, Some(auth.key_id), req, no_cache).await
 }
 
 /// Anthropic 入站核心:路由 + 上游(Anthropic 直通 / OpenAI 翻译)+ 计费。
@@ -1021,6 +1065,7 @@ pub async fn run_messages(
     user: Arc<crate::state::UserState>,
     key_id: Option<uuid::Uuid>,
     req: Value,
+    no_cache: bool,
 ) -> Result<Response, ApiError> {
     let req_start = std::time::Instant::now();
     // 请求体预览:跟随存储后端落库(SQLite/PG req_body 列 / ES 文档字段);body_preview_max_bytes=0 时不采集。
@@ -1075,10 +1120,13 @@ pub async fn run_messages(
     let cand_init = init_candidates(&candidates);
     // failover 策略:fallback 关闭只试首个候选;max_retries 限制尝试候选数(0=不限)。
     let attempt_cap = state.config.load().defaults.attempt_cap(candidates.len());
-    // 语义缓存:开关关闭或消息条数超阈值时整体跳过(不记 miss)。
+    // 语义缓存:全局关/带 no-cache 逃生口/消息超阈值/非确定性请求(temperature>0 且无 seed)时整体跳过(不记 miss)。
     let cache_ok = {
         let cs = state.config.load().cache_semantic.clone();
-        cs.enabled && crate::semantic_cache::eligible(&req, cs.multi_turn_max)
+        cs.enabled
+            && !no_cache
+            && crate::semantic_cache::eligible(&req, cs.multi_turn_max)
+            && crate::semantic_cache::deterministic(&req)
     };
     let mut cache_missed = false;
     // L2 语义查找只做一次(首个未命中 candidate);输入文本循环外抽取一次复用。
@@ -1100,8 +1148,8 @@ pub async fn run_messages(
         let (provider_name, base_url, api_key, upstream_model, multiplier) =
             (&r.provider, &r.base_url, r.api_key.as_deref(), &r.upstream_model, r.multiplier);
 
-        // ---- 语义缓存查找:先于熔断/并发检查,命中即免费回放 ----
-        let cache_key = if cache_ok {
+        // ---- 语义缓存查找:先于熔断/并发检查,命中即回放;L1 还需路由级 opt-in(cache_enabled) ----
+        let cache_key = if cache_ok && r.cache_enabled {
             Some(crate::semantic_cache::make_key(
                 run_path, &model, provider_name, upstream_model, stream, &req,
             ))
@@ -1126,6 +1174,21 @@ pub async fn run_messages(
                 state
                     .record_metrics_request(None, crate::state::METRIC_STATUS_OK, req_start.elapsed())
                     .await;
+                // 命中扣费(L3):tokens 照实入日志,charged 按 路由倍率×用户倍率×折扣率 取整。
+                let input = entry.input_tokens;
+                let output = entry.output_tokens;
+                let charged = crate::semantic_cache::cache_charged(
+                    input, output, multiplier, user.bill_multiplier(),
+                    state.config.load().cache_semantic.billing_ratio,
+                );
+                user.deduct(charged);
+                user.record_tokens(input.saturating_add(output));
+                let _ = state.usage_tx.send(UsageEvent {
+                    user_id: user.id, key_id, cost_usd: 0.0, model: model.clone(),
+                    provider: provider_name.clone(), upstream_model: upstream_model.clone(),
+                    input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200,
+                    request_id: Some(request_id.clone()),
+                }).await;
                 let trace = RunTrace {
                     request_id: request_id.clone(),
                     user_id: user_id_str.clone(),
@@ -1141,8 +1204,8 @@ pub async fn run_messages(
                     resp_preview: None,
                     latency_ms: run_start.elapsed().as_millis() as u32,
                 };
-                trace.emit_success(&state, 0, 0, 0).await;
-                return Ok(crate::semantic_cache::replay_response(entry, provider_name, &request_id));
+                trace.emit_success(&state, input, output, charged).await;
+                return Ok(crate::semantic_cache::replay_response(entry, provider_name, &request_id, "exact"));
             }
             // L2 语义查找:相似度达阈值即免费回放(embedding 失败自动降级 miss)。
             if !l2_tried {
@@ -1162,6 +1225,21 @@ pub async fn run_messages(
                         state
                             .record_metrics_request(None, crate::state::METRIC_STATUS_OK, req_start.elapsed())
                             .await;
+                        // 命中扣费(L3):tokens 照实入日志,charged 按 路由倍率×用户倍率×折扣率 取整。
+                        let input = entry.input_tokens;
+                        let output = entry.output_tokens;
+                        let charged = crate::semantic_cache::cache_charged(
+                            input, output, multiplier, user.bill_multiplier(),
+                            state.config.load().cache_semantic.billing_ratio,
+                        );
+                        user.deduct(charged);
+                        user.record_tokens(input.saturating_add(output));
+                        let _ = state.usage_tx.send(UsageEvent {
+                            user_id: user.id, key_id, cost_usd: 0.0, model: model.clone(),
+                            provider: provider_name.clone(), upstream_model: upstream_model.clone(),
+                            input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200,
+                            request_id: Some(request_id.clone()),
+                        }).await;
                         let trace = RunTrace {
                             request_id: request_id.clone(),
                             user_id: user_id_str.clone(),
@@ -1170,15 +1248,15 @@ pub async fn run_messages(
                             stream,
                             candidates: cand_init.clone(),
                             attempts: Vec::new(),
-                            final_kind: Some("cache".into()),
+                            final_kind: Some("semantic".into()),
                             final_upstream_model: Some(upstream_model.clone()),
                             final_status: 200,
                             req_preview: req_preview.clone(),
                             resp_preview: None,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        trace.emit_success(&state, 0, 0, 0).await;
-                        return Ok(crate::semantic_cache::replay_response(entry, provider_name, &request_id));
+                        trace.emit_success(&state, input, output, charged).await;
+                        return Ok(crate::semantic_cache::replay_response(entry, provider_name, &request_id, "semantic"));
                     }
                 }
             }
@@ -1727,10 +1805,19 @@ fn cache_wrap(
         let mut upstream = upstream;
         let mut buf: Vec<u8> = Vec::new();
         let mut complete = true;
+        // 超过单条上限即提前放弃缓存:清空累积并继续透传(逃生口兜底,不让大响应卡住链路)。
+        let max_body = crate::semantic_cache::MAX_BODY;
+        let mut caching = true;
         while let Some(chunk) = upstream.next().await {
             match chunk {
                 Ok(b) => {
-                    buf.extend_from_slice(&b);
+                    if caching && buf.len() + b.len() > max_body {
+                        caching = false;
+                        buf.clear();
+                    }
+                    if caching {
+                        buf.extend_from_slice(&b);
+                    }
                     yield Ok::<Bytes, axum::Error>(b);
                 }
                 Err(_) => {
@@ -1739,7 +1826,7 @@ fn cache_wrap(
                 }
             }
         }
-        if complete && !buf.is_empty() {
+        if caching && complete && !buf.is_empty() {
             let body_bytes = Bytes::from(buf);
             let (input_tokens, output_tokens) =
                 crate::semantic_cache::extract_usage(&body_bytes, is_stream);
@@ -2032,5 +2119,17 @@ mod tests {
         let e = exhausted_error("gpt-x", &attempts);
         // 末尾的 skipped 条目应被过滤,取末次真实尝试(503)。
         assert!(matches!(e, ApiError::AllFailed { last_status: 503, ref last_error, .. } if last_error == "upstream down"));
+    }
+
+    #[test]
+    fn no_cache_requested_matches_only_exact_header() {
+        let mut h = HeaderMap::new();
+        assert!(!no_cache_requested(&h), "无头时不应触发逃生口");
+        h.insert("x-relay-cache-control", axum::http::HeaderValue::from_static("no-cache"));
+        assert!(no_cache_requested(&h));
+        h.insert("x-relay-cache-control", axum::http::HeaderValue::from_static("No-Cache"));
+        assert!(no_cache_requested(&h), "头部名不区分大小写");
+        h.insert("x-relay-cache-control", axum::http::HeaderValue::from_static("max-age=0"));
+        assert!(!no_cache_requested(&h), "非 no-cache 值不触发");
     }
 }

@@ -197,6 +197,10 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE models ADD COLUMN IF NOT EXISTS output_price DOUBLE PRECISION")
             .execute(pool)
             .await;
+        // L1 路由级语义缓存 opt-in。
+        let _ = q!("ALTER TABLE group_routes ADD COLUMN IF NOT EXISTS cache_enabled BIGINT NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
         // 周期预算(charged tokens,可空=不限)。
         let _ = q!("ALTER TABLE users ADD COLUMN IF NOT EXISTS budget_daily_tokens BIGINT")
             .execute(pool)
@@ -234,6 +238,10 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE model_groups ADD COLUMN strategy TEXT NOT NULL DEFAULT 'weighted_random'")
             .execute(pool)
             .await;
+        // L1 路由级语义缓存 opt-in(旧库补列,已存在则忽略错误)。
+        let _ = q!("ALTER TABLE group_routes ADD COLUMN cache_enabled INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
         // 请求链路:旧库补 request_id 列(已存在则忽略错误)。
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN request_id TEXT")
             .execute(pool)
@@ -249,6 +257,13 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
             .execute(pool)
             .await;
         let _ = q!("ALTER TABLE request_logs ADD COLUMN resp_body TEXT")
+            .execute(pool)
+            .await;
+        // 语义缓存徽标:usage_logs 按 request_id 关联 request_logs 取 final_kind,两侧补索引防大表全扫。
+        let _ = q!("CREATE INDEX IF NOT EXISTS idx_request_logs_request_id ON request_logs(request_id)")
+            .execute(pool)
+            .await;
+        let _ = q!("CREATE INDEX IF NOT EXISTS idx_usage_logs_request_id ON usage_logs(request_id)")
             .execute(pool)
             .await;
         // 模型防重唯一索引:旧库有重复时创建失败则跳过，幂等由 add_model 查询保证。
@@ -610,21 +625,22 @@ pub async fn active_group_id(pool: &Db) -> anyhow::Result<Option<i64>> {
     Ok(row.map(|r| r.get::<i64, _>("id")))
 }
 
-pub async fn add_route(pool: &Db, group_id: i64, public_name: &str, model_id: i64, weight: i64, multiplier: f64) -> anyhow::Result<i64> {
+pub async fn add_route(pool: &Db, group_id: i64, public_name: &str, model_id: i64, weight: i64, multiplier: f64, cache_enabled: bool) -> anyhow::Result<i64> {
     let r = q!(
-        "INSERT INTO group_routes (group_id, public_name, model_id, weight, multiplier, created_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id")
-        .bind(group_id).bind(public_name).bind(model_id).bind(weight).bind(multiplier).bind(now_iso())
+        "INSERT INTO group_routes (group_id, public_name, model_id, weight, multiplier, cache_enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id")
+        .bind(group_id).bind(public_name).bind(model_id).bind(weight).bind(multiplier).bind(cache_enabled as i64).bind(now_iso())
         .fetch_one(pool).await?;
     Ok(r.get::<i64, _>("id"))
 }
 
 /// 真部分更新:只 SET 传入的字段(动态拼 SET 子句,经 pq 适配占位符,SQLite/Postgres 双后端兼容)。
-pub async fn patch_route(pool: &Db, id: i64, public_name: Option<&str>, model_id: Option<i64>, weight: Option<i64>, multiplier: Option<f64>) -> anyhow::Result<()> {
+pub async fn patch_route(pool: &Db, id: i64, public_name: Option<&str>, model_id: Option<i64>, weight: Option<i64>, multiplier: Option<f64>, cache_enabled: Option<bool>) -> anyhow::Result<()> {
     let mut sets: Vec<&str> = Vec::new();
     if public_name.is_some() { sets.push("public_name = ?"); }
     if model_id.is_some() { sets.push("model_id = ?"); }
     if weight.is_some() { sets.push("weight = ?"); }
     if multiplier.is_some() { sets.push("multiplier = ?"); }
+    if cache_enabled.is_some() { sets.push("cache_enabled = ?"); }
     if sets.is_empty() { return Ok(()); } // handler 已挡空更新,storage 层双保险 no-op
     let sql = format!("UPDATE group_routes SET {} WHERE id = ?", sets.join(", "));
     let sql = pq(&sql);
@@ -633,6 +649,7 @@ pub async fn patch_route(pool: &Db, id: i64, public_name: Option<&str>, model_id
     if let Some(mid) = model_id { q = q.bind(mid); }
     if let Some(w) = weight { q = q.bind(w); }
     if let Some(m) = multiplier { q = q.bind(m); }
+    if let Some(c) = cache_enabled { q = q.bind(c as i64); }
     q.bind(id).execute(pool).await?;
     Ok(())
 }
@@ -664,7 +681,7 @@ pub async fn delete_route(pool: &Db, id: i64) -> anyhow::Result<()> {
 
 pub async fn list_routes(pool: &Db, group_id: i64) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = q!(
-        "SELECT r.id, r.public_name, r.model_id, r.weight, r.multiplier, m.provider, m.upstream_model, m.label
+        "SELECT r.id, r.public_name, r.model_id, r.weight, r.multiplier, r.cache_enabled, m.provider, m.upstream_model, m.label
          FROM group_routes r JOIN models m ON m.id = r.model_id
          WHERE r.group_id = ? ORDER BY r.public_name")
         .bind(group_id).fetch_all(pool).await?;
@@ -672,6 +689,7 @@ pub async fn list_routes(pool: &Db, group_id: i64) -> anyhow::Result<Vec<serde_j
         "id": r.get::<i64,_>("id"), "public_name": r.get::<String,_>("public_name"),
         "model_id": r.get::<i64,_>("model_id"), "weight": r.get::<i64,_>("weight"),
         "multiplier": r.try_get::<f64,_>("multiplier").unwrap_or(1.0),
+        "cache_enabled": r.try_get::<i64,_>("cache_enabled").unwrap_or(0) != 0,
         "provider": r.get::<String,_>("provider"), "upstream_model": r.get::<String,_>("upstream_model"),
         "label": r.get::<Option<String>,_>("label"),
     })).collect())
@@ -761,17 +779,18 @@ pub async fn list_routes_export(pool: &Db, group_id: i64) -> anyhow::Result<Vec<
         "upstream_model": r.get::<String,_>("upstream_model"),
         "weight": r.get::<i64,_>("weight"),
         "multiplier": r.try_get::<f64,_>("multiplier").unwrap_or(1.0),
+        "cache_enabled": r.try_get::<i64,_>("cache_enabled").unwrap_or(0) != 0,
     })).collect())
 }
 
 /// 导入单组(事务):同名组存在则整组覆盖(删路由/时段规则后重建并更新策略),否则新建。
-/// routes 元素为 (public_name, model_id, weight, multiplier),model_id 由上层按三元组解析;
+/// routes 元素为 (public_name, model_id, weight, multiplier, cache_enabled),model_id 由上层按三元组解析;
 /// rules 复用 TimeRuleInput,其中 group_id 被忽略(以实际导入组为准)。返回 (组id, 是否覆盖)。
 pub async fn import_group(
     pool: &Db,
     name: &str,
     strategy: &str,
-    routes: &[(String, i64, i64, f64)],
+    routes: &[(String, i64, i64, f64, bool)],
     rules: &[TimeRuleInput],
 ) -> anyhow::Result<(i64, bool)> {
     let mut tx = pool.begin().await?;
@@ -790,9 +809,9 @@ pub async fn import_group(
             .fetch_one(&mut *tx).await?;
         (r.get::<i64, _>("id"), false)
     };
-    for (public_name, model_id, weight, multiplier) in routes {
-        q!("INSERT INTO group_routes (group_id, public_name, model_id, weight, multiplier, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-            .bind(id).bind(public_name).bind(model_id).bind(weight).bind(multiplier).bind(now_iso())
+    for (public_name, model_id, weight, multiplier, cache_enabled) in routes {
+        q!("INSERT INTO group_routes (group_id, public_name, model_id, weight, multiplier, cache_enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+            .bind(id).bind(public_name).bind(model_id).bind(weight).bind(multiplier).bind(*cache_enabled as i64).bind(now_iso())
             .execute(&mut *tx).await?;
     }
     for rule in rules {
@@ -838,7 +857,7 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
         routing.group_strategy.insert(id, crate::routing::strategy_from_str(r.try_get("strategy").unwrap_or(None).unwrap_or("weighted_random")));
         routing.groups.entry(id).or_default();
     }
-    for r in q!("SELECT group_id, public_name, model_id, weight, multiplier FROM group_routes").fetch_all(pool).await? {
+    for r in q!("SELECT group_id, public_name, model_id, weight, multiplier, cache_enabled FROM group_routes").fetch_all(pool).await? {
         let gid: i64 = r.get("group_id");
         routing.groups.entry(gid).or_default()
             .entry(r.get::<String, _>("public_name")).or_default()
@@ -846,6 +865,7 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
                 model_id: r.get("model_id"),
                 weight: r.get::<i64, _>("weight") as u32,
                 multiplier: r.try_get("multiplier").unwrap_or(1.0),
+                cache_enabled: r.try_get::<i64, _>("cache_enabled").unwrap_or(0) != 0,
             });
     }
     // 加载每组的「高峰/低谷」时段规则(倍率 + 权重覆盖)。
@@ -1695,8 +1715,9 @@ pub async fn usage_rows(
 ) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = if let Some(uid) = user_id {
         q!(
-            "SELECT user_id, model, provider, input_tokens, output_tokens, charged_tokens, cost_usd, status, created_at
-             FROM usage_logs WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            "SELECT u.user_id, u.model, u.provider, u.input_tokens, u.output_tokens, u.charged_tokens, u.cost_usd, u.status, u.created_at, rl.final_kind AS kind
+             FROM usage_logs u LEFT JOIN request_logs rl ON rl.request_id = u.request_id
+             WHERE u.user_id = ? ORDER BY u.id DESC LIMIT ?",
         )
         .bind(uid.to_string())
         .bind(limit)
@@ -1704,8 +1725,9 @@ pub async fn usage_rows(
         .await?
     } else {
         q!(
-            "SELECT user_id, model, provider, input_tokens, output_tokens, charged_tokens, cost_usd, status, created_at
-             FROM usage_logs ORDER BY id DESC LIMIT ?",
+            "SELECT u.user_id, u.model, u.provider, u.input_tokens, u.output_tokens, u.charged_tokens, u.cost_usd, u.status, u.created_at, rl.final_kind AS kind
+             FROM usage_logs u LEFT JOIN request_logs rl ON rl.request_id = u.request_id
+             ORDER BY u.id DESC LIMIT ?",
         )
         .bind(limit)
         .fetch_all(pool)
@@ -1724,12 +1746,13 @@ pub async fn usage_rows(
                 "cost_usd": r.try_get::<Option<f64>, _>("cost_usd").ok().flatten(),
                 "status": r.get::<Option<i64>, _>("status"),
                 "created_at": r.get::<String, _>("created_at"),
+                "kind": r.try_get::<Option<String>, _>("kind").ok().flatten(),
             })
         })
         .collect())
 }
 
-/// 分页版用量日志。返回(当前页, 总条数)。
+/// 分页版用量日志。返回(当前页, 总条数)。kind=请求终结方式("cache"精确命中/"semantic"语义命中/其余直连)。
 pub async fn usage_rows_page(
     pool: &Db,
     user_id: Option<Uuid>,
@@ -1747,8 +1770,9 @@ pub async fn usage_rows_page(
     };
     let rows = if let Some(uid) = user_id {
         q!(
-            "SELECT user_id, model, provider, input_tokens, output_tokens, charged_tokens, cost_usd, status, created_at
-             FROM usage_logs WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+            "SELECT u.user_id, u.model, u.provider, u.input_tokens, u.output_tokens, u.charged_tokens, u.cost_usd, u.status, u.created_at, rl.final_kind AS kind
+             FROM usage_logs u LEFT JOIN request_logs rl ON rl.request_id = u.request_id
+             WHERE u.user_id = ? ORDER BY u.id DESC LIMIT ? OFFSET ?",
         )
         .bind(uid.to_string())
         .bind(page_size)
@@ -1757,8 +1781,9 @@ pub async fn usage_rows_page(
         .await?
     } else {
         q!(
-            "SELECT user_id, model, provider, input_tokens, output_tokens, charged_tokens, cost_usd, status, created_at
-             FROM usage_logs ORDER BY id DESC LIMIT ? OFFSET ?",
+            "SELECT u.user_id, u.model, u.provider, u.input_tokens, u.output_tokens, u.charged_tokens, u.cost_usd, u.status, u.created_at, rl.final_kind AS kind
+             FROM usage_logs u LEFT JOIN request_logs rl ON rl.request_id = u.request_id
+             ORDER BY u.id DESC LIMIT ? OFFSET ?",
         )
         .bind(page_size)
         .bind(offset)
@@ -1778,6 +1803,7 @@ pub async fn usage_rows_page(
                     "cost_usd": r.try_get::<Option<f64>, _>("cost_usd").ok().flatten(),
                     "status": r.get::<Option<i64>, _>("status"),
                     "created_at": r.get::<String, _>("created_at"),
+                    "kind": r.try_get::<Option<String>, _>("kind").ok().flatten(),
                 })
             })
             .collect(),
@@ -2247,7 +2273,7 @@ mod tests {
         let (prov, _) = find_or_create_provider(&db, "openai", "https://api.test.com", Some("sk-x")).await.unwrap();
         let mid = add_model(&db, &prov, "gpt-4o", None, None, None).await.unwrap();
         let gid = add_group(&db, "grp").await.unwrap();
-        add_route(&db, gid, "my-gpt", mid, 80, 1.5).await.unwrap();
+        add_route(&db, gid, "my-gpt", mid, 80, 1.5, false).await.unwrap();
         add_time_rule(&db, &TimeRuleInput {
             group_id: gid, name: "peak".into(), weekdays: "1-5".into(),
             start_time: "09:00".into(), end_time: "18:00".into(),
@@ -2273,7 +2299,7 @@ mod tests {
         }];
         let (gid2, overwritten) = import_group(
             &db, "grp", "priority",
-            &[("my-gpt".into(), mid, 60, 1.0)], &rules,
+            &[("my-gpt".into(), mid, 60, 1.0, false)], &rules,
         ).await.unwrap();
         assert!(overwritten);
         assert_eq!(gid2, gid);
@@ -2299,37 +2325,41 @@ mod tests {
         let m1 = add_model(&db, &prov, "gpt-a", None, None, None).await.unwrap();
         let m2 = add_model(&db, &prov, "gpt-b", None, None, None).await.unwrap();
         let gid = add_group(&db, "grp").await.unwrap();
-        let rid = add_route(&db, gid, "pub-a", m1, 80, 1.5).await.unwrap();
+        let rid = add_route(&db, gid, "pub-a", m1, 80, 1.5, false).await.unwrap();
 
         // 只改 weight:其余字段不动
-        patch_route(&db, rid, None, None, Some(30), None).await.unwrap();
+        patch_route(&db, rid, None, None, Some(30), None, None).await.unwrap();
         let routes = list_routes(&db, gid).await.unwrap();
         assert_eq!(routes[0]["public_name"].as_str(), Some("pub-a"));
         assert_eq!(routes[0]["model_id"].as_i64(), Some(m1));
         assert_eq!(routes[0]["weight"].as_i64(), Some(30));
         assert_eq!(routes[0]["multiplier"].as_f64(), Some(1.5));
+        assert_eq!(routes[0]["cache_enabled"].as_bool(), Some(false));
 
         // 改 public_name + model_id,weight/multiplier 保持
-        patch_route(&db, rid, Some("pub-b"), Some(m2), None, None).await.unwrap();
+        patch_route(&db, rid, Some("pub-b"), Some(m2), None, None, None).await.unwrap();
         let routes = list_routes(&db, gid).await.unwrap();
         assert_eq!(routes[0]["public_name"].as_str(), Some("pub-b"));
         assert_eq!(routes[0]["model_id"].as_i64(), Some(m2));
         assert_eq!(routes[0]["weight"].as_i64(), Some(30));
         assert_eq!(routes[0]["multiplier"].as_f64(), Some(1.5));
+        assert_eq!(routes[0]["cache_enabled"].as_bool(), Some(false));
 
-        // 全字段(前端全量提交兼容路径)
-        patch_route(&db, rid, Some("pub-c"), Some(m1), Some(10), Some(2.0)).await.unwrap();
+        // 全字段(前端全量提交兼容路径):含语义缓存开关
+        patch_route(&db, rid, Some("pub-c"), Some(m1), Some(10), Some(2.0), Some(true)).await.unwrap();
         let routes = list_routes(&db, gid).await.unwrap();
         assert_eq!(routes[0]["public_name"].as_str(), Some("pub-c"));
         assert_eq!(routes[0]["model_id"].as_i64(), Some(m1));
         assert_eq!(routes[0]["weight"].as_i64(), Some(10));
         assert_eq!(routes[0]["multiplier"].as_f64(), Some(2.0));
+        assert_eq!(routes[0]["cache_enabled"].as_bool(), Some(true));
 
-        // 空更新:handler 已挡,storage 层 no-op 不报错也不改值
-        patch_route(&db, rid, None, None, None, None).await.unwrap();
+        // 空更新:handler 已挡,storage 层 no-op 不报错也不改值(含 cache_enabled)
+        patch_route(&db, rid, None, None, None, None, None).await.unwrap();
         let routes = list_routes(&db, gid).await.unwrap();
         assert_eq!(routes[0]["weight"].as_i64(), Some(10));
         assert_eq!(routes[0]["multiplier"].as_f64(), Some(2.0));
+        assert_eq!(routes[0]["cache_enabled"].as_bool(), Some(true));
     }
 
     // ---- cache_vectors(L2 向量)----
