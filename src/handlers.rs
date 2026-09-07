@@ -292,7 +292,10 @@ async fn embeddings_inner(
             trace.latency_ms = started.elapsed().as_millis() as u32;
             trace.final_status = 503;
             trace.emit_error(state, 503).await;
-            Err(ApiError::Unavailable(format!("embedding 上游失败: {e}")))
+            Err(ApiError::Unavailable(format!(
+                "embedding 上游失败: {}",
+                crate::error::sanitize_upstream_error(&e.to_string())
+            )))
         }
     }
 }
@@ -1101,6 +1104,7 @@ pub async fn run_messages(
             return Err(ApiError::BudgetExhausted("monthly"));
         }
     }
+    validate_chat_payload(&req)?;
     let model = req
         .get("model")
         .and_then(|m| m.as_str())
@@ -2131,5 +2135,52 @@ mod tests {
         assert!(no_cache_requested(&h), "头部名不区分大小写");
         h.insert("x-relay-cache-control", axum::http::HeaderValue::from_static("max-age=0"));
         assert!(!no_cache_requested(&h), "非 no-cache 值不触发");
+    }
+
+    #[test]
+    fn validate_chat_payload_rejects_missing_messages() {
+        let req = serde_json::json!({"model": "m", "max_tokens": 10});
+        assert!(matches!(
+            validate_chat_payload(&req),
+            Err(ApiError::BadRequest(ref m)) if m.contains("missing `messages`")
+        ));
+    }
+
+    #[test]
+    fn validate_chat_payload_rejects_empty_messages() {
+        let req = serde_json::json!({"model": "m", "max_tokens": 10, "messages": []});
+        assert!(matches!(
+            validate_chat_payload(&req),
+            Err(ApiError::BadRequest(ref m)) if m.contains("不能为空数组")
+        ));
+    }
+
+    #[test]
+    fn validate_chat_payload_rejects_non_array_messages() {
+        let req = serde_json::json!({"model": "m", "max_tokens": 10, "messages": "hi"});
+        assert!(matches!(
+            validate_chat_payload(&req),
+            Err(ApiError::BadRequest(ref m)) if m.contains("必须为数组")
+        ));
+    }
+
+    #[test]
+    fn validate_chat_payload_rejects_stream_and_max_tokens_type_errors() {
+        let bad_stream = serde_json::json!({"model": "m", "max_tokens": 10, "messages": [{"role":"user","content":"hi"}], "stream": "yes"});
+        assert!(matches!(
+            validate_chat_payload(&bad_stream),
+            Err(ApiError::BadRequest(ref m)) if m.contains("`stream` 必须为布尔值")
+        ));
+        let bad_maxtok = serde_json::json!({"model": "m", "max_tokens": "100", "messages": [{"role":"user","content":"hi"}]});
+        assert!(matches!(
+            validate_chat_payload(&bad_maxtok),
+            Err(ApiError::BadRequest(ref m)) if m.contains("`max_tokens` 必须为正整数")
+        ));
+    }
+
+    #[test]
+    fn validate_chat_payload_accepts_valid_payload() {
+        let req = serde_json::json!({"model": "m", "max_tokens": 10, "messages": [{"role":"user","content":"hi"}], "stream": true});
+        assert!(validate_chat_payload(&req).is_ok());
     }
 }

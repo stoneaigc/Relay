@@ -204,7 +204,7 @@
 
 1. **配置载体：只保留 TOML**。`.env` 文件支持已回滚（revert `76042b6`）；`config/default.toml` 为唯一配置文件，部署差异（密钥、监听地址等）用 `RELAY_*` 环境变量注入（figment 原生支持，命名规则见 default.toml 头注释，优先级高于文件）。启动/部署维持 Rust 原生方式：`cargo run`（开发）/ `cargo build --release`（生产）。
 2. **模型访问控制：现有「用户绑定模型组」已覆盖，不做 Key 级模型白名单**。数据面已按用户隔离：`/v1/models` 与 `/v1/chat/completions`、`/v1/messages` 均以 `user.group()` 解析候选（handlers.rs L146/L242/L877），用户可见与可调的模型范围 = 其绑定组的对外模型名集合；管理端用户编辑可绑定/解绑（admin.rs `group_id`，0=解绑）。Key 级白名单与之构成重复控制面，判定不做；若未来出现「同一用户不同应用不同模型」需求，再评估 Key 级覆盖（Key 覆盖用户组，是细化而非冲突）。
-3. **容器化：交付阶段统一做**。全部功能完成后打 Dockerfile + docker-compose 镜像交付，不提前。
+3. **容器化：交付阶段统一做**。全部功能完成后打 Dockerfile + docker-compose 镜像交付，不提前。（2026-09-07 更新：功能批次已全部完成，多阶段 Dockerfile / docker-compose.yml / .dockerignore 三件套已备好于工作区；用户拍板暂缓实测与提交，待启用时一并交付。）
 4. **多租户：不做**。产品形态固定为「管理端 + 用户侧」两级，无团队/组织/RBAC/SSO 规划。
 5. **差距盘点后近期候选**（待拍板后开工）：
    - `/v1/embeddings` 对外转发端点（当前 embedding 模块仅服务语义缓存内部与管理端测试，无对外数据面端点）
