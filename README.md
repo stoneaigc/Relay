@@ -99,6 +99,55 @@ Vite 已配置代理，前端请求自动转发到 `:8080`，无需处理跨域�
 
 ---
 
+## 部署
+
+两种方式二选一；共同前提见文末「生产检查清单」。
+
+### 方式 A:Docker Compose(零宿主依赖,推荐)
+
+```bash
+docker compose up -d --build        # 默认 SQLite,数据落 named volume relay-data
+curl http://localhost:8080/healthz  # 探活;docker compose logs -f relay 看日志
+```
+
+切 PostgreSQL:`docker compose --profile pg up -d`,并在 relay 服务的 environment 里
+注释掉 `RELAY_DATABASE__URL`(SQLite 行)、放开 `RELAY_DATABASE__*` 五行(pg)——
+注意 `USER/DBNAME` 必须与 `POSTGRES_USER/POSTGRES_DB` 一致(后端对分项强校验,缺任一项启动即报错)。
+
+### 方式 B:原生 systemd(不经 Docker,单二进制 + 静态前端)
+
+Linux 服务器需要 Rust(与 Cargo.toml edition 匹配的稳定工具链)与 Node ≥18:
+
+```bash
+git clone <本仓库> relay && cd relay
+./deploy/build.sh                     # 产出 deploy/dist/relay-<版本>-<架构>.tar.gz
+scp deploy/dist/relay-*.tar.gz user@server:/tmp/
+# —— 以下在目标服务器执行 ——
+tar xzf /tmp/relay-*.tar.gz && cd relay-*/
+sudo ./install.sh                     # 默认装 /opt/relay;INSTALL_DIR=/srv/relay sudo -E ./install.sh 可改
+curl http://localhost:8080/healthz    # 探活
+```
+
+- install.sh **幂等**,可重复执行升级:二进制与前端每次更新;`config/default.toml` 与 `relay.env` 仅首次创建,不覆盖线上配置。
+- 服务以专用系统用户 `relay` 运行(脚本自动创建并 chown 安装目录),已启用 systemd 基础加固(`NoNewPrivileges` / `PrivateTmp` / `ProtectHome` / `ProtectSystem=full`)。
+- 日常运维:
+
+```bash
+systemctl status relay                # 状态
+journalctl -u relay -f                # 实时日志
+systemctl restart relay               # 修改 config/default.toml 或 relay.env 后重启生效
+```
+
+### 生产检查清单
+
+- [ ] `RELAY_AUTH__JWT_SECRET` 换成足够长的随机串(Docker 写在 compose environment;systemd 写入 `/opt/relay/relay.env`,格式每行 `KEY=VALUE`,权限 600)
+- [ ] `RELAY_ADMIN__USERNAME` / `RELAY_ADMIN__PASSWORD` 覆盖默认 admin/Relay@123(**首次启动前**设置;已建库后改口令在管理后台操作)
+- [ ] 反向代理(nginx/caddy)终结 TLS 后再对外;`GET /metrics` 仅对内网开放,或配置 `[metrics] export_token` 供 Prometheus 抓取
+- [ ] 数据备份计划:SQLite 直接备份安装目录下的库文件;PostgreSQL 用 `pg_dump`
+- [ ] 邮箱注册/找回密码需配置 `RELAY_EMAIL__SMTP_*`(位置同上,两种方式一致);未配置时为开发模式,验证码打日志并在响应返回
+
+---
+
 ## 快速体验
 
 1. 打开门户 `:5173`，用邮箱注册（SMTP 未配置时为开发模式，验证码在接口响应的 `dev_code` 直接返回）→ 新用户自动赠送额度（默认 1000 万 token）。
@@ -245,7 +294,8 @@ src/
 migrations/      0001_init.sql（SQLite）/ .postgres.sql
 frontend/portal  C 端门户
 frontend/admin   管理后台
-deploy/          安装脚本 + systemd 模板
+deploy/          build.sh(源码→发布包) + install.sh + systemd 模板
+scripts/         bench.mjs(数据面基准) / mock_upstream.mjs(本地 mock 上游)
 .github/workflows/release.yml   自动构建发布（多架构）
 ```
 

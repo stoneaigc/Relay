@@ -1,16 +1,25 @@
 [Unit]
-Description=Relay
-After=network.target
+Description=Relay AI Gateway
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-# 工作目录必须是安装目录,程序按相对路径找 config/ 和 frontend/*/dist
+# 工作目录必须是安装目录:程序按相对路径找 config/ 与 frontend/*/dist
 WorkingDirectory=@INSTALL_DIR@
+# 专用系统用户(install.sh 创建并 chown 安装目录),不以 root 运行
+User=relay
+Group=relay
 ExecStart=@INSTALL_DIR@/relay
 # 敏感配置(如邮箱授权码)放到该文件,形如:RELAY_EMAIL__PASSWORD=xxx
 # 前缀 - 表示文件不存在也不报错
 EnvironmentFile=-@INSTALL_DIR@/relay.env
 Restart=always
 RestartSec=3
+# 基础加固:禁止再提权;私有 /tmp;/home 不可见;/usr /boot /etc 只读(安装目录 /opt 默认可写)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
 
 [Install]
 WantedBy=multi-user.target

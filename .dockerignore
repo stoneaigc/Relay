@@ -1,0 +1,20 @@
+# 版控与本地产物
+.git
+.gitignore
+.trae
+target
+frontend/admin/node_modules
+frontend/portal/node_modules
+frontend/admin/dist
+frontend/portal/dist
+
+# 本地数据库与文档(镜像内不需要:迁移已编译进二进制,部署说明在 README)
+*.db
+*.db-shm
+*.db-wal
+*.md
+docs
+
+# 部署与压测脚本(镜像内不需要:systemd 单元/安装脚本面向宿主机,压测面向调用方)
+deploy
+scripts

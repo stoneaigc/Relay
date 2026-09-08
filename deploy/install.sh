@@ -15,6 +15,13 @@ fi
 echo "==> 安装目录:$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 
+# 专用系统用户:服务不 root 运行(relay.service 的 User=relay 与此对应)
+NOLOGIN="$(command -v nologin || echo /usr/sbin/nologin)"
+if ! id -u relay >/dev/null 2>&1; then
+  useradd --system --no-create-home --shell "$NOLOGIN" relay
+  echo "==> 已创建系统用户 relay(shell=$NOLOGIN)"
+fi
+
 # 若在安装目录里(源=目标)执行,文件已就位,跳过自我拷贝,直接走 systemd。
 if [ "$SRC" = "$(cd "$INSTALL_DIR" && pwd)" ]; then
   echo "==> 检测到在安装目录内运行,文件已就位,跳过拷贝"
@@ -45,6 +52,9 @@ EOF
   chmod 600 "$INSTALL_DIR/relay.env"
   echo "==> 已创建 $INSTALL_DIR/relay.env(可写入授权码等敏感变量)"
 fi
+
+# 属主交给服务用户:SQLite 库写在安装目录(User=relay 需要写权限)
+chown -R relay:relay "$INSTALL_DIR"
 
 # systemd 单元:把占位符替换成实际安装目录
 echo "==> 安装 systemd 服务:$SERVICE"

@@ -1,0 +1,49 @@
+# Relay 容器编排。默认 SQLite(数据落 named volume relay-data)。
+# 切 Postgres:
+#   1. `docker compose --profile pg up -d`
+#   2. relay 服务的 environment 已含 RELAY_DATABASE__* 五项(database.user/dbname 与
+#      POSTGRES_USER/POSTGRES_DB 一致,缺任一项启动即报错,见 storage.rs 的分项校验)。
+services:
+  relay:
+    build: .
+    image: relay:latest
+    container_name: relay
+    ports:
+      - "8080:8080"
+    depends_on:
+      # pg profile 未启用时跳过依赖(compose v2.20+ 支持 required: false)
+      postgres:
+        condition: service_started
+        required: false
+    environment:
+      # SQLite 数据文件落在数据卷;切 Postgres 见文件头说明
+      RELAY_DATABASE__URL: sqlite:///app/data/relay.db
+      # --- 切 Postgres:注释掉上一行,取消以下五行注释 ---
+      # RELAY_DATABASE__TYPE: postgres
+      # RELAY_DATABASE__HOST: postgres
+      # RELAY_DATABASE__USER: relay
+      # RELAY_DATABASE__PASSWORD: relay-pg
+      # RELAY_DATABASE__DBNAME: relay
+      # 生产部署务必覆盖以下三项(首次启动前设置;已建库后改管理员账号需在后台改):
+      # RELAY_AUTH__JWT_SECRET: "换成足够长的随机串"
+      # RELAY_ADMIN__USERNAME: admin
+      # RELAY_ADMIN__PASSWORD: "换成强密码"
+    volumes:
+      - relay-data:/app/data
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: relay-postgres
+    profiles: ["pg"]
+    environment:
+      POSTGRES_USER: relay
+      POSTGRES_PASSWORD: relay-pg
+      POSTGRES_DB: relay
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  relay-data:
+  pg-data:
