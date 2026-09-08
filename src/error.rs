@@ -38,7 +38,8 @@ pub enum ApiError {
     /// 登录防爆破/防轰炸触发。中文消息直接透出给前端。
     #[error("{0}")]
     TooManyAttempts(String),
-    #[error("bad request: {0}")]
+    /// 消息直接透出给前端展示,保持人话原文,不加技术前缀。
+    #[error("{0}")]
     BadRequest(String),
     #[error("upstream error: {0}")]
     Upstream(String),

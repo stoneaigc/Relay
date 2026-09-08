@@ -36,6 +36,11 @@ fn price_ok(p: Option<f64>) -> bool {
     p.map(|v| v.is_finite() && v >= 0.0).unwrap_or(true)
 }
 
+/// base_url 合法性:必须是可解析的 http(s) 地址,防止任意字符串入库污染配置。
+fn valid_base_url(u: &str) -> bool {
+    matches!(reqwest::Url::parse(u.trim()), Ok(p) if matches!(p.scheme(), "http" | "https"))
+}
+
 /// 统一分页查询参数:page(默认1,>=1)、page_size(默认20,clamp到1..=100)。
 #[derive(Deserialize, Default)]
 pub struct PageQuery {
@@ -236,6 +241,10 @@ pub async fn create_user(
     if body.username.trim().is_empty() || body.password.is_empty() {
         return Err(ApiError::BadRequest("username and password required".into()));
     }
+    // 与 portal 注册口径一致:密码最低 8 位,避免管理端成为弱密码后门。
+    if body.password.len() < 8 {
+        return Err(ApiError::BadRequest("密码至少 8 位".into()));
+    }
     let (grant, default_limit, default_rpm, default_tpm) = {
         let cfg = state.config();
         (
@@ -394,6 +403,9 @@ pub async fn patch_user(
     }
 
     // 资料字段(用户名/邮箱/手机/密码,提供了才改)。
+    if body.password.as_deref().map(|p| !p.is_empty() && p.len() < 8).unwrap_or(false) {
+        return Err(ApiError::BadRequest("密码至少 8 位".into()));
+    }
     let pwhash = body.password.as_deref().filter(|p| !p.is_empty()).map(storage::hash_password);
     if body.username.is_some() || body.email.is_some() || body.phone.is_some() || pwhash.is_some() {
         storage::update_user_fields(
@@ -799,6 +811,9 @@ pub async fn update_provider(
     if body.base_url.trim().is_empty() {
         return Err(ApiError::BadRequest("base_url required".into()));
     }
+    if !valid_base_url(&body.base_url) {
+        return Err(ApiError::BadRequest("base_url must be a valid http(s) URL".into()));
+    }
     storage::update_provider(&state.db, &name, body.base_url.trim(), body.api_key.as_deref())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -872,6 +887,9 @@ pub async fn add_model(
     if body.base_url.trim().is_empty() || body.upstream_model.trim().is_empty() {
         return Err(ApiError::BadRequest("base_url and upstream_model required".into()));
     }
+    if !valid_base_url(&body.base_url) {
+        return Err(ApiError::BadRequest("base_url must be a valid http(s) URL".into()));
+    }
     if !price_ok(body.input_price) || !price_ok(body.output_price) {
         return Err(ApiError::BadRequest("prices must be finite and >= 0".into()));
     }
@@ -913,6 +931,9 @@ pub async fn add_models_batch(
     }
     if body.base_url.trim().is_empty() || body.models.is_empty() {
         return Err(ApiError::BadRequest("base_url and at least one model required".into()));
+    }
+    if !valid_base_url(&body.base_url) {
+        return Err(ApiError::BadRequest("base_url must be a valid http(s) URL".into()));
     }
     if body.models.iter().any(|m| !price_ok(m.input_price) || !price_ok(m.output_price)) {
         return Err(ApiError::BadRequest("prices must be finite and >= 0".into()));
@@ -1064,6 +1085,9 @@ pub async fn update_model(
     }
     if body.base_url.trim().is_empty() || body.upstream_model.trim().is_empty() {
         return Err(ApiError::BadRequest("base_url and upstream_model required".into()));
+    }
+    if !valid_base_url(&body.base_url) {
+        return Err(ApiError::BadRequest("base_url must be a valid http(s) URL".into()));
     }
     if !price_ok(body.input_price.flatten()) || !price_ok(body.output_price.flatten()) {
         return Err(ApiError::BadRequest("prices must be finite and >= 0".into()));
@@ -2722,6 +2746,23 @@ fn render_prometheus(snap: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- valid_base_url ----
+
+    #[test]
+    fn valid_base_url_accepts_http_https() {
+        assert!(valid_base_url("https://api.deepseek.com/v1"));
+        assert!(valid_base_url("http://127.0.0.1:18901/v1"));
+        assert!(valid_base_url("  https://sh.fit2cloud.cn:8443/gateway/v1  "));
+    }
+
+    #[test]
+    fn valid_base_url_rejects_garbage_and_non_http_schemes() {
+        assert!(!valid_base_url("not a url!!"));
+        assert!(!valid_base_url(""));
+        assert!(!valid_base_url("ftp://files.example.com"));
+        assert!(!valid_base_url("api.deepseek.com/v1"));
+    }
 
     // ---- normalize_page ----
 

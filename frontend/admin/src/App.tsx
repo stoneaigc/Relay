@@ -71,7 +71,7 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
         <CardContent className="space-y-3">
           <Input placeholder="用户名" value={u} onChange={(e) => setU(e.target.value)} />
           <PasswordInput placeholder="密码" value={p} onChange={(e) => setP(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
-          <Button className="w-full" disabled={busy} onClick={submit}>登录</Button>
+          <Button className="w-full" disabled={busy || !u.trim() || !p} onClick={submit}>登录</Button>
           {err && <p className="text-sm text-destructive">{err}</p>}
         </CardContent>
       </Card>
@@ -879,19 +879,6 @@ function ModelsPanel() {
       const r = await api.testModel(id);
       setTest((t) => ({ ...t, [id]: { ok: r.ok, msg: r.ok ? `${r.latency_ms}ms` : (r.error || "失败") } }));
     } catch (e: any) { setTest((t) => ({ ...t, [id]: { ok: false, msg: e.message } })); }
-  };
-
-  // 获取 provider 的可读名称
-  const providerDisplayName = (url: string) => {
-    const h = url.replace(/^https?:\/\//, "").split("/")[0];
-    if (h.includes("deepseek")) return "DeepSeek";
-    if (h.includes("openai")) return "OpenAI";
-    if (h.includes("anthropic")) return "Anthropic";
-    if (h.includes("dashscope")) return "通义千问";
-    if (h.includes("bigmodel")) return "智谱 GLM";
-    if (h.includes("moonshot")) return "Moonshot";
-    if (h.includes("localhost") || h.includes("127.0.0.1")) return "本地服务";
-    return h;
   };
 
   return (
@@ -2487,6 +2474,19 @@ function RewardTaskDialog({ task, onClose, onDone }: {
 
 const fmtCost = (n: number) => (n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(6)}`);
 
+// 获取 provider 的可读名称(模块级:模型页与用量页共用)
+const providerDisplayName = (url: string) => {
+  const h = url.replace(/^https?:\/\//, "").split("/")[0];
+  if (h.includes("deepseek")) return "DeepSeek";
+  if (h.includes("openai")) return "OpenAI";
+  if (h.includes("anthropic")) return "Anthropic";
+  if (h.includes("dashscope")) return "通义千问";
+  if (h.includes("bigmodel")) return "智谱 GLM";
+  if (h.includes("moonshot")) return "Moonshot";
+  if (h.includes("localhost") || h.includes("127.0.0.1")) return "本地服务";
+  return h;
+};
+
 /** 用量分布单维度条形块(纯 CSS 横向条,top10) */
 function BreakdownBars({ title, rows, metric }: { title: string; rows: UsageBreakdownRow[]; metric: "tokens" | "cost" }) {
   const val = (r: UsageBreakdownRow) => (metric === "cost" ? r.cost_usd : r.input_tokens + r.output_tokens);
@@ -2532,6 +2532,11 @@ function UsagePanel() {
   useEffect(() => { api.usage(page, pageSize).then((r) => { setRows(r.data); setTotal(r.total); }); }, [page, pageSize]);
   useEffect(() => { api.usageBreakdown().then(setBd).catch(() => { /* 静默,下轮刷新重试 */ }); }, []);
   useEffect(() => { api.models().then((r) => setAllModels(r.data)).catch(() => { /* 静默 */ }); }, []);
+  // ID → 友好名称映射(供应商 prov-xxx → 展示名;用户 UUID → 用户名),拉一次全量构建字典。
+  const [provMap, setProvMap] = useState<Record<string, string>>({});
+  const [userMap, setUserMap] = useState<Record<string, string>>({});
+  useEffect(() => { api.providers(1, 200).then((r) => setProvMap(Object.fromEntries(r.data.map((p) => [p.name, providerDisplayName(p.base_url)])))).catch(() => { /* 静默 */ }); }, []);
+  useEffect(() => { api.users(1, 200).then((r) => setUserMap(Object.fromEntries(r.data.map((u) => [u.id, u.username ?? u.id.slice(0, 8)])))).catch(() => { /* 静默 */ }); }, []);
   const unpricedCount = allModels.filter((m) => m.input_price == null || m.output_price == null).length;
   return (
     <div className="space-y-5">
@@ -2564,9 +2569,9 @@ function UsagePanel() {
         </CardHeader>
         <CardContent>
           <div className="grid gap-6 lg:grid-cols-3">
-            <BreakdownBars title="按供应商" rows={bd?.providers ?? []} metric={metric} />
-            <BreakdownBars title="按用户" rows={bd?.users ?? []} metric={metric} />
-            <BreakdownBars title="按密钥" rows={bd?.keys ?? []} metric={metric} />
+            <BreakdownBars title="按供应商" rows={(bd?.providers ?? []).map((r) => ({ ...r, label: provMap[r.label] ?? r.label }))} metric={metric} />
+            <BreakdownBars title="按用户" rows={(bd?.users ?? []).map((r) => ({ ...r, label: userMap[r.label] ?? r.label }))} metric={metric} />
+            <BreakdownBars title="按密钥" rows={(bd?.keys ?? []).map((r) => ({ ...r, label: r.label }))} metric={metric} />
           </div>
         </CardContent>
       </Card>
@@ -2579,8 +2584,8 @@ function UsagePanel() {
               <TableBody>
                 {rows.map((r, i) => (
                   <TableRow key={i}>
-                    <TableCell className="mono text-xs">{String(r.user_id).slice(0, 8)}</TableCell>
-                    <TableCell className="mono">{r.model}</TableCell><TableCell>{r.provider}</TableCell>
+                    <TableCell className="mono text-xs">{userMap[r.user_id] ?? String(r.user_id).slice(0, 8)}</TableCell>
+                    <TableCell className="mono">{r.model}</TableCell><TableCell>{provMap[r.provider] ?? r.provider}</TableCell>
                     <TableCell>{r.input_tokens}</TableCell><TableCell>{r.output_tokens}</TableCell><TableCell className="mono">{r.charged_tokens}</TableCell>
                     <TableCell className="mono tabular-nums">{r.cost_usd == null ? "—" : fmtCost(r.cost_usd)}</TableCell>
                   </TableRow>
@@ -3752,7 +3757,7 @@ function UpstreamsPanel() {
                         <div className="flex flex-col gap-0.5">
                           <span className="text-xs font-medium text-foreground">{fmtRel(r.ts_ms)}</span>
                           <span className="text-[10px] text-muted-foreground" title={new Date(r.ts_ms).toLocaleString()}>
-                            {new Date(r.ts_ms).toLocaleTimeString()}
+                            {new Date(r.ts_ms).toLocaleString("zh-CN", { hour12: false })}
                           </span>
                         </div>
                       </td>
@@ -4705,7 +4710,8 @@ function RequestLogPanel() {
 
   const fmtTime = (ts: number) => {
     const d = new Date(ts * 1000);
-    return d.toLocaleTimeString("zh-CN", { hour12: false }) + "." + String(d.getMilliseconds()).padStart(3, "0");
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${d.toLocaleTimeString("zh-CN", { hour12: false })}.${String(d.getMilliseconds()).padStart(3, "0")}`;
   };
 
   const toggle = (id: string) => setExpanded((prev) => prev === id ? null : id);

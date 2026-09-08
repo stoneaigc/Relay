@@ -103,8 +103,8 @@ pub async fn register(
     if !email.contains('@') || email.len() < 3 {
         return Err(ApiError::BadRequest("邮箱格式不正确".into()));
     }
-    if body.password.len() < 6 {
-        return Err(ApiError::BadRequest("密码至少 6 位".into()));
+    if body.password.len() < 8 {
+        return Err(ApiError::BadRequest("密码至少 8 位".into()));
     }
     // 校验验证码。过期由缓存 TTL 负责;值格式 "{发送时刻}:{code哈希}"。
     let code_key = format!("email_code:{email}");
@@ -150,8 +150,8 @@ pub async fn reset_password(
     if !email.contains('@') || email.len() < 3 {
         return Err(ApiError::BadRequest("邮箱格式不正确".into()));
     }
-    if body.password.len() < 6 {
-        return Err(ApiError::BadRequest("密码至少 6 位".into()));
+    if body.password.len() < 8 {
+        return Err(ApiError::BadRequest("密码至少 8 位".into()));
     }
     // 校验验证码(复用注册的邮箱验证码机制;值格式 "{发送时刻}:{code哈希}")。
     let code_key = format!("email_code:{email}");
