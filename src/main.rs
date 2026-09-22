@@ -13,6 +13,7 @@ mod portal;
 mod pricing;
 mod providers;
 mod reqlog;
+mod responses;
 pub mod routing;
 mod semantic_cache;
 mod settings;
@@ -336,6 +337,7 @@ async fn main() -> anyhow::Result<()> {
         // ---- 数据面(给 SDK 用)----
         .route("/v1/models", get(handlers::list_models))
         .route("/v1/chat/completions", post(handlers::chat_completions))
+        .route("/v1/responses", post(handlers::responses))
         .route("/v1/messages", post(handlers::messages))
         .route("/v1/embeddings", post(handlers::embeddings))
         .nest("/portal/api", portal_api)

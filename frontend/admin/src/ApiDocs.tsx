@@ -65,6 +65,48 @@ msg = client.messages.create(
 )
 print(msg.content[0].text)`;
 
+const RESPONSES_CURL = `curl ${BASE}/v1/responses \\
+  -H "Authorization: Bearer rk_live_xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "chat",
+    "input": "你好，介绍一下你自己"
+  }'`;
+
+const RESPONSES_RESP = `{
+  "id": "resp_a1b2c3d4e5f6a7b8c9d0",
+  "object": "response",
+  "created_at": 1790088000,
+  "status": "completed",
+  "model": "chat",
+  "output": [{
+    "type": "message",
+    "id": "msg_a1b2c3d4e5f6a7b8c9d0",
+    "status": "completed",
+    "role": "assistant",
+    "content": [{ "type": "output_text", "text": "……", "annotations": [] }]
+  }],
+  "usage": {
+    "input_tokens": 12, "output_tokens": 98, "total_tokens": 110,
+    "input_tokens_details": { "cached_tokens": 0 },
+    "output_tokens_details": { "reasoning_tokens": 0 }
+  },
+  "error": null
+}`;
+
+const RESPONSES_STREAM = `# Responses 流式为具名事件(event 行声明类型),核心序列:
+event: response.created
+data: {"sequence_number": 1, "response": {"status": "in_progress", ...}}
+
+event: response.output_text.delta
+data: {"sequence_number": 8, "delta": "你好", ...}
+
+event: response.output_text.done
+data: {"sequence_number": 9, "text": "你好……", ...}
+
+event: response.completed
+data: {"sequence_number": 11, "response": {"status": "completed", "usage": {...}}}`;
+
 const CHAT_RESP = `{
   "id": "chatcmpl-a1b2c3",
   "object": "chat.completion",
@@ -342,6 +384,11 @@ export default function ApiDocsPanel() {
             </TableRow>
             <TableRow>
               <TableCell><MethodBadge m="POST" /></TableCell>
+              <TableCell><K>/v1/responses</K></TableCell>
+              <TableCell className="text-muted-foreground">OpenAI Responses 协议(<K>input</K> 为字符串或 items 数组;状态化 <K>previous_response_id</K> 与内置工具暂不支持)</TableCell>
+            </TableRow>
+            <TableRow>
+              <TableCell><MethodBadge m="POST" /></TableCell>
               <TableCell><K>/v1/embeddings</K></TableCell>
               <TableCell className="text-muted-foreground">OpenAI 兼容 embedding,<K>input</K> 支持 string 或数组;模型由网关统一配置,不计费</TableCell>
             </TableRow>
@@ -354,6 +401,9 @@ export default function ApiDocsPanel() {
         </Table>
         <CodeBlock title="GET /v1/models 响应" code={MODELS_RESP} />
         <CodeBlock title="POST /v1/chat/completions 响应(非流式)" code={CHAT_RESP} />
+        <CodeBlock title="POST /v1/responses 请求" code={RESPONSES_CURL} />
+        <CodeBlock title="POST /v1/responses 响应(非流式)" code={RESPONSES_RESP} />
+        <CodeBlock title="POST /v1/responses 流式事件(具名事件)" code={RESPONSES_STREAM} />
         <CodeBlock title="POST /v1/embeddings 请求" code={EMBED_CURL} />
         <CodeBlock title="POST /v1/embeddings 响应" code={EMBED_RESP} />
         <p className="text-sm text-muted-foreground">

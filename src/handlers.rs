@@ -2085,6 +2085,42 @@ fn scan_usage(buf: &mut Vec<u8>, new: &[u8], input: &mut u32, output: &mut u32) 
     }
 }
 
+/// POST /v1/responses —— OpenAI Responses 协议入站。
+/// 请求转换为等价 chat 请求后复用 run_chat 主管道(路由/熔断/计费/链路/缓存全复用),
+/// 出站把 chat 响应(非流式 JSON / 流式 SSE 字节流)回译为 Responses 格式。
+pub async fn responses(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let auth = authenticate(&state, &headers)?;
+    let req: Value = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::BadRequest(format!("invalid json: {e}")))?;
+    crate::responses::validate_responses(&req)?;
+    let no_cache = no_cache_requested(&headers);
+    let stream = req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+    let chat_req = crate::responses::responses_to_chat(&req)?;
+    let model = chat_req.get("model").and_then(|m| m.as_str()).unwrap_or_default().to_string();
+
+    let resp = run_chat(state, auth.user, Some(auth.key_id), chat_req, no_cache).await?;
+    let (parts, body) = resp.into_parts();
+    let new_body = if stream {
+        // 流式:chat SSE 字节流 → Responses 事件流。
+        crate::responses::chat_sse_to_responses_body(body, model)
+    } else {
+        // 非流式:chat JSON → Responses JSON(保留 run_chat 的响应头,如 x-relay-upstream)。
+        let bytes = axum::body::to_bytes(body, 32 * 1024 * 1024)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        let chat: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| ApiError::Internal(format!("上游响应解析失败: {e}")))?;
+        let out = serde_json::to_vec(&crate::responses::chat_to_responses(&chat))
+            .unwrap_or_default();
+        Body::from(out)
+    };
+    Ok(Response::from_parts(parts, new_body))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

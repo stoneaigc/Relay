@@ -261,6 +261,11 @@ export default function DocsView() {
           { label: "curl", code: ANTHROPIC_CURL },
           { label: "Python", code: ANTHROPIC_PY },
         ]} />
+        <div className="text-sm font-medium text-muted-foreground">OpenAI Responses 协议同样可用(GPT-5 / o 系列新一代接口):</div>
+        <CodeBlock title="POST /v1/responses" code={`curl ${BASE}/v1/responses \\
+  -H "Authorization: Bearer rk_live_xxx" \\
+  -H "Content-Type: application/json" \\
+  -d '{"model": "chat", "input": "你好，介绍一下你自己"}'`} />
         <p className="text-sm text-muted-foreground">
           <K>model</K> 填平台上线的<b>对外模型名</b>(即 <K>/v1/models</K> 返回的 <K>id</K>);同名多条通道按权重自动分流,无需关心背后接入的是哪家供应商。
         </p>
