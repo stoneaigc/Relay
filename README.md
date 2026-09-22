@@ -148,6 +148,28 @@ systemctl restart relay               # 修改 config/default.toml 或 relay.env
 
 ---
 
+## 发布与版本迭代(CI 自动化)
+
+| 流水线 | 触发 | 作用 |
+|---|---|---|
+| `ci.yml` | push 到 main / 任意 PR | 质量门禁:cargo test 全量 + 双前端构建,不过不许合入 |
+| `release.yml` | 推送 `v*` tag / Actions 页手动触发 | 双架构(x86_64/aarch64 musl 静态)构建 → 打包 → 自动创建 GitHub Release(含 `relay-<版本>-linux-<架构>.tar.gz`) |
+
+**版本迭代流程**:
+
+```bash
+# 1. 迭代完成后,同步修改 Cargo.toml 的 version(如 0.1.0 → 0.1.1)
+# 2. 提交并推送(tag 与 Cargo.toml 版本不一致时 Release 流水线会拒绝构建)
+git commit -am "chore: bump 0.1.1" && git push
+# 3. 打 tag 触发发布
+git tag v0.1.1 && git push origin v0.1.1
+# 4. GitHub Actions 自动构建,完成后在 Releases 页下载双架构包,服务器解包 sudo ./install.sh 即完成升级
+```
+
+> 无 tag 构建本地包:`./deploy/build.sh`(与 CI 包结构一致)。CI 产物为 musl 静态链接,兼容老 glibc 发行版。
+
+---
+
 ## 快速体验
 
 1. 打开门户 `:5173`，用邮箱注册（SMTP 未配置时为开发模式，验证码在接口响应的 `dev_code` 直接返回）→ 新用户自动赠送额度（默认 1000 万 token）。

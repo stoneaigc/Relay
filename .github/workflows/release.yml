@@ -66,6 +66,15 @@ jobs:
       - name: Build backend
         run: cross build --release --locked --target ${{ matrix.target }}
 
+      # 版本一致性门禁:tag 必须与 Cargo.toml version 一致,防止版本漂移。
+      - name: Verify version matches tag
+        run: |
+          CARGO_VER="v$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "$CARGO_VER" != "$VERSION" ]; then
+            echo "::error::tag($VERSION) 与 Cargo.toml version($CARGO_VER) 不一致;迭代版本时请同步修改 Cargo.toml 后再打 tag"
+            exit 1
+          fi
+
       - name: Verify static binary
         run: file "target/${{ matrix.target }}/release/relay"
 
@@ -109,4 +118,5 @@ jobs:
         with:
           tag_name: ${{ env.VERSION }}     # tag 不存在时按当前提交自动创建
           name: ${{ env.VERSION }}
+          generate_release_notes: true     # 自动按提交生成 Release notes
           files: dist/**/*.tar.gz
