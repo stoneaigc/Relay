@@ -1627,6 +1627,10 @@ async fn messages_openai_nonstream(
     Ok(out)
 }
 
+/// 流式 content block 种类（Anthropic 协议）。
+#[derive(Clone, Copy, PartialEq)]
+enum Blk { Text, Think, Tool }
+
 /// OpenAI 上游 SSE → Anthropic 事件流(状态机)。
 #[allow(clippy::too_many_arguments)]
 fn messages_openai_stream(
@@ -1649,7 +1653,7 @@ fn messages_openai_stream(
         let mut input = 0u32;
         let mut output = 0u32;
         let mut finish: Option<String> = None;
-        let mut cur: Option<(i64, bool)> = None; // (block index, is_tool)
+        let mut cur: Option<(i64, Blk)> = None; // (block index, block kind)
         let mut next_index = 0i64;
         let mut tool_map: std::collections::HashMap<u64, i64> = std::collections::HashMap::new();
         let msg_id = format!("msg_{}", &uuid::Uuid::new_v4().to_string()[..12]);
@@ -1677,12 +1681,24 @@ fn messages_openai_stream(
                     })));
                 }
                 let delta = v.pointer("/choices/0/delta");
+                // vLLM reasoning / DeepSeek reasoning_content → Anthropic thinking_delta
+                if let Some(text) = delta.and_then(|d| d.get("reasoning").or_else(|| d.get("reasoning_content"))).and_then(|c| c.as_str()) {
+                    if !text.is_empty() {
+                        if !matches!(cur, Some((_, Blk::Think))) {
+                            if let Some((idx, _)) = cur { yield Ok(a_event("content_block_stop", json!({"type":"content_block_stop","index":idx}))); }
+                            yield Ok(a_event("content_block_start", json!({"type":"content_block_start","index":next_index,"content_block":{"type":"thinking","thinking":""}})));
+                            cur = Some((next_index, Blk::Think)); next_index += 1;
+                        }
+                        let idx = cur.unwrap().0;
+                        yield Ok(a_event("content_block_delta", json!({"type":"content_block_delta","index":idx,"delta":{"type":"thinking_delta","thinking":text}})));
+                    }
+                }
                 if let Some(text) = delta.and_then(|d| d.get("content")).and_then(|c| c.as_str()) {
                     if !text.is_empty() {
-                        if !matches!(cur, Some((_, false))) {
+                        if !matches!(cur, Some((_, Blk::Text))) {
                             if let Some((idx, _)) = cur { yield Ok(a_event("content_block_stop", json!({"type":"content_block_stop","index":idx}))); }
                             yield Ok(a_event("content_block_start", json!({"type":"content_block_start","index":next_index,"content_block":{"type":"text","text":""}})));
-                            cur = Some((next_index, false)); next_index += 1;
+                            cur = Some((next_index, Blk::Text)); next_index += 1;
                         }
                         let idx = cur.unwrap().0;
                         yield Ok(a_event("content_block_delta", json!({"type":"content_block_delta","index":idx,"delta":{"type":"text_delta","text":text}})));
@@ -1697,7 +1713,7 @@ fn messages_openai_stream(
                             let tid = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
                             let name = tc.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("");
                             yield Ok(a_event("content_block_start", json!({"type":"content_block_start","index":bidx,"content_block":{"type":"tool_use","id":tid,"name":name,"input":{}}})));
-                            cur = Some((bidx, true));
+                            cur = Some((bidx, Blk::Tool));
                         }
                         if let Some(args) = tc.pointer("/function/arguments").and_then(|v| v.as_str()) {
                             if !args.is_empty() {
@@ -1915,6 +1931,8 @@ fn stream_response(
             match item {
                 Ok(bytes) => {
                     scan_usage(&mut buf, &bytes, &mut input, &mut output);
+                    // 把 vLLM 的 reasoning 字段归一化为 reasoning_content（参考 one-api）。
+                    let bytes = normalize_reasoning(&bytes);
                     // 把响应里的上游模型名透明改回用户请求的对外名。
                     let out = rewrite_model(&bytes, &upstream_model, &model);
                     yield Ok::<Bytes, std::io::Error>(out);
@@ -1993,6 +2011,8 @@ async fn non_stream_response(
     user.deduct(charged);
     user.record_tokens(input.saturating_add(output));
 
+    // 把 vLLM 的 reasoning 字段归一化为 reasoning_content（参考 one-api）。
+    normalize_reasoning_json(&mut payload);
     // 把上游真名换回客户端请求的逻辑名。
     payload["model"] = json!(model);
 
@@ -2022,6 +2042,34 @@ async fn non_stream_response(
     let mut out = Json(payload).into_response();
     apply_relay_headers(&mut out, &hdrs);
     Ok(out)
+}
+
+/// 字节级把 vLLM 的 `"reasoning"` 字段名归一化为 `"reasoning_content"`（参考 one-api）。
+/// 仅替换 JSON key，不影响值内容。处理两种格式：`"reasoning":"xxx"` 和 `"reasoning": "xxx"`。
+fn normalize_reasoning(bytes: &Bytes) -> Bytes {
+    let mut data = bytes.to_vec();
+    for sep in ["\":\"", "\": \""] {
+        let from = format!("\"reasoning{sep}").into_bytes();
+        let to = format!("\"reasoning_content{sep}").into_bytes();
+        data = replace_all_bytes(&data, &from, &to);
+    }
+    Bytes::from(data)
+}
+
+/// JSON 级把 vLLM 的 `reasoning` 字段名归一化为 `reasoning_content`（非流式响应）。
+/// 遍历 choices[].message 和 choices[].delta，仅当 reasoning 存在且 reasoning_content 不存在时重命名。
+fn normalize_reasoning_json(payload: &mut Value) {
+    let Some(choices) = payload.get_mut("choices").and_then(|c| c.as_array_mut()) else { return };
+    for choice in choices.iter_mut() {
+        for key in ["message", "delta"] {
+            let Some(obj) = choice.get_mut(key).and_then(|v| v.as_object_mut()) else { continue };
+            if obj.contains_key("reasoning") && !obj.contains_key("reasoning_content") {
+                if let Some(r) = obj.remove("reasoning") {
+                    obj.insert("reasoning_content".into(), r);
+                }
+            }
+        }
+    }
 }
 
 /// 字节级把 `"model":"<upstream>"` 改写成对外名(ASCII 模式,避免 UTF-8 破坏)。

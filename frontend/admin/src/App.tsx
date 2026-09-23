@@ -2829,6 +2829,11 @@ function SettingsPanel() {
   const [logSaving, setLogSaving] = useState(false);
   const [logNote, setLogNote] = useState("");
   const [logErr, setLogErr] = useState("");
+  // 门户设置
+  const [portalRewards, setPortalRewards] = useState(false);
+  const [portalSaving, setPortalSaving] = useState(false);
+  const [portalNote, setPortalNote] = useState("");
+  const [portalErr, setPortalErr] = useState("");
 
   const load = async () => {
     setLoading(true);
@@ -2860,6 +2865,9 @@ function SettingsPanel() {
       .catch(() => { /* 回退默认值 */ });
     api.loggingSettings()
       .then((r) => { setLogPreview(r.body_preview_max_bytes); setLogRetention(r.retention_days); })
+      .catch(() => { /* 回退默认值 */ });
+    api.portalSettings()
+      .then((r) => setPortalRewards(r.rewards_enabled))
       .catch(() => { /* 回退默认值 */ });
   }, []);
 
@@ -2972,6 +2980,17 @@ function SettingsPanel() {
     } catch (e: any) {
       setLogErr(e.message);
     } finally { setLogSaving(false); }
+  };
+
+  const savePortal = async () => {
+    setPortalErr(""); setPortalNote("");
+    setPortalSaving(true);
+    try {
+      await api.savePortalSettings({ rewards_enabled: portalRewards });
+      setPortalNote("已保存,即时生效。");
+    } catch (e: any) {
+      setPortalErr(e.message);
+    } finally { setPortalSaving(false); }
   };
 
   return (
@@ -3198,6 +3217,31 @@ function SettingsPanel() {
             <Button onClick={saveLogging} disabled={logSaving}>{logSaving ? "保存中…" : "保存配置"}</Button>
             {logNote && <span className="text-xs text-success">{logNote}</span>}
             {logErr && <span className="text-xs text-destructive">{logErr}</span>}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-base">门户设置</CardTitle>
+            <Badge variant={portalRewards ? "success" : "muted"}>
+              {portalRewards ? "奖励已开启" : "奖励已关闭"}
+            </Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm font-medium">启用奖励功能</div>
+              <div className="text-xs text-muted-foreground">开启后,门户导航将显示"奖励"菜单,用户可查看并申领奖励任务。</div>
+            </div>
+            <Switch checked={portalRewards} onCheckedChange={setPortalRewards} />
+          </div>
+          <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+            <Button onClick={savePortal} disabled={portalSaving}>{portalSaving ? "保存中…" : "保存配置"}</Button>
+            {portalNote && <span className="text-xs text-success">{portalNote}</span>}
+            {portalErr && <span className="text-xs text-destructive">{portalErr}</span>}
           </div>
         </CardContent>
       </Card>

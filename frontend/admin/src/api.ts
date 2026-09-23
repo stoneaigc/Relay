@@ -326,6 +326,11 @@ export const api = {
   saveLoggingSettings: (body: LoggingSettingsBody) =>
     req("/admin/api/settings/logging", { method: "POST", body: JSON.stringify(body) }),
 
+  // ---- 门户设置 ----
+  portalSettings: (): Promise<{ rewards_enabled: boolean }> => req("/admin/api/settings/portal"),
+  savePortalSettings: (body: { rewards_enabled: boolean }) =>
+    req("/admin/api/settings/portal", { method: "POST", body: JSON.stringify(body) }),
+
   // ---- 上游治理(熔断器 + 并发槽仪表盘) ----
   listUpstreams: (): Promise<UpstreamsResp> => req("/admin/api/upstreams"),
   resetAllBreakers: (): Promise<{ ok: true; cleared: number }> => req("/admin/api/upstreams/reset", { method: "POST" }),

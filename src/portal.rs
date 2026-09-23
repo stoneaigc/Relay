@@ -232,6 +232,20 @@ pub async fn password_login(
     Ok(Json(json!({ "token": token, "user": { "id": id } })))
 }
 
+/// GET /portal/config -- 门户级配置(无需登录)。
+pub async fn config(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, ApiError> {
+    let kv = storage::load_settings(&state.db, crate::settings::PORTAL_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let rewards_enabled = kv
+        .get(crate::settings::K_PORTAL_REWARDS_ENABLED)
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    Ok(Json(json!({ "rewards_enabled": rewards_enabled })))
+}
+
 /// GET /portal/me
 pub async fn me(
     State(state): State<Arc<AppState>>,

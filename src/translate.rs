@@ -175,10 +175,16 @@ fn content_to_text(content: Option<&Value>) -> String {
 /// Anthropic messages 响应(非流式)→ OpenAI chat.completion(含 tool_calls)。
 pub fn anthropic_to_openai(aresp: &Value, public_model: &str) -> Value {
     let mut text = String::new();
+    let mut reasoning = String::new();
     let mut tool_calls: Vec<Value> = Vec::new();
     if let Some(blocks) = aresp.get("content").and_then(|c| c.as_array()) {
         for b in blocks {
             match b.get("type").and_then(|t| t.as_str()) {
+                Some("thinking") => {
+                    if let Some(t) = b.get("thinking").and_then(|t| t.as_str()) {
+                        reasoning.push_str(t);
+                    }
+                }
                 Some("text") => {
                     if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
                         text.push_str(t);
@@ -204,6 +210,9 @@ pub fn anthropic_to_openai(aresp: &Value, public_model: &str) -> Value {
 
     let mut message = json!({ "role": "assistant" });
     message["content"] = if text.is_empty() && !tool_calls.is_empty() { Value::Null } else { json!(text) };
+    if !reasoning.is_empty() {
+        message["reasoning_content"] = json!(reasoning);
+    }
     if !tool_calls.is_empty() {
         message["tool_calls"] = json!(tool_calls);
     }
@@ -387,6 +396,12 @@ fn anth_text(v: &Value) -> String {
 pub fn openai_to_anthropic_response(oai: &Value, public_model: &str) -> Value {
     let msg = oai.pointer("/choices/0/message").cloned().unwrap_or(json!({}));
     let mut content: Vec<Value> = Vec::new();
+    // vLLM reasoning / DeepSeek reasoning_content → Anthropic thinking block
+    if let Some(r) = msg.get("reasoning_content").or_else(|| msg.get("reasoning")).and_then(|v| v.as_str()) {
+        if !r.is_empty() {
+            content.push(json!({ "type": "thinking", "thinking": r }));
+        }
+    }
     if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
         if !text.is_empty() {
             content.push(json!({ "type": "text", "text": text }));

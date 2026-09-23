@@ -231,6 +231,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/register", post(portal::register))
         .route("/auth/reset_password", post(portal::reset_password))
         .route("/me", get(portal::me))
+        .route("/config", get(portal::config))
         .route("/balance", get(portal::balance))
         .route("/summary", get(portal::summary))
         .route("/keys", get(portal::list_keys).post(portal::create_key))
@@ -306,6 +307,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/settings/embedding", get(admin::get_embedding_settings).post(admin::save_embedding_settings))
         .route("/settings/embedding/test", post(admin::test_embedding))
         .route("/settings/logging", get(admin::get_logging_settings).post(admin::save_logging_settings))
+        .route("/settings/portal", get(admin::get_portal_settings).post(admin::save_portal_settings))
         // ---- 上游治理仪表盘 ----
         .route("/upstreams", get(admin::list_upstreams))
         .route("/upstreams/reset", post(admin::reset_all_breakers))

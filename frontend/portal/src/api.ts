@@ -65,6 +65,7 @@ export const api = {
   rewards: (): Promise<RewardInfo> => req("/portal/api/rewards"),
   claimReward: (task_id: number, evidence?: string) =>
     req("/portal/api/rewards", { method: "POST", body: JSON.stringify({ task_id, evidence }) }),
+  config: (): Promise<{ rewards_enabled: boolean }> => req("/portal/api/config"),
 };
 
 export type EvidenceType = "screenshot" | "link" | "text" | "none";

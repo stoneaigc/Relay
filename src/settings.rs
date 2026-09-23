@@ -257,6 +257,10 @@ pub const LOG_PREFIX: &str = "logging.";
 pub const K_LOG_PREVIEW: &str = "logging.body_preview_max_bytes";
 pub const K_LOG_RETENTION: &str = "logging.retention_days";
 
+/// settings 表里门户相关 key 的前缀。
+pub const PORTAL_PREFIX: &str = "portal.";
+pub const K_PORTAL_REWARDS_ENABLED: &str = "portal.rewards_enabled";
+
 /// 把 DB 里的 logging.* 覆盖到内存 Config.logging(DB 优先于配置文件)。
 /// 解析失败时静默保持原值,与 fallback.* 行为一致。
 pub fn apply_logging_settings(cfg: &mut Config, kv: &HashMap<String, String>) {

@@ -205,7 +205,7 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
 }
 
 type Section = "overview" | "chat" | "rewards" | "usage" | "docs";
-const NAV: { path: string; label: string; icon: any }[] = [
+const NAV_ALL: { path: string; label: string; icon: any }[] = [
   { path: "/", label: "概览", icon: LayoutDashboard },
   { path: "/chat", label: "对话", icon: MessageSquare },
   { path: "/rewards", label: "奖励", icon: Gift },
@@ -215,12 +215,6 @@ const NAV: { path: string; label: string; icon: any }[] = [
 
 function Dashboard({ onLogout }: { onLogout: () => void }) {
   const loc = useLocation();
-  const section: Section = loc.pathname.startsWith("/chat") ? "chat"
-    : loc.pathname.startsWith("/rewards") ? "rewards"
-    : loc.pathname.startsWith("/usage") ? "usage"
-    : loc.pathname.startsWith("/docs") ? "docs" : "overview";
-  const title = section === "chat" ? "对话" : section === "rewards" ? "奖励"
-    : section === "usage" ? "用量明细" : section === "docs" ? "API 文档" : "概览";
   const [mobileOpen, setMobileOpen] = useState(false);
   const [summary, setSummary] = useState<{ granted: number; used: number; balance: number } | null>(null);
   const [phone, setPhone] = useState("");
@@ -233,6 +227,16 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [series, setSeries] = useState<{ ts: number; tokens: number; calls: number }[]>([]);
   const [seriesDays, setSeriesDays] = useState(30);
   const [reveal, setReveal] = useState<{ kind: string; key: string } | null>(null);
+  const [rewardsEnabled, setRewardsEnabled] = useState(false);
+  const nav = NAV_ALL.filter((n) => n.path !== "/rewards" || rewardsEnabled);
+  const section: Section = loc.pathname.startsWith("/chat") ? "chat"
+    : loc.pathname.startsWith("/rewards") ? "rewards"
+    : loc.pathname.startsWith("/usage") ? "usage"
+    : loc.pathname.startsWith("/docs") ? "docs" : "overview";
+  // 奖励功能关闭时,强制回退到概览页
+  const effectiveSection = section === "rewards" && !rewardsEnabled ? "overview" as Section : section;
+  const title = section === "chat" ? "对话" : section === "rewards" ? "奖励"
+    : section === "usage" ? "用量明细" : section === "docs" ? "API 文档" : "概览";
 
   const loadUsage = async () => {
     try {
@@ -249,6 +253,10 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     } catch (e: any) { if (String(e.message).includes("auth")) onLogout(); }
   };
   useEffect(() => { refresh(); }, []);
+
+  useEffect(() => {
+    api.config().then((c) => setRewardsEnabled(c.rewards_enabled)).catch(() => {});
+  }, []);
 
   useEffect(() => {
     api.series(seriesDays).then((ser) => setSeries(ser.data)).catch(() => {});
@@ -273,7 +281,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         <button className="md:hidden" onClick={() => setMobileOpen(false)}><X className="h-5 w-5" /></button>
       </div>
       <nav className="flex-1 space-y-1 px-2">
-        {NAV.map((n) => (
+        {nav.map((n) => (
           <NavLink key={n.path} to={n.path} end={n.path === "/"} onClick={() => setMobileOpen(false)}
             className={({ isActive }) => cn("flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",
               isActive ? "bg-accent font-medium text-foreground" : "text-muted-foreground hover:bg-accent")}>
@@ -306,9 +314,9 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           <span className="text-sm font-medium">{title}</span>
         </header>
 
-        {section === "chat" ? (
+        {effectiveSection === "chat" ? (
           <ChatView models={models} onSent={refresh} />
-        ) : section === "docs" ? (
+        ) : effectiveSection === "docs" ? (
           <div className="min-h-0 flex-1 overflow-auto">
             <div className="p-4 md:p-6">
               <DocsView />
@@ -317,7 +325,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         ) : (
           <div className="min-h-0 flex-1 overflow-auto">
             <div className="p-4 md:p-6">
-              {section === "overview" ? (
+              {effectiveSection === "overview" ? (
                 <div className="space-y-5">
                   <Card>
                     <CardContent className="pt-5">
@@ -397,7 +405,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                     </CardContent>
                   </Card>
                 </div>
-              ) : section === "rewards" ? (
+              ) : effectiveSection === "rewards" ? (
                 <RewardsView />
               ) : (
                 <Card>

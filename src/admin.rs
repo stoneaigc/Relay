@@ -2016,6 +2016,42 @@ pub async fn cache_clear(
     Ok(Json(json!({ "ok": true })))
 }
 
+// ---- 系统配置:门户 ----
+
+/// GET /admin/settings/portal -- 回显门户配置。
+pub async fn get_portal_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let kv = storage::load_settings(&state.db, crate::settings::PORTAL_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let rewards_enabled = kv
+        .get(crate::settings::K_PORTAL_REWARDS_ENABLED)
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    Ok(Json(json!({ "rewards_enabled": rewards_enabled })))
+}
+
+#[derive(Deserialize)]
+pub struct PortalSettingsBody {
+    pub rewards_enabled: bool,
+}
+
+/// POST /admin/settings/portal -- 保存门户配置。
+pub async fn save_portal_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<PortalSettingsBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    storage::set_setting(&state.db, crate::settings::K_PORTAL_REWARDS_ENABLED, &body.rewards_enabled.to_string())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 // ---- 系统配置:embedding(L2 语义缓存供应商) ----
 
 /// GET /admin/settings/embedding -- 回显 embedding 配置(api_key 不回显,仅返回 has_key)。
