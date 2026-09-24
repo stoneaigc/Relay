@@ -229,10 +229,12 @@ export const api = {
     req("/admin/api/models/batch-delete", { method: "POST", body: JSON.stringify({ ids }) }),
   testModel: (id: number): Promise<{ ok: boolean; latency_ms?: number; error?: string }> =>
     req(`/admin/api/models/${id}/test`, { method: "POST" }),
-  fetchModelList: (body: { kind: string; base_url: string; api_key?: string }): Promise<{ ok: boolean; models?: string[]; error?: string }> =>
+  fetchModelList: (body: { kind: string; base_url: string; api_key?: string; provider?: string }): Promise<{ ok: boolean; models?: string[]; error?: string }> =>
     req("/admin/api/models/fetch-list", { method: "POST", body: JSON.stringify(body) }),
   addModelsBatch: (body: { kind: string; base_url: string; api_key?: string; display_name?: string; models: { upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null }[] }): Promise<{ ok: boolean; provider?: string; provider_created?: boolean; added?: number; skipped?: number }> =>
     req("/admin/api/models/batch", { method: "POST", body: JSON.stringify(body) }),
+  addModelsToProvider: (name: string, models: { upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null }[]): Promise<{ ok: boolean; added?: number; skipped?: number }> =>
+    req(`/admin/api/providers/${encodeURIComponent(name)}/models/batch`, { method: "POST", body: JSON.stringify({ models }) }),
   providerExists: (base_url: string, api_key?: string): Promise<{ exists: boolean; name?: string; models?: string[] }> =>
     req("/admin/api/providers/exists", { method: "POST", body: JSON.stringify({ base_url, api_key }) }),
   providerHealth: (rangeSecs = 3600): Promise<ProviderHealthResp> =>

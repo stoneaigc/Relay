@@ -423,6 +423,19 @@ pub async fn find_provider_by_credentials(
     Ok(name)
 }
 
+/// 判断供应商名是否存在。
+pub async fn provider_name_exists(pool: &Db, name: &str) -> anyhow::Result<bool> {
+    Ok(q!("SELECT name FROM providers WHERE name = ?")
+        .bind(name).fetch_optional(pool).await?.is_some())
+}
+
+/// 读取供应商存储的 API key(空视为无)。
+pub async fn provider_api_key(pool: &Db, name: &str) -> anyhow::Result<Option<String>> {
+    let row = q!("SELECT api_key FROM providers WHERE name = ?")
+        .bind(name).fetch_optional(pool).await?;
+    Ok(row.and_then(|r| r.get::<Option<String>, _>("api_key")).filter(|k| !k.is_empty()))
+}
+
 /// 列出所有 provider，附带模型数量。支持分页。
 pub async fn list_providers(pool: &Db, page: Option<u32>, page_size: Option<u32>) -> anyhow::Result<(Vec<serde_json::Value>, u64)> {
     let total: i64 = q!("SELECT COUNT(*) as cnt FROM providers").fetch_one(pool).await?.get("cnt");

@@ -1000,6 +1000,42 @@ function ModelsPanel() {
   );
 }
 
+// ---- 模型挑选列表(添加上游/编辑上游共用):筛选 + 全选 + 已存在标记 ----
+function ModelPickList({ models, selected, setSelected, existing }: {
+  models: string[];
+  selected: Set<string>;
+  setSelected: React.Dispatch<React.SetStateAction<Set<string>>>;
+  existing?: Set<string>;
+}) {
+  const [filter, setFilter] = useState("");
+  const shown = models.filter((m) => m.toLowerCase().includes(filter.trim().toLowerCase()));
+  const toggle = (m: string) => setSelected((prev) => { const n = new Set(prev); if (n.has(m)) n.delete(m); else n.add(m); return n; });
+  const toggleAll = () => {
+    const allSel = shown.length > 0 && shown.every((m) => selected.has(m));
+    setSelected((prev) => { const n = new Set(prev); for (const m of shown) { if (allSel) n.delete(m); else n.add(m); } return n; });
+  };
+  return (
+    <div className="rounded-lg border bg-card">
+      <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
+        <span className="shrink-0 text-sm font-medium">勾选模型 ({selected.size}/{models.length})</span>
+        <Input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="筛选模型名…" className="h-7 flex-1 text-xs" />
+        <button className="shrink-0 text-xs text-primary hover:underline" onClick={toggleAll}>{shown.length > 0 && shown.every((m) => selected.has(m)) ? "取消全选" : "全选"}</button>
+      </div>
+      <div className="max-h-72 overflow-y-auto">
+        {shown.map((m) => (
+          <label key={m} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-accent">
+            <input type="checkbox" checked={selected.has(m)} onChange={() => toggle(m)} className="h-4 w-4 rounded border-input" />
+            <span className="flex-1">{m}</span>
+            {existing?.has(m) && <span className="shrink-0 text-[10px] text-muted-foreground">已存在</span>}
+            {selected.has(m) && <Check className="h-4 w-4 text-primary" />}
+          </label>
+        ))}
+        {shown.length === 0 && <p className="px-3 py-2 text-xs text-muted-foreground">无匹配模型</p>}
+      </div>
+    </div>
+  );
+}
+
 // ---- 编辑供应商对话框 ----
 function EditProviderDialog({ provider, onClose, onSaved }: { provider: ProviderRow; onClose: () => void; onSaved: () => void }) {
   const [dn, setDn] = useState(provider.display_name || "");
@@ -1007,6 +1043,12 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
   const [apiKey, setApiKey] = useState("");
   const [err, setErr] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [existing, setExisting] = useState<Set<string>>(new Set());
+  const [pickSelected, setPickSelected] = useState<Set<string>>(new Set());
+  const [fetching, setFetching] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [pickMsg, setPickMsg] = useState("");
 
   const submit = async () => {
     setErr(""); setSubmitting(true);
@@ -1015,6 +1057,36 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
       onSaved();
     } catch (e: any) { setErr(e.message); }
     setSubmitting(false);
+  };
+
+  // 从上游拉取最新模型列表;key 留空时后端自动回退用该供应商存储的密钥。
+  const doFetchModels = async () => {
+    setFetching(true); setPickMsg(""); setPickSelected(new Set());
+    try {
+      const r = await api.fetchModelList({ kind: provider.kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, provider: provider.name });
+      if (r.ok && r.models) {
+        setFetchedModels(r.models);
+        const cur = await api.providerModels(provider.name);
+        setExisting(new Set(cur.data.map((m) => m.upstream_model)));
+      } else { setPickMsg(r.error || "获取失败"); setFetchedModels([]); }
+    } catch (e: any) { setPickMsg(e.message); setFetchedModels([]); }
+    setFetching(false);
+  };
+
+  // 把勾选的模型增量添加到本供应商(已存在的自动跳过)。
+  const addPicked = async () => {
+    if (pickSelected.size === 0) return;
+    setAdding(true); setPickMsg("");
+    try {
+      const items = [...pickSelected].map((m) => ({ upstream_model: m, label: m }));
+      const r = await api.addModelsToProvider(provider.name, items);
+      setPickMsg(`已添加 ${r.added ?? 0} 个,跳过已存在 ${r.skipped ?? 0} 个`);
+      setPickSelected(new Set());
+      const cur = await api.providerModels(provider.name);
+      setExisting(new Set(cur.data.map((m) => m.upstream_model)));
+      onSaved();
+    } catch (e: any) { setPickMsg(e.message); }
+    setAdding(false);
   };
 
   return (
@@ -1029,10 +1101,30 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
           <div><label className="mb-1 block text-xs text-muted-foreground">API Key</label>
             <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="留空保持原密钥" /></div>
           {err && <p className="text-sm text-destructive">{err}</p>}
-        </div>
-        <div className="flex justify-end gap-2">
-          <Button variant="ghost" onClick={onClose}>取消</Button>
-          <Button onClick={submit} disabled={submitting}>{submitting ? "保存中..." : "保存"}</Button>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={onClose}>取消</Button>
+            <Button onClick={submit} disabled={submitting}>{submitting ? "保存中..." : "保存"}</Button>
+          </div>
+          <div className="border-t pt-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-sm font-medium">上游模型</span>
+              <Button type="button" variant="outline" size="sm" onClick={doFetchModels} disabled={fetching || !baseUrl.trim()}>
+                <Search className="h-3.5 w-3.5 mr-1" />{fetching ? "获取中..." : fetchedModels.length > 0 ? "重新获取" : "获取模型列表"}
+              </Button>
+            </div>
+            {fetchedModels.length > 0 && (
+              <>
+                <ModelPickList models={fetchedModels} selected={pickSelected} setSelected={setPickSelected} existing={existing} />
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <span className="text-xs text-muted-foreground">{pickMsg || "已存在的模型会自动跳过"}</span>
+                  <Button size="sm" onClick={addPicked} disabled={adding || pickSelected.size === 0}>
+                    <Plus className="h-3.5 w-3.5 mr-1" />{adding ? "添加中..." : `添加所选 (${pickSelected.size})`}
+                  </Button>
+                </div>
+              </>
+            )}
+            {pickMsg && fetchedModels.length === 0 && <p className="text-xs text-destructive">{pickMsg}</p>}
+          </div>
         </div>
       </DialogContent>
     </Dialog>
@@ -1052,7 +1144,14 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
   const [submitting, setSubmitting] = useState(false);
   const [inputPrice, setInputPrice] = useState("");
   const [outputPrice, setOutputPrice] = useState("");
-  const [listFilter, setListFilter] = useState("");
+  const [tpl, setTpl] = useState("custom");
+
+  // 每次打开都重置为全新状态,避免上一次的填写与探测结果残留。
+  useEffect(() => {
+    if (!open) return;
+    setProvName(""); setKind("openai"); setTpl("custom"); setBaseUrl(""); setApiKey("");
+    setFetchedModels([]); setSelectedModels(new Set()); setErr(""); setInputPrice(""); setOutputPrice("");
+  }, [open]);
 
   const TEMPLATES: Record<string, { kind: string; base_url: string }> = {
     custom: { kind: "", base_url: "" },
@@ -1064,7 +1163,6 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
     moonshot: { kind: "openai", base_url: "https://api.moonshot.cn/v1" },
     ollama: { kind: "openai", base_url: "http://localhost:11434/v1" },
   };
-  const [tpl, setTpl] = useState("custom");
   const applyTemplate = (key: string) => {
     setTpl(key);
     if (key !== "custom") { const t = TEMPLATES[key]; setKind(t.kind); setBaseUrl(t.base_url); }
@@ -1072,26 +1170,13 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
 
   const doFetch = async () => {
     if (!baseUrl.trim()) { setErr("请先填写 Base URL"); return; }
-    setFetching(true); setErr(""); setSelectedModels(new Set()); setListFilter("");
+    setFetching(true); setErr(""); setSelectedModels(new Set());
     try {
       const r = await api.fetchModelList({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined });
       if (r.ok && r.models) setFetchedModels(r.models);
       else { setErr(r.error || "获取失败"); setFetchedModels([]); }
     } catch (e: any) { setErr(e.message); setFetchedModels([]); }
     setFetching(false);
-  };
-
-  const toggle = (m: string) => {
-    setSelectedModels((prev) => { const n = new Set(prev); if (n.has(m)) n.delete(m); else n.add(m); return n; });
-  };
-  const shownModels = fetchedModels.filter((m) => m.toLowerCase().includes(listFilter.trim().toLowerCase()));
-  const toggleAll = () => {
-    const allSel = shownModels.length > 0 && shownModels.every((m) => selectedModels.has(m));
-    setSelectedModels((prev) => {
-      const n = new Set(prev);
-      for (const m of shownModels) { if (allSel) n.delete(m); else n.add(m); }
-      return n;
-    });
   };
 
   const submit = async () => {
@@ -1155,28 +1240,7 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
           <Button type="button" variant="outline" size="sm" onClick={doFetch} disabled={fetching || !baseUrl.trim()} className="w-full">
             <Search className="h-4 w-4 mr-1" />{fetching ? "探测中..." : "探测模型列表"}
           </Button>
-          {fetchedModels.length > 0 && (() => {
-            const shown = shownModels;
-            return (
-            <div className="rounded-lg border bg-card">
-              <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
-                <span className="shrink-0 text-sm font-medium">勾选模型 ({selectedModels.size}/{fetchedModels.length})</span>
-                <Input value={listFilter} onChange={(e) => setListFilter(e.target.value)} placeholder="筛选模型名…" className="h-7 flex-1 text-xs" />
-                <button className="shrink-0 text-xs text-primary hover:underline" onClick={toggleAll}>{shown.length > 0 && shown.every((m) => selectedModels.has(m)) ? "取消全选" : "全选"}</button>
-              </div>
-              <div className="max-h-72 overflow-y-auto">
-                {shown.map((m) => (
-                  <label key={m} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-accent">
-                    <input type="checkbox" checked={selectedModels.has(m)} onChange={() => toggle(m)} className="h-4 w-4 rounded border-input" />
-                    <span className="flex-1">{m}</span>
-                    {selectedModels.has(m) && <Check className="h-4 w-4 text-primary" />}
-                  </label>
-                ))}
-                {shown.length === 0 && <p className="px-3 py-2 text-xs text-muted-foreground">无匹配模型</p>}
-              </div>
-            </div>
-            );
-          })()}
+          {fetchedModels.length > 0 && <ModelPickList models={fetchedModels} selected={selectedModels} setSelected={setSelectedModels} />}
           {err && <p className="text-sm text-destructive">{err}</p>}
         </div>
         <div className="flex justify-end gap-2">

@@ -960,6 +960,44 @@ pub async fn add_models_batch(
     Ok(Json(json!({ "ok": true, "provider": provider, "provider_created": provider_created, "added": added, "skipped": skipped })))
 }
 
+/// POST /admin/providers/:name/models/batch —— 向指定供应商批量添加模型(仅加模型,不改动供应商本身)。
+/// 用于编辑对话框的"获取模型列表→增量添加"。
+#[derive(Deserialize)]
+pub struct AddModelsToProviderReq {
+    pub models: Vec<AddModelBatchItem>,
+}
+
+pub async fn add_models_to_provider_batch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<AddModelsToProviderReq>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if body.models.is_empty() {
+        return Err(ApiError::BadRequest("at least one model required".into()));
+    }
+    if body.models.iter().any(|m| !price_ok(m.input_price) || !price_ok(m.output_price)) {
+        return Err(ApiError::BadRequest("prices must be finite and >= 0".into()));
+    }
+    let exists = storage::provider_name_exists(&state.db, &name)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if !exists {
+        return Err(ApiError::BadRequest("provider not found".into()));
+    }
+    let mut added = 0usize;
+    let mut skipped = 0usize;
+    for m in &body.models {
+        let (_, is_new) = storage::add_model_returning(&state.db, &name, &m.upstream_model, m.label.as_deref(), m.input_price, m.output_price)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        if is_new { added += 1; } else { skipped += 1; }
+    }
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true, "added": added, "skipped": skipped })))
+}
+
 /// POST /admin/models/:id/test —— 向上游发最小请求校验连通性/密钥/模型名。
 pub async fn test_model(
     State(state): State<Arc<AppState>>,
@@ -1016,6 +1054,7 @@ pub struct FetchModelListReq {
     pub kind: String,
     pub base_url: String,
     pub api_key: Option<String>,
+    pub provider: Option<String>, // 编辑场景:未填 key 时回退用该供应商存储的 key
 }
 
 /// POST /admin/models/fetch-list —— 从上游拉取可用模型列表(OpenAI 兼容 /models 端点)。
@@ -1027,8 +1066,17 @@ pub async fn fetch_model_list(
     admin_guard(&state, &headers)?;
     let base = body.base_url.trim().trim_end_matches('/');
     let url = format!("{}/models", base);
+    // key 优先用请求携带的;未携带且指定了供应商时回退用存储的 key(编辑对话框免重输)。
+    let mut key = body.api_key.clone().filter(|k| !k.is_empty());
+    if key.is_none() {
+        if let Some(pn) = body.provider.as_deref().filter(|s| !s.is_empty()) {
+            key = storage::provider_api_key(&state.db, pn)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
+    }
     let mut req = state.http.get(&url);
-    if let Some(k) = body.api_key.as_deref().filter(|k| !k.is_empty()) {
+    if let Some(k) = key.as_deref() {
         if body.kind == "anthropic" {
             req = req.header("x-api-key", k);
         } else {
