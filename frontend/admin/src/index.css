@@ -45,13 +45,11 @@ body {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
 }
 
-/* Modal 统一 sticky footer:DialogContent 整体滚动(max-h-[85dvh]),底部最后一个操作行吸底常驻。 */
+/* Modal 统一 footer:贴左右/底边 + 分隔线;不吸底覆盖内容,随内容流滚动,小视口下不会被 footer 遮挡表单。 */
 [data-dialog-content] > div[class*="justify-end"][class*="gap-2"]:last-of-type,
 [data-dialog-content] > div[class*="justify-between"][class*="gap-2"]:last-of-type {
-  position: sticky;
-  bottom: 0;
   margin: 0 -1.5rem -1.5rem;
-  padding: 1rem 1.5rem 1.5rem;
+  padding: 0.75rem 1.5rem 1.25rem;
   background: var(--color-card);
   border-top: 1px solid var(--color-border);
   border-radius: 0 0 0.75rem 0.75rem;
