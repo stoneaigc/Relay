@@ -937,11 +937,11 @@ function ModelsPanel() {
                           onChange={(e) => toggleSelectAll(p.name, e.target.checked)} />
                         全选
                       </label>
-                      {selectedInProvider(p.name).length > 0 && (
-                        <Button variant="destructive" size="sm" className="h-7 text-xs" onClick={() => delSelected(p.name, selectedInProvider(p.name))}>
-                          <Trash2 className="h-3 w-3" />删除所选({selectedInProvider(p.name).length})
-                        </Button>
-                      )}
+                      {/* 常显:让"可多选批量删除"一眼可见,未勾选时置灰。 */}
+                      <Button variant="destructive" size="sm" className="h-7 text-xs" disabled={selectedInProvider(p.name).length === 0}
+                        onClick={() => delSelected(p.name, selectedInProvider(p.name))}>
+                        <Trash2 className="h-3 w-3" />删除所选({selectedInProvider(p.name).length})
+                      </Button>
                     </div>
                   )}
                   {providerModels[p.name]?.map((m) => (
