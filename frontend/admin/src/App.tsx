@@ -965,10 +965,10 @@ function ModelsPanel() {
                           if (r) return <span className={cn("text-xs", r.ok ? "text-success" : "text-destructive")} title={r.msg}>{r.ok ? `✓ ${r.msg}` : `✗ ${r.msg}`}</span>;
                           return null;
                         })()}
-                        <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => runTest(m.id)}><Activity className="h-3 w-3" /></Button>
-                        <Button variant="ghost" size="sm" className="h-7 px-2" title="价格" onClick={() => setPriceTarget({ p, m })}><DollarSign className="h-3 w-3" /></Button>
-                        <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => setEditModel({ id: m.id, label: m.label, kind: p.kind, base_url: p.base_url, upstream_model: m.upstream_model, provider: p.name, input_price: m.input_price, output_price: m.output_price })}><Pencil className="h-3 w-3" /></Button>
-                        <Button variant="ghost" size="sm" className="h-7 px-2 text-destructive" onClick={() => delModel(p.name, m)}><Trash2 className="h-3 w-3" /></Button>
+                        <Button variant="ghost" size="sm" className="h-7 px-2" title="测试连通性" onClick={() => runTest(m.id)}><Activity className="h-3 w-3" /></Button>
+                        <Button variant="ghost" size="sm" className="h-7 px-2" title="模型定价" onClick={() => setPriceTarget({ p, m })}><DollarSign className="h-3 w-3" /></Button>
+                        <Button variant="ghost" size="sm" className="h-7 px-2" title="编辑模型" onClick={() => setEditModel({ id: m.id, label: m.label, kind: p.kind, base_url: p.base_url, upstream_model: m.upstream_model, provider: p.name, input_price: m.input_price, output_price: m.output_price })}><Pencil className="h-3 w-3" /></Button>
+                        <Button variant="ghost" size="sm" className="h-7 px-2 text-destructive" title="删除模型" onClick={() => delModel(p.name, m)}><Trash2 className="h-3 w-3" /></Button>
                       </div>
                     </div>
                   ))}
@@ -987,7 +987,13 @@ function ModelsPanel() {
       </Card>
       <AddProviderDialog open={addDlg} onClose={() => setAddDlg(false)} onSaved={loadProviders} />
       {editProvider && <EditProviderDialog provider={editProvider} onClose={() => setEditProvider(null)} onSaved={() => { setEditProvider(null); loadProviders(); }} />}
-      {editModel && <EditModelDialog model={editModel} onClose={() => setEditModel(null)} onSaved={() => { setEditModel(null); loadProviders(); }} />}
+      {editModel && <EditModelDialog model={editModel} onClose={() => setEditModel(null)} onSaved={() => {
+        // 保存成功后必须同步刷新展开中的模型列表,否则界面停留在旧数据,看起来像"修改不生效"。
+        const prov = editModel.provider;
+        setEditModel(null);
+        loadProviders();
+        if (prov && expanded.has(prov)) refreshProviderModels(prov);
+      }} />}
       {priceTarget && <PricingDialog provider={priceTarget.p} model={priceTarget.m} onClose={() => setPriceTarget(null)} onSaved={() => { setPriceTarget(null); if (expanded.has(priceTarget.p.name)) refreshProviderModels(priceTarget.p.name); }} />}
       <ConfirmDialog confirm={confirm} onClose={() => setConfirm(null)} />
     </div>
@@ -1042,6 +1048,7 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
   const [submitting, setSubmitting] = useState(false);
   const [inputPrice, setInputPrice] = useState("");
   const [outputPrice, setOutputPrice] = useState("");
+  const [listFilter, setListFilter] = useState("");
 
   const TEMPLATES: Record<string, { kind: string; base_url: string }> = {
     custom: { kind: "", base_url: "" },
@@ -1061,7 +1068,7 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
 
   const doFetch = async () => {
     if (!baseUrl.trim()) { setErr("请先填写 Base URL"); return; }
-    setFetching(true); setErr(""); setSelectedModels(new Set());
+    setFetching(true); setErr(""); setSelectedModels(new Set()); setListFilter("");
     try {
       const r = await api.fetchModelList({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined });
       if (r.ok && r.models) setFetchedModels(r.models);
@@ -1073,9 +1080,14 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
   const toggle = (m: string) => {
     setSelectedModels((prev) => { const n = new Set(prev); if (n.has(m)) n.delete(m); else n.add(m); return n; });
   };
+  const shownModels = fetchedModels.filter((m) => m.toLowerCase().includes(listFilter.trim().toLowerCase()));
   const toggleAll = () => {
-    if (selectedModels.size === fetchedModels.length) setSelectedModels(new Set());
-    else setSelectedModels(new Set(fetchedModels));
+    const allSel = shownModels.length > 0 && shownModels.every((m) => selectedModels.has(m));
+    setSelectedModels((prev) => {
+      const n = new Set(prev);
+      for (const m of shownModels) { if (allSel) n.delete(m); else n.add(m); }
+      return n;
+    });
   };
 
   const submit = async () => {
@@ -1137,23 +1149,28 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
           <Button type="button" variant="outline" size="sm" onClick={doFetch} disabled={fetching || !baseUrl.trim()} className="w-full">
             <Search className="h-4 w-4 mr-1" />{fetching ? "探测中..." : "探测模型列表"}
           </Button>
-          {fetchedModels.length > 0 && (
+          {fetchedModels.length > 0 && (() => {
+            const shown = shownModels;
+            return (
             <div className="rounded-lg border bg-card">
-              <div className="flex items-center justify-between border-b px-3 py-2">
-                <span className="text-sm font-medium">勾选模型 ({selectedModels.size}/{fetchedModels.length})</span>
-                <button className="text-xs text-primary hover:underline" onClick={toggleAll}>{selectedModels.size === fetchedModels.length ? "取消全选" : "全选"}</button>
+              <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
+                <span className="shrink-0 text-sm font-medium">勾选模型 ({selectedModels.size}/{fetchedModels.length})</span>
+                <Input value={listFilter} onChange={(e) => setListFilter(e.target.value)} placeholder="筛选模型名…" className="h-7 flex-1 text-xs" />
+                <button className="shrink-0 text-xs text-primary hover:underline" onClick={toggleAll}>{shown.length > 0 && shown.every((m) => selectedModels.has(m)) ? "取消全选" : "全选"}</button>
               </div>
-              <div className="max-h-52 overflow-y-auto">
-                {fetchedModels.map((m) => (
+              <div className="max-h-72 overflow-y-auto">
+                {shown.map((m) => (
                   <label key={m} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-accent">
                     <input type="checkbox" checked={selectedModels.has(m)} onChange={() => toggle(m)} className="h-4 w-4 rounded border-input" />
                     <span className="flex-1">{m}</span>
                     {selectedModels.has(m) && <Check className="h-4 w-4 text-primary" />}
                   </label>
                 ))}
+                {shown.length === 0 && <p className="px-3 py-2 text-xs text-muted-foreground">无匹配模型</p>}
               </div>
             </div>
-          )}
+            );
+          })()}
           {err && <p className="text-sm text-destructive">{err}</p>}
         </div>
         <div className="flex justify-end gap-2">
@@ -1290,6 +1307,7 @@ function GroupsPanel() {
   const [timeRules, setTimeRules] = useState<TimeRuleRow[]>([]);
   const [gq, setGq] = useState("");
   const [groupOpen, setGroupOpen] = useState(false);
+  const [renameDlg, setRenameDlg] = useState<GroupRow | null>(null);
   const [routeDlg, setRouteDlg] = useState<{ edit: RouteRow | null } | null>(null);
   const [timeRuleDlg, setTimeRuleDlg] = useState<{ edit: TimeRuleRow | null } | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
@@ -1396,12 +1414,14 @@ function GroupsPanel() {
                   {g.is_active && <Badge variant="success" className="shrink-0 text-[10px]">默认</Badge>}
                 </span>
                 <span className="flex shrink-0 items-center gap-1">
-                  <button title={g.is_active ? "当前默认组" : "设为默认(新用户注册自动绑定)"}
-                    className={cn("transition-colors", g.is_active ? "text-amber-500" : "opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-amber-500")}
+                  <button title={g.is_active ? "当前默认组" : "设为默认(新用户注册自动绑定)"} aria-label={`${g.is_active ? "当前默认组" : "设为默认"}: ${g.name}`}
+                    className={cn("transition-colors", g.is_active ? "text-amber-500" : "text-muted-foreground hover:text-amber-500")}
                     onClick={(e) => { e.stopPropagation(); setActive(g); }}>
                     <Star className={cn("h-3.5 w-3.5", g.is_active && "fill-current")} />
                   </button>
-                  <button className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive" onClick={(e) => { e.stopPropagation(); delGroup(g); }}><Trash2 className="h-3.5 w-3.5" /></button>
+                  <button title="重命名模型组" aria-label={`重命名模型组: ${g.name}`} className="text-muted-foreground hover:text-foreground"
+                    onClick={(e) => { e.stopPropagation(); setRenameDlg(g); }}><Pencil className="h-3.5 w-3.5" /></button>
+                  <button title="删除模型组" aria-label={`删除模型组: ${g.name}`} className="text-muted-foreground hover:text-destructive" onClick={(e) => { e.stopPropagation(); delGroup(g); }}><Trash2 className="h-3.5 w-3.5" /></button>
                 </span>
               </div>
             ))}
@@ -1554,10 +1574,40 @@ function GroupsPanel() {
       {sel != null && <AddRouteDialog dlg={routeDlg} groupId={sel} models={models} strategy={curStrategy} onClose={() => setRouteDlg(null)} onSaved={() => loadRoutes(sel)} />}
       {sel != null && <TimeRuleDialog dlg={timeRuleDlg} groupId={sel} onClose={() => setTimeRuleDlg(null)} onSaved={() => loadTimeRules(sel)} />}
       <AddGroupDialog open={groupOpen} onClose={() => setGroupOpen(false)} onCreate={createGroup} />
+      {renameDlg && <RenameGroupDialog group={renameDlg} onClose={() => setRenameDlg(null)} onSaved={loadGroups} />}
       <ImportGroupsDialog open={importOpen} onClose={() => setImportOpen(false)} onImported={() => { loadGroups(); if (sel != null) loadRoutes(sel); }} />
       {batchDlg && <BatchEditDialog field={batchDlg} count={checked.size} onClose={() => setBatchDlg(null)} onApply={(v) => applyBatch(batchDlg, v)} />}
       <ConfirmDialog confirm={confirm} onClose={() => setConfirm(null)} />
     </div>
+  );
+}
+
+function RenameGroupDialog({ group, onClose, onSaved }: { group: GroupRow; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState(group.name);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    if (!name.trim() || name.trim() === group.name) { onClose(); return; }
+    setErr(""); setBusy(true);
+    try { await api.renameGroup(group.id, name.trim()); onSaved(); onClose(); } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>重命名模型组</DialogTitle>
+          <DialogDescription>当前组名:{group.name}。组内路由、用户绑定不受影响。</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <Input value={name} onChange={(e) => setName(e.target.value)} autoFocus onKeyDown={(e) => e.key === "Enter" && submit()} />
+          {err && <p className="text-sm text-destructive">{err}</p>}
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>取消</Button>
+          <Button onClick={submit} disabled={busy || !name.trim()}>{busy ? "保存中..." : "保存"}</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

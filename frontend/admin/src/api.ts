@@ -241,6 +241,8 @@ export const api = {
   addGroup: (name: string) => req("/admin/api/groups", { method: "POST", body: JSON.stringify({ name }) }),
   deleteGroup: (id: number) => req(`/admin/api/groups/${id}`, { method: "DELETE" }),
   activateGroup: (id: number) => req(`/admin/api/groups/${id}/activate`, { method: "POST" }),
+  renameGroup: (id: number, name: string) =>
+    req(`/admin/api/groups/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
   setGroupStrategy: (id: number, strategy: string) =>
     req(`/admin/api/groups/${id}/strategy`, { method: "POST", body: JSON.stringify({ strategy }) }),
 

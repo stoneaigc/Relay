@@ -593,6 +593,17 @@ pub async fn delete_group(pool: &Db, id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 重命名模型组。返回 Ok(false) 表示目标组名已被其他组占用。
+pub async fn rename_group(pool: &Db, id: i64, name: &str) -> anyhow::Result<bool> {
+    let dup = q!("SELECT id FROM model_groups WHERE name = ? AND id <> ?")
+        .bind(name).bind(id).fetch_optional(pool).await?;
+    if dup.is_some() {
+        return Ok(false);
+    }
+    q!("UPDATE model_groups SET name = ? WHERE id = ?").bind(name).bind(id).execute(pool).await?;
+    Ok(true)
+}
+
 pub async fn list_groups(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = q!("SELECT id, name, is_active, strategy FROM model_groups ORDER BY id")
         .fetch_all(pool).await?;

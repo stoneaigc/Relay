@@ -1196,6 +1196,32 @@ pub struct SetGroupStrategy {
     pub strategy: String,
 }
 
+#[derive(Deserialize)]
+pub struct RenameGroup {
+    pub name: String,
+}
+
+/// PATCH /admin/groups/:id —— 重命名模型组。
+pub async fn rename_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<RenameGroup>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if body.name.trim().is_empty() {
+        return Err(ApiError::BadRequest("name required".into()));
+    }
+    let ok = storage::rename_group(&state.db, id, body.name.trim())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if !ok {
+        return Err(ApiError::BadRequest("组名已存在".into()));
+    }
+    rebuild_routing(&state).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
 /// POST /admin/groups/:id/strategy —— 设置该组的负载策略。
 pub async fn set_group_strategy(
     State(state): State<Arc<AppState>>,
