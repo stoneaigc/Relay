@@ -791,6 +791,7 @@ function ModelsPanel() {
   const [pageMeta, setPageMeta] = useState({ total: 0, total_pages: 1 });
   const [providerSearch, setProviderSearch] = useState("");
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [provSelected, setProvSelected] = useState<Set<string>>(new Set());
   const [health, setHealth] = useState<Record<string, ProviderHealthItem>>({});
 
   const loadProviders = async (p?: number) => {
@@ -834,10 +835,33 @@ function ModelsPanel() {
   };
 
   const delProvider = (p: ProviderRow) => setConfirm({
-    title: `删除上游「${p.name}」?`,
+    title: `删除上游「${providerDisplayName(p)}」?`,
     desc: `将删除该上游下的 ${p.model_count} 个模型及其所有路由，不可恢复。`,
     action: async () => { await api.deleteProvider(p.name); loadProviders(); },
   });
+
+  // 供应商级多选批量删除:卡片头部复选框勾选,头部"删除所选"一键级联删除。
+  const toggleProviderSelect = (name: string, checked: boolean) =>
+    setProvSelected((s) => { const n = new Set(s); if (checked) n.add(name); else n.delete(name); return n; });
+
+  const delSelectedProviders = () => {
+    const ps = providers.filter((p) => provSelected.has(p.name));
+    if (ps.length === 0) return;
+    const total = ps.reduce((acc, p) => acc + p.model_count, 0);
+    const names = ps.map((p) => providerDisplayName(p)).join("、");
+    setConfirm({
+      title: `批量删除 ${ps.length} 个上游?`,
+      desc: `将删除：${names}，共 ${total} 个模型及其所有组内路由，不可恢复。`,
+      action: async () => {
+        for (const p of ps) await api.deleteProvider(p.name);
+        // 同步清理已勾选的模型行选择,避免残留失效 id。
+        const ids = ps.flatMap((p) => (providerModels[p.name] || []).map((m) => m.id));
+        setSelected((s) => { const n = new Set(s); ids.forEach((id) => n.delete(id)); return n; });
+        setProvSelected(new Set());
+        await loadProviders();
+      },
+    });
+  };
 
   const delModel = (provider: string, m: { id: number; upstream_model: string }) => setConfirm({
     title: `删除模型「${m.upstream_model}」?`,
@@ -893,7 +917,13 @@ function ModelsPanel() {
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
             <CardTitle className="text-base">上游供应商({pageMeta.total})</CardTitle>
-            <Button size="sm" onClick={() => setAddDlg(true)}><Plus className="h-4 w-4" />添加上游</Button>
+            <div className="flex items-center gap-2">
+              {/* 常显:配合卡片头部复选框做供应商级批量删除,未勾选时置灰。 */}
+              <Button variant="destructive" size="sm" disabled={provSelected.size === 0} onClick={delSelectedProviders}>
+                <Trash2 className="h-4 w-4" />删除所选({provSelected.size})
+              </Button>
+              <Button size="sm" onClick={() => setAddDlg(true)}><Plus className="h-4 w-4" />添加上游</Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -907,6 +937,12 @@ function ModelsPanel() {
               {/* Provider 头部 */}
               <div className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-muted/50" onClick={() => toggleExpand(p.name)}>
                 <div className="flex items-center gap-3">
+                  <input type="checkbox" className="h-4 w-4 shrink-0 rounded border-input"
+                    title="勾选该上游(配合顶部删除所选批量删除)"
+                    aria-label={`选择上游: ${providerDisplayName(p)}`}
+                    checked={provSelected.has(p.name)}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => toggleProviderSelect(p.name, e.target.checked)} />
                   <Zap className="h-4 w-4 text-primary" />
                   <div>
                     <div className="flex items-center gap-2 text-sm font-medium">
