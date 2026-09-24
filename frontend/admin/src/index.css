@@ -54,3 +54,18 @@ body {
   border-top: 1px solid var(--color-border);
   border-radius: 0 0 0.75rem 0.75rem;
 }
+
+/* Modal 滚动条隐形化:6px 细圆角半透明,悬浮才加深,避免 Windows 宽灰条破坏弹窗观感。 */
+[data-dialog-content]::-webkit-scrollbar {
+  width: 6px;
+}
+[data-dialog-content]::-webkit-scrollbar-track {
+  background: transparent;
+}
+[data-dialog-content]::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: rgb(0 0 0 / 0.14);
+}
+[data-dialog-content]::-webkit-scrollbar-thumb:hover {
+  background: rgb(0 0 0 / 0.3);
+}
