@@ -99,22 +99,47 @@ function NotFoundPanel() {
   );
 }
 
-const NAV: { path: string; label: string; icon: any }[] = [
-  { path: "/overview", label: "概览", icon: LayoutDashboard },
-  { path: "/users", label: "用户管理", icon: UsersIcon },
-  { path: "/models", label: "模型", icon: Boxes },
-  { path: "/upstreams", label: "上游治理", icon: Zap },
-  { path: "/metrics", label: "接口指标", icon: Activity },
-  { path: "/request-logs", label: "请求链路", icon: GitBranch },
-  { path: "/audit", label: "操作审计", icon: ShieldCheck },
-  { path: "/groups", label: "模型组", icon: Layers },
-  { path: "/rewards", label: "奖励审核", icon: Gift },
-  { path: "/reward-tasks", label: "奖励设置", icon: Star },
-  { path: "/usage", label: "全局用量", icon: BarChart3 },
-  { path: "/cache", label: "缓存", icon: Database },
-  { path: "/docs", label: "API 文档", icon: BookOpen },
-  { path: "/settings", label: "设置", icon: Settings },
+// 侧边栏分组:按管理员心智模型归组——日常运营 / 模型与上游 / 监控排查 / 系统;空标题组(概览)置顶不缩进。
+const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: any }[] }[] = [
+  {
+    title: "",
+    items: [{ path: "/overview", label: "概览", icon: LayoutDashboard }],
+  },
+  {
+    title: "运营",
+    items: [
+      { path: "/users", label: "用户管理", icon: UsersIcon },
+      { path: "/rewards", label: "奖励审核", icon: Gift },
+      { path: "/reward-tasks", label: "奖励设置", icon: Star },
+    ],
+  },
+  {
+    title: "模型与上游",
+    items: [
+      { path: "/models", label: "上游模型", icon: Boxes },
+      { path: "/groups", label: "模型组", icon: Layers },
+    ],
+  },
+  {
+    title: "监控",
+    items: [
+      { path: "/upstreams", label: "上游治理", icon: Zap },
+      { path: "/metrics", label: "接口指标", icon: Activity },
+      { path: "/request-logs", label: "请求链路", icon: GitBranch },
+      { path: "/cache", label: "语义缓存", icon: Database },
+      { path: "/usage", label: "全局用量", icon: BarChart3 },
+      { path: "/audit", label: "操作审计", icon: ShieldCheck },
+    ],
+  },
+  {
+    title: "系统",
+    items: [
+      { path: "/docs", label: "API 文档", icon: BookOpen },
+      { path: "/settings", label: "设置", icon: Settings },
+    ],
+  },
 ];
+const NAV = NAV_GROUPS.flatMap((g) => g.items);
 
 function Console({ onLogout }: { onLogout: () => void }) {
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -140,13 +165,20 @@ function Console({ onLogout }: { onLogout: () => void }) {
         </div>
         <button className="md:hidden" onClick={() => setMobileOpen(false)}><X className="h-5 w-5" /></button>
       </div>
-      <nav className="flex-1 space-y-1 px-2">
-        {NAV.map((n) => (
-          <NavLink key={n.path} to={n.path} onClick={() => setMobileOpen(false)}
-            className={({ isActive }) => cn("flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",
-              isActive ? "bg-accent font-medium text-foreground" : "text-muted-foreground hover:bg-accent")}>
-            <n.icon className="h-4 w-4 shrink-0" /> {n.label}
-          </NavLink>
+      <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 py-1">
+        {NAV_GROUPS.map((g, gi) => (
+          <div key={gi} className={cn(gi > 0 && "mt-3")}>
+            {g.title && (
+              <div className="px-3 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/60">{g.title}</div>
+            )}
+            {g.items.map((n) => (
+              <NavLink key={n.path} to={n.path} onClick={() => setMobileOpen(false)}
+                className={({ isActive }) => cn("flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",
+                  isActive ? "bg-accent font-medium text-foreground" : "text-muted-foreground hover:bg-accent")}>
+                <n.icon className="h-4 w-4 shrink-0" /> {n.label}
+              </NavLink>
+            ))}
+          </div>
         ))}
       </nav>
       <div className="px-2 py-3">
