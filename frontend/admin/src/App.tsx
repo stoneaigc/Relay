@@ -17,6 +17,12 @@ import { Toaster } from "sonner";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 
+// 子路径反代兼容:部署在 https://host/relay/admin/ 这类前缀下时,路由 basename 探测为 "/relay/admin"。
+const APP_BASE = (() => {
+  const m = window.location.pathname.match(/^(.*)\/admin(?=\/|$)/);
+  return (m?.[1] ?? "") + "/admin";
+})();
+
 export default function App() {
   const [authed, setAuthed] = useState(!!getToken());
   // 401 凭证失效统一登出:api 层清除 token 后广播此事件,这里切回登录页。
@@ -31,7 +37,7 @@ export default function App() {
       {!authed ? (
         <Login onSuccess={() => setAuthed(true)} />
       ) : (
-        <BrowserRouter basename="/admin">
+        <BrowserRouter basename={APP_BASE}>
           <Console onLogout={() => { clearToken(); setAuthed(false); }} />
         </BrowserRouter>
       )}

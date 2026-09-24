@@ -20,8 +20,9 @@ const baseSlashRedirect = (base: string): Plugin => ({
   },
 });
 
-export default defineConfig({
-  base: "/portal/",
+// dev 固定 /portal/(本地直开);build 用相对路径 —— 产物可挂在任意反代子路径下(如 https://host/relay/)。
+export default defineConfig(({ command }) => ({
+  base: command === "serve" ? "/portal/" : "./",
   plugins: [baseSlashRedirect("/portal/"), react(), tailwindcss()],
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
@@ -30,4 +31,4 @@ export default defineConfig({
     port: 5173,
     proxy: { "/portal/api": "http://localhost:8080" },
   },
-});
+}));

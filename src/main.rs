@@ -29,16 +29,61 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use axum::{
+    extract::Request,
+    middleware::Next,
+    response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Router,
 };
 use dashmap::DashMap;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
+use tower::Layer as _;
 
 use crate::config::Config;
 use crate::state::{AppState, AUDIT_FAILURE_CAP, UsageEvent};
 
 use chrono::{Datelike, Timelike};
+
+/// 子路径反代兼容:nginx 若不剥离前缀(如 location /relay/ 直接转发),
+/// 请求会以 /relay/admin/... 到达网关;此中间件把 admin/portal 之前的前缀剥掉,
+/// 使网关在"域名+端口+任意路径"代理下均可工作。已挂在根路径(/admin、/portal)的请求原样通过。
+/// 无结尾斜杠的入口(如 /relay/admin)301 重定向到带斜杠的原始路径,保证相对资源引用正确解析。
+async fn strip_web_prefix(req: Request, next: Next) -> Response {
+    let path = req.uri().path().to_string();
+    let stripped = ["admin", "portal"].iter().find_map(|app| {
+        let pat = format!("/{app}");
+        let idx = path.find(&pat)?;
+        // idx==0 说明请求本就挂在根路径(如 /admin/...),无前缀可剥;
+        // 模式自带前导斜杠,".../xadmin/..." 不会被误匹配。
+        if idx == 0 {
+            return None;
+        }
+        let rest = &path[idx + pat.len()..];
+        if !rest.is_empty() && !rest.starts_with('/') {
+            return None;
+        }
+        Some(format!("{pat}{rest}"))
+    });
+    match stripped {
+        // 入口无结尾斜杠:301 到原始路径+斜杠(保留反代前缀),相对资源才能落在正确目录。
+        Some(p) if p == "/admin" || p == "/portal" => {
+            Redirect::permanent(&format!("{path}/")).into_response()
+        }
+        Some(new_path) => {
+            let (mut parts, body) = req.into_parts();
+            let pq = match parts.uri.query() {
+                Some(q) => format!("{new_path}?{q}"),
+                None => new_path,
+            };
+            if let Ok(uri) = pq.parse() {
+                parts.uri = uri;
+            }
+            next.run(Request::from_parts(parts, body)).await
+        }
+        // 无前缀(根路径部署):原样通过。
+        None => next.run(req).await,
+    }
+}
 
 /// 解析高峰/低谷时区:优先按 IANA 名解析为秒偏移(Asia/Shanghai → 28800);
 /// 解析失败时回退到 tz_offset_hours * 3600 秒偏移。
@@ -349,12 +394,17 @@ async fn main() -> anyhow::Result<()> {
         .nest_service("/portal", spa("portal"))
         .nest_service("/admin", spa("admin"))
         .route("/", get(|| async { axum::response::Redirect::to("/portal/") }));
+    // 子路径反代兼容:URI 改写必须在路由匹配之前生效,故包在 Router 外层
+    // (Router::layer 的中间件在匹配后才执行,改 URI 无效)。
+    let app = axum::middleware::from_fn(strip_web_prefix).layer(app);
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!("Relay listening on {}", bind);
 
     let shutdown_state = Arc::clone(&state);
     // with_connect_info:中间件经 ConnectInfo 提取客户端 IP。
+    // app 已被 strip_web_prefix 包裹,不再是 Router,改用 ServiceExt 的扩展方法。
+    use axum::ServiceExt as _;
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;

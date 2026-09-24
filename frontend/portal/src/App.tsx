@@ -19,6 +19,12 @@ import DocsView from "./ApiDocs";
 
 const GRANT = 10_000_000;
 
+// 子路径反代兼容:部署在 https://host/relay/portal/ 这类前缀下时,路由 basename 探测为 "/relay/portal"。
+const APP_BASE = (() => {
+  const m = window.location.pathname.match(/^(.*)\/portal(?=\/|$)/);
+  return (m?.[1] ?? "") + "/portal";
+})();
+
 const fmtDay = (ts: number) => { const d = new Date(ts * 1000); return `${d.getMonth() + 1}/${d.getDate()}`; };
 
 /** 复制到剪贴板,并给出 ~1.4s 的“已复制”反馈状态。 */
@@ -88,7 +94,7 @@ export default function App() {
   }, []);
   if (!authed) return <Login onSuccess={() => setAuthed(true)} />;
   return (
-    <BrowserRouter basename="/portal">
+    <BrowserRouter basename={APP_BASE}>
       <Dashboard onLogout={() => { clearToken(); setAuthed(false); }} />
     </BrowserRouter>
   );

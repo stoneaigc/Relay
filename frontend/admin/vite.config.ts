@@ -20,8 +20,9 @@ const baseSlashRedirect = (base: string): Plugin => ({
   },
 });
 
-export default defineConfig({
-  base: "/admin/",
+// dev 固定 /admin/(本地直开);build 用相对路径 —— 产物可挂在任意反代子路径下(如 https://host/relay/)。
+export default defineConfig(({ command }) => ({
+  base: command === "serve" ? "/admin/" : "./",
   plugins: [baseSlashRedirect("/admin/"), react(), tailwindcss()],
   resolve: {
     alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) },
@@ -30,4 +31,4 @@ export default defineConfig({
     port: 5174,
     proxy: { "/admin/api": "http://localhost:8080" },
   },
-});
+}));
