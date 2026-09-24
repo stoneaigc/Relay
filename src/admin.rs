@@ -794,11 +794,12 @@ pub async fn delete_provider(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// PUT /admin/providers/:name —— 更新供应商 base_url 和 api_key。
+/// PUT /admin/providers/:name —— 更新供应商 base_url、api_key 和显示名。
 #[derive(Deserialize)]
 pub struct UpdateProvider {
     pub base_url: String,
     pub api_key: Option<String>,
+    pub display_name: Option<String>,
 }
 
 pub async fn update_provider(
@@ -814,7 +815,7 @@ pub async fn update_provider(
     if !valid_base_url(&body.base_url) {
         return Err(ApiError::BadRequest("base_url must be a valid http(s) URL".into()));
     }
-    storage::update_provider(&state.db, &name, body.base_url.trim(), body.api_key.as_deref())
+    storage::update_provider(&state.db, &name, body.base_url.trim(), body.api_key.as_deref(), body.display_name.as_deref())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;
@@ -872,6 +873,7 @@ pub struct AddModel {
     pub upstream_model: String, // 供应商上的真实模型名
     pub input_price: Option<f64>,  // 输入单价 $/1M tokens
     pub output_price: Option<f64>, // 输出单价 $/1M tokens
+    pub display_name: Option<String>, // 供应商自定义显示名(新建时生效)
 }
 
 /// POST /admin/models —— 添加三方模型(自动建好它的上游连接)。
@@ -893,8 +895,8 @@ pub async fn add_model(
     if !price_ok(body.input_price) || !price_ok(body.output_price) {
         return Err(ApiError::BadRequest("prices must be finite and >= 0".into()));
     }
-    // 按 base_url 复用已有 provider，不重复创建
-    let (provider, _) = storage::find_or_create_provider(&state.db, &body.kind, &body.base_url, body.api_key.as_deref())
+    // 按 base_url 复用已有 provider，不重复创建;新建时写入自定义显示名
+    let (provider, _) = storage::find_or_create_provider_named(&state.db, &body.kind, &body.base_url, body.api_key.as_deref(), body.display_name.as_deref())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let id = storage::add_model(&state.db, &provider, &body.upstream_model, body.label.as_deref(), body.input_price, body.output_price)
@@ -909,6 +911,7 @@ pub struct AddModelsBatch {
     pub kind: String,
     pub base_url: String,
     pub api_key: Option<String>,
+    pub display_name: Option<String>, // 供应商自定义显示名(新建时生效)
     pub models: Vec<AddModelBatchItem>,
 }
 #[derive(Deserialize)]
@@ -938,7 +941,7 @@ pub async fn add_models_batch(
     if body.models.iter().any(|m| !price_ok(m.input_price) || !price_ok(m.output_price)) {
         return Err(ApiError::BadRequest("prices must be finite and >= 0".into()));
     }
-    let (provider, provider_created) = storage::find_or_create_provider(&state.db, &body.kind, &body.base_url, body.api_key.as_deref())
+    let (provider, provider_created) = storage::find_or_create_provider_named(&state.db, &body.kind, &body.base_url, body.api_key.as_deref(), body.display_name.as_deref())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let mut added = 0usize;

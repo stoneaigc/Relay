@@ -910,8 +910,8 @@ function ModelsPanel() {
                   <Zap className="h-4 w-4 text-primary" />
                   <div>
                     <div className="flex items-center gap-2 text-sm font-medium">
-                      {providerDisplayName(p.base_url)}
-                      <HealthBadge h={health[p.name]} name={providerDisplayName(p.base_url)} />
+                      {providerDisplayName(p)}
+                      <HealthBadge h={health[p.name]} name={providerDisplayName(p)} />
                     </div>
                     <div className="text-xs text-muted-foreground">{p.base_url}</div>
                   </div>
@@ -1002,6 +1002,7 @@ function ModelsPanel() {
 
 // ---- 编辑供应商对话框 ----
 function EditProviderDialog({ provider, onClose, onSaved }: { provider: ProviderRow; onClose: () => void; onSaved: () => void }) {
+  const [dn, setDn] = useState(provider.display_name || "");
   const [baseUrl, setBaseUrl] = useState(provider.base_url);
   const [apiKey, setApiKey] = useState("");
   const [err, setErr] = useState("");
@@ -1010,7 +1011,7 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
   const submit = async () => {
     setErr(""); setSubmitting(true);
     try {
-      await api.updateProvider(provider.name, { base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined });
+      await api.updateProvider(provider.name, { base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, display_name: dn.trim() });
       onSaved();
     } catch (e: any) { setErr(e.message); }
     setSubmitting(false);
@@ -1021,6 +1022,8 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
       <DialogContent>
         <DialogHeader><DialogTitle>编辑供应商</DialogTitle><DialogDescription>{provider.name}</DialogDescription></DialogHeader>
         <div className="space-y-3">
+          <div><label className="mb-1 block text-xs text-muted-foreground">名称 (留空按域名显示)</label>
+            <Input value={dn} onChange={(e) => setDn(e.target.value)} placeholder="如: 生产网关 / fit2cloud 主力" /></div>
           <div><label className="mb-1 block text-xs text-muted-foreground">Base URL</label>
             <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} /></div>
           <div><label className="mb-1 block text-xs text-muted-foreground">API Key</label>
@@ -1039,6 +1042,7 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
 // ---- 添加上游对话框 ----
 function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose: () => void; onSaved: () => void }) {
   const [kind, setKind] = useState("openai");
+  const [provName, setProvName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
@@ -1100,9 +1104,9 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
       }
       if (selectedModels.size > 0) {
         const items = [...selectedModels].map((m) => ({ upstream_model: m, label: m, input_price: ip, output_price: op }));
-        await api.addModelsBatch({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, models: items });
+        await api.addModelsBatch({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, display_name: provName.trim() || undefined, models: items });
       } else {
-        await api.addModel({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, upstream_model: "custom-model", input_price: ip, output_price: op });
+        await api.addModel({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, upstream_model: "custom-model", input_price: ip, output_price: op, display_name: provName.trim() || undefined });
       }
       onSaved(); onClose();
     } catch (e: any) { setErr(e.message); }
@@ -1119,6 +1123,8 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
           <DialogDescription>选择供应商后可探测模型列表并批量添加</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
+          <div><label className="mb-1 block text-xs text-muted-foreground">名称 (可选,留空按域名显示)</label>
+            <Input placeholder="如: 生产网关 / fit2cloud 主力" value={provName} onChange={(e) => setProvName(e.target.value)} /></div>
           <div><label className="mb-1 block text-xs text-muted-foreground">供应商模板</label>
             <select value={tpl} onChange={(e) => applyTemplate(e.target.value)} className={sel}>
               <option value="custom">自定义</option>
@@ -2530,9 +2536,11 @@ function RewardTaskDialog({ task, onClose, onDone }: {
 
 const fmtCost = (n: number) => (n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(6)}`);
 
-// 获取 provider 的可读名称(模块级:模型页与用量页共用)
-const providerDisplayName = (url: string) => {
-  const h = url.replace(/^https?:\/\//, "").split("/")[0];
+// 获取 provider 的可读名称(模块级:模型页与用量页共用);自定义显示名优先,否则按域名推断
+const providerDisplayName = (p: { display_name?: string | null; base_url: string }) => {
+  const dn = (p.display_name || "").trim();
+  if (dn) return dn;
+  const h = p.base_url.replace(/^https?:\/\//, "").split("/")[0];
   if (h.includes("deepseek")) return "DeepSeek";
   if (h.includes("openai")) return "OpenAI";
   if (h.includes("anthropic")) return "Anthropic";
@@ -2591,7 +2599,7 @@ function UsagePanel() {
   // ID → 友好名称映射(供应商 prov-xxx → 展示名;用户 UUID → 用户名),拉一次全量构建字典。
   const [provMap, setProvMap] = useState<Record<string, string>>({});
   const [userMap, setUserMap] = useState<Record<string, string>>({});
-  useEffect(() => { api.providers(1, 200).then((r) => setProvMap(Object.fromEntries(r.data.map((p) => [p.name, providerDisplayName(p.base_url)])))).catch(() => { /* 静默 */ }); }, []);
+  useEffect(() => { api.providers(1, 200).then((r) => setProvMap(Object.fromEntries(r.data.map((p) => [p.name, providerDisplayName(p)])))).catch(() => { /* 静默 */ }); }, []);
   useEffect(() => { api.users(1, 200).then((r) => setUserMap(Object.fromEntries(r.data.map((u) => [u.id, u.username ?? u.id.slice(0, 8)])))).catch(() => { /* 静默 */ }); }, []);
   const unpricedCount = allModels.filter((m) => m.input_price == null || m.output_price == null).length;
   return (

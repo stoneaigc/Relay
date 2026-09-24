@@ -79,11 +79,12 @@ CREATE INDEX IF NOT EXISTS idx_reqlog_created ON request_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_user_tokens ON usage_logs(user_id, charged_tokens);
 
 CREATE TABLE IF NOT EXISTS providers (
-  name        TEXT PRIMARY KEY,
-  kind        TEXT NOT NULL,
-  base_url    TEXT NOT NULL,
-  api_key     TEXT,
-  created_at  TEXT NOT NULL
+  name         TEXT PRIMARY KEY,
+  kind         TEXT NOT NULL,
+  base_url     TEXT NOT NULL,
+  api_key      TEXT,
+  display_name TEXT,                      -- 自定义显示名(空=按域名展示)
+  created_at   TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS models (

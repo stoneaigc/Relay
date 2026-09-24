@@ -174,6 +174,9 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
     // 兼容旧库:补列(列已存在则忽略)。
     if is_pg {
         // Postgres 支持 IF NOT EXISTS,直接补。
+        let _ = q!("ALTER TABLE providers ADD COLUMN IF NOT EXISTS display_name TEXT")
+            .execute(pool)
+            .await;
         let _ = q!("ALTER TABLE model_groups ADD COLUMN IF NOT EXISTS is_active BIGINT NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
@@ -232,6 +235,8 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN ts INTEGER NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
+        // 供应商自定义显示名(空=按 base_url 域名展示)。
+        let _ = q!("ALTER TABLE providers ADD COLUMN display_name TEXT").execute(pool).await;
         let _ = q!("ALTER TABLE model_groups ADD COLUMN is_active INTEGER NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
@@ -383,6 +388,29 @@ pub async fn find_or_create_provider(
     Ok((name, true))
 }
 
+/// 同 find_or_create_provider,但写入自定义显示名(空串/空白视为未提供)。
+/// 新建时直接写入;复用已有 provider 时仅在其显示名为空时补写,不覆盖用户已起的名字。
+pub async fn find_or_create_provider_named(
+    pool: &Db,
+    kind: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+    display_name: Option<&str>,
+) -> anyhow::Result<(String, bool)> {
+    let dn = display_name.map(str::trim).filter(|s| !s.is_empty());
+    let (name, created) = find_or_create_provider(pool, kind, base_url, api_key).await?;
+    if let Some(dn) = dn {
+        if created {
+            q!("UPDATE providers SET display_name = ? WHERE name = ?")
+                .bind(dn).bind(&name).execute(pool).await?;
+        } else {
+            q!("UPDATE providers SET display_name = ? WHERE name = ? AND (display_name IS NULL OR display_name = '')")
+                .bind(dn).bind(&name).execute(pool).await?;
+        }
+    }
+    Ok((name, created))
+}
+
 /// 按 base_url + api_key 精确查找已有 provider。
 pub async fn find_provider_by_credentials(
     pool: &Db,
@@ -402,7 +430,7 @@ pub async fn list_providers(pool: &Db, page: Option<u32>, page_size: Option<u32>
     let current_page = page.unwrap_or(1).max(1);
     let offset = ((current_page - 1) as i64 * limit).max(0);
     let rows = q!(
-        "SELECT p.name, p.kind, p.base_url,
+        "SELECT p.name, p.kind, p.base_url, p.display_name,
                 (SELECT COUNT(*) FROM models m WHERE m.provider = p.name) as model_count
          FROM providers p ORDER BY p.name LIMIT ? OFFSET ?"
     ).bind(limit).bind(offset).fetch_all(pool).await?;
@@ -410,6 +438,7 @@ pub async fn list_providers(pool: &Db, page: Option<u32>, page_size: Option<u32>
         "name": r.get::<String,_>("name"),
         "kind": r.get::<String,_>("kind"),
         "base_url": r.get::<String,_>("base_url"),
+        "display_name": r.try_get::<Option<String>,_>("display_name").unwrap_or(None),
         "model_count": r.get::<i64,_>("model_count"),
     })).collect(), total as u64))
 }
@@ -428,21 +457,34 @@ pub async fn delete_provider_cascade(pool: &Db, provider_name: &str) -> anyhow::
     Ok(())
 }
 
-/// 更新供应商的 base_url 和 api_key。
-/// api_key 为 None 或空字符串时保持原值不更新。
+/// 更新供应商的 base_url、api_key 和显示名。
+/// api_key 为 None 或空字符串时保持原值不更新;display_name 为 None 或空白时保持原值。
 pub async fn update_provider(
     pool: &Db,
     name: &str,
     base_url: &str,
     api_key: Option<&str>,
+    display_name: Option<&str>,
 ) -> anyhow::Result<()> {
     let key = api_key.filter(|k| !k.is_empty());
-    if let Some(k) = key {
-        q!("UPDATE providers SET base_url = ?, api_key = ? WHERE name = ?")
-            .bind(base_url).bind(k).bind(name).execute(pool).await?;
-    } else {
-        q!("UPDATE providers SET base_url = ? WHERE name = ?")
-            .bind(base_url).bind(name).execute(pool).await?;
+    let dn = display_name.map(str::trim).filter(|s| !s.is_empty());
+    match (key, dn) {
+        (Some(k), Some(d)) => {
+            q!("UPDATE providers SET base_url = ?, api_key = ?, display_name = ? WHERE name = ?")
+                .bind(base_url).bind(k).bind(d).bind(name).execute(pool).await?;
+        }
+        (Some(k), None) => {
+            q!("UPDATE providers SET base_url = ?, api_key = ? WHERE name = ?")
+                .bind(base_url).bind(k).bind(name).execute(pool).await?;
+        }
+        (None, Some(d)) => {
+            q!("UPDATE providers SET base_url = ?, display_name = ? WHERE name = ?")
+                .bind(base_url).bind(d).bind(name).execute(pool).await?;
+        }
+        (None, None) => {
+            q!("UPDATE providers SET base_url = ? WHERE name = ?")
+                .bind(base_url).bind(name).execute(pool).await?;
+        }
     }
     Ok(())
 }
@@ -2458,6 +2500,77 @@ mod tests {
             .await.unwrap();
         assert!(!created);
         assert_eq!(n1, n2);
+    }
+
+    // ---- find_or_create_provider_named / display_name ----
+
+    #[tokio::test]
+    async fn named_provider_persists_display_name_on_create() {
+        let db = test_db().await;
+        let (name, created) = find_or_create_provider_named(&db, "openai", "https://api.named.test/v1", Some("sk-n1"), Some("  生产网关  "))
+            .await.unwrap();
+        assert!(created);
+        let (rows, _) = list_providers(&db, None, None).await.unwrap();
+        let row = rows.iter().find(|r| r["name"] == name).unwrap();
+        assert_eq!(row["display_name"], "生产网关");
+    }
+
+    #[tokio::test]
+    async fn named_provider_reuse_keeps_original_name() {
+        let db = test_db().await;
+        let (n1, _) = find_or_create_provider_named(&db, "openai", "https://api.reuse.test/v1", Some("sk-r1"), Some("第一个名字"))
+            .await.unwrap();
+        // 同 base_url+key 再次添加并带新名字:复用已有 provider,不覆盖其显示名。
+        let (n2, created) = find_or_create_provider_named(&db, "openai", "https://api.reuse.test/v1", Some("sk-r1"), Some("第二个名字"))
+            .await.unwrap();
+        assert!(!created);
+        assert_eq!(n1, n2);
+        let (rows, _) = list_providers(&db, None, None).await.unwrap();
+        let row = rows.iter().find(|r| r["name"] == n1).unwrap();
+        assert_eq!(row["display_name"], "第一个名字");
+    }
+
+    #[tokio::test]
+    async fn named_provider_reuse_fills_blank_display_name() {
+        let db = test_db().await;
+        // 先建一个没有显示名的 provider。
+        let (n1, _) = find_or_create_provider(&db, "openai", "https://api.fillblank.test/v1", Some("sk-f1"))
+            .await.unwrap();
+        // 复用时带名字:原显示名为空 → 补写。
+        let (n2, created) = find_or_create_provider_named(&db, "openai", "https://api.fillblank.test/v1", Some("sk-f1"), Some("补写的名字"))
+            .await.unwrap();
+        assert!(!created);
+        assert_eq!(n1, n2);
+        let (rows, _) = list_providers(&db, None, None).await.unwrap();
+        let row = rows.iter().find(|r| r["name"] == n1).unwrap();
+        assert_eq!(row["display_name"], "补写的名字");
+    }
+
+    #[tokio::test]
+    async fn named_provider_blank_name_falls_back_to_null() {
+        let db = test_db().await;
+        let (name, created) = find_or_create_provider_named(&db, "openai", "https://api.blank.test/v1", Some("sk-b1"), Some("   "))
+            .await.unwrap();
+        assert!(created);
+        let (rows, _) = list_providers(&db, None, None).await.unwrap();
+        let row = rows.iter().find(|r| r["name"] == name).unwrap();
+        assert!(row["display_name"].is_null());
+    }
+
+    #[tokio::test]
+    async fn update_provider_can_set_display_name() {
+        let db = test_db().await;
+        let (name, _) = find_or_create_provider(&db, "openai", "https://api.upd.test/v1", Some("sk-u1"))
+            .await.unwrap();
+        update_provider(&db, &name, "https://api.upd.test/v1", None, Some("改名后的上游")).await.unwrap();
+        let (rows, _) = list_providers(&db, None, None).await.unwrap();
+        let row = rows.iter().find(|r| r["name"] == name).unwrap();
+        assert_eq!(row["display_name"], "改名后的上游");
+        // 空白名不覆盖已有显示名。
+        update_provider(&db, &name, "https://api.upd.test/v1", None, Some("  ")).await.unwrap();
+        let (rows, _) = list_providers(&db, None, None).await.unwrap();
+        let row = rows.iter().find(|r| r["name"] == name).unwrap();
+        assert_eq!(row["display_name"], "改名后的上游");
     }
 
     // ---- find_provider_by_credentials ----
