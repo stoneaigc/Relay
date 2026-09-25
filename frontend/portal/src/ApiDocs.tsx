@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { BookOpen, Check, Copy, KeyRound, ShieldCheck, TerminalSquare } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -230,21 +230,54 @@ function Section({ id, title, desc, children }: { id: string; title: string; des
 }
 
 export default function DocsView() {
+  // 左侧目录滚动高亮:观察各章节进入视口的情况,最近进入者高亮。
+  const [active, setActive] = useState(NAV_SECTIONS[0].id);
+  useEffect(() => {
+    const obs = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) setActive(e.target.id);
+        }
+      },
+      { rootMargin: "-8% 0px -70% 0px", threshold: 0 }
+    );
+    for (const s of NAV_SECTIONS) {
+      const el = document.getElementById(s.id);
+      if (el) obs.observe(el);
+    }
+    return () => obs.disconnect();
+  }, []);
+
   return (
-    <div className="mx-auto max-w-4xl space-y-5">
-      <div className="flex flex-wrap items-center gap-3">
-        <h1 className="flex items-center gap-2 text-lg font-bold">
-          <BookOpen className="h-5 w-5 text-primary" /> API 文档
-        </h1>
-        <nav className="flex flex-wrap gap-1.5">
+    <div className="mx-auto max-w-5xl lg:flex lg:gap-8">
+      <aside className="hidden w-44 shrink-0 lg:block">
+        <nav className="sticky top-2 space-y-0.5">
           {NAV_SECTIONS.map((s) => (
             <a key={s.id} href={`#${s.id}`}
-              className="rounded-full border bg-background px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+              className={cn("block rounded-r-lg border-l-2 px-3 py-1.5 text-sm transition-colors",
+                active === s.id
+                  ? "border-primary bg-accent font-medium text-foreground"
+                  : "border-transparent text-muted-foreground hover:bg-accent hover:text-foreground")}>
               {s.label}
             </a>
           ))}
         </nav>
-      </div>
+      </aside>
+
+      <div className="min-w-0 flex-1 space-y-5">
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="flex items-center gap-2 text-lg font-bold">
+            <BookOpen className="h-5 w-5 text-primary" /> API 文档
+          </h1>
+          <nav className="flex flex-wrap gap-1.5 lg:hidden">
+            {NAV_SECTIONS.map((s) => (
+              <a key={s.id} href={`#${s.id}`}
+                className="rounded-full border bg-background px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+                {s.label}
+              </a>
+            ))}
+          </nav>
+        </div>
 
       <Section id="quickstart" title="快速开始" desc="创建 API Key → 把 Base URL 指向网关 → 像调用官方 API 一样发请求。">
         <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2 text-sm">
@@ -285,8 +318,8 @@ export default function DocsView() {
           </div>
         </div>
         <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
-          <li>Key 在「API Keys」卡片创建,明文<b>仅创建时展示一次</b>,请立即保存。</li>
-          <li>丢失或泄露可在门户一键「刷新」,旧 Key 立即失效。</li>
+          <li>Key 在「概览」的接口卡片创建,可随时点击复制;如泄露可在门户一键「刷新」重置,旧 Key 立即失效。</li>
+          <li>两个接口(OpenAI / Anthropic)共用同一额度与同一把 Key。</li>
           <li>鉴权失败返回 <K>401 authentication_error</K>;token 余额不足返回 <K>402 insufficient_quota</K>。</li>
         </ul>
         <CodeBlock title="401 示例" code={ERR_OPENAI} />
@@ -372,6 +405,7 @@ export default function DocsView() {
           </span>
         </p>
       </Section>
+      </div>
     </div>
   );
 }

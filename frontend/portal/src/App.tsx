@@ -15,6 +15,8 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import EChart, { cssVar } from "@/components/EChart";
+import type { EChartsCoreOption } from "echarts/core";
 import PaginationBar from "./PaginationBar";
 import DocsView from "./ApiDocs";
 
@@ -150,21 +152,38 @@ function ModelsView({ models }: { models: ModelCard[] }) {
   );
 }
 
-function LineChart({ points }: { points: { ts: number; tokens: number }[] }) {
-  const W = 600, H = 150, pad = 10;
-  const n = points.length;
-  const max = Math.max(...points.map((p) => p.tokens), 1);
-  const x = (i: number) => (n <= 1 ? W / 2 : pad + (i * (W - 2 * pad)) / (n - 1));
-  const y = (v: number) => H - pad - (v / max) * (H - 2 * pad);
-  const line = points.map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(p.tokens).toFixed(1)}`).join(" ");
-  const area = n > 0 ? `${line} L${x(n - 1).toFixed(1)},${H - pad} L${x(0).toFixed(1)},${H - pad} Z` : "";
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="w-full" style={{ height: H }}>
-      <path d={area} fill="var(--color-primary)" opacity="0.12" />
-      <path d={line} fill="none" stroke="var(--color-primary)" strokeWidth="2" vectorEffect="non-scaling-stroke" />
-      {points.map((p, i) => p.tokens > 0 ? <circle key={i} cx={x(i)} cy={y(p.tokens)} r="2.5" fill="var(--color-primary)" /> : null)}
-    </svg>
-  );
+function LineChart({ points }: { points: { ts: number; tokens: number; calls: number }[] }) {
+  const primary = cssVar("--color-primary", "#6366f1");
+  const border = cssVar("--color-border", "#e4e4e7");
+  const muted = cssVar("--color-muted-foreground", "#71717a");
+  const fmtDay2 = (ts: number) => { const d = new Date(ts * 1000); return `${d.getMonth() + 1}/${d.getDate()}`; };
+  const compact = (v: number) => (v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(0)}K` : String(v));
+  const option: EChartsCoreOption = {
+    grid: { left: 8, right: 8, top: 30, bottom: 0, containLabel: true },
+    tooltip: {
+      trigger: "axis",
+      confine: true,
+      formatter: (params: any) => {
+        const list = Array.isArray(params) ? params : [params];
+        const rows = list.map((p: any) => `${p.marker} ${p.seriesName} <b>${Number(p.value).toLocaleString()}</b>`);
+        return `${list[0]?.axisValue ?? ""}<br/>${rows.join("<br/>")}`;
+      },
+    },
+    xAxis: {
+      type: "category", data: points.map((p) => fmtDay2(p.ts)), boundaryGap: true,
+      axisTick: { show: false }, axisLine: { lineStyle: { color: border } },
+      axisLabel: { color: muted, fontSize: 11 },
+    },
+    yAxis: [
+      { type: "value", splitLine: { lineStyle: { type: "dashed", color: border } }, axisLabel: { color: muted, fontSize: 11, formatter: compact } },
+      { type: "value", show: false },
+    ],
+    series: [
+      { name: "tokens", type: "bar", data: points.map((p) => p.tokens), barMaxWidth: 18, itemStyle: { color: primary, borderRadius: [3, 3, 0, 0] } },
+      { name: "调用次数", type: "line", yAxisIndex: 1, data: points.map((p) => p.calls), smooth: true, symbol: "circle", symbolSize: 5, itemStyle: { color: "#0ea5e9" }, lineStyle: { width: 2, color: "#0ea5e9" } },
+    ],
+  };
+  return <EChart option={option} height={190} />;
 }
 
 export default function App() {
@@ -495,27 +514,52 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                       <Table>
                         <TableHeader>
                           <TableRow>
-                            <TableHead>模型</TableHead><TableHead>供应商</TableHead>
-                            <TableHead>输入</TableHead><TableHead>输出</TableHead><TableHead>计费</TableHead>
-                            <TableHead>缓存</TableHead><TableHead>状态</TableHead>
+                            <TableHead>时间</TableHead><TableHead>模型</TableHead>
+                            <TableHead className="text-right">输入 (tokens)</TableHead>
+                            <TableHead className="text-right">输出 (tokens)</TableHead>
+                            <TableHead className="text-right">计费 (tokens)</TableHead>
+                            <TableHead className="text-right">耗时</TableHead>
+                            <TableHead className="text-right">费用</TableHead>
+                            <TableHead>缓存 / 状态</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {usage.map((r, i) => (
-                            <TableRow key={i}>
-                              <TableCell className="mono">{r.model}</TableCell><TableCell>{r.provider}</TableCell>
-                              <TableCell>{r.input_tokens}</TableCell><TableCell>{r.output_tokens}</TableCell>
-                              <TableCell className="mono">{r.charged_tokens}</TableCell>
-                              <TableCell>
-                                {r.kind === "cache"
-                                  ? <Badge variant="success" title="精确命中缓存,按折扣率计费">精确</Badge>
-                                  : r.kind === "semantic"
-                                    ? <Badge variant="default" title="语义相似命中缓存,按折扣率计费">语义</Badge>
-                                    : <span className="text-xs text-muted-foreground">—</span>}
-                              </TableCell>
-                              <TableCell>{r.status}</TableCell>
-                            </TableRow>
-                          ))}
+                          {usage.map((r, i) => {
+                            // created_at 存储约定为 "@unix秒";兼容纯数字与 ISO 字符串。
+                            const raw = String(r.created_at ?? "").replace(/^@/, "");
+                            const tsMs = /^\d+$/.test(raw) ? Number(raw) * 1000 : NaN;
+                            const d = isFinite(tsMs) ? new Date(tsMs) : (r.created_at ? new Date(r.created_at) : null);
+                            const time = d && !isNaN(d.getTime())
+                              ? `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`
+                              : "—";
+                            const ms = r.latency_ms;
+                            const latency = ms != null ? (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`) : "—";
+                            const cost = r.cost_usd != null ? `$${r.cost_usd.toFixed(4)}` : "—";
+                            const ok = r.status != null && r.status >= 200 && r.status < 400;
+                            return (
+                              <TableRow key={i}>
+                                <TableCell className="mono whitespace-nowrap text-xs text-muted-foreground" title={r.created_at}>{time}</TableCell>
+                                <TableCell>
+                                  <div className="mono text-xs">{r.model || "—"}</div>
+                                  {r.provider && <div className="text-[11px] text-muted-foreground">{r.provider}</div>}
+                                </TableCell>
+                                <TableCell className="mono text-right tabular-nums">{(r.input_tokens ?? 0).toLocaleString()}</TableCell>
+                                <TableCell className="mono text-right tabular-nums">{(r.output_tokens ?? 0).toLocaleString()}</TableCell>
+                                <TableCell className="mono text-right tabular-nums">{(r.charged_tokens ?? 0).toLocaleString()}</TableCell>
+                                <TableCell className="mono text-right tabular-nums">{latency}</TableCell>
+                                <TableCell className="mono text-right tabular-nums">{cost}</TableCell>
+                                <TableCell>
+                                  <div className="flex items-center gap-1.5">
+                                    {r.kind === "cache" && <Badge variant="success" title="精确命中缓存,按折扣率计费">精确</Badge>}
+                                    {r.kind === "semantic" && <Badge variant="default" title="语义相似命中缓存,按折扣率计费">语义</Badge>}
+                                    {r.status != null && (ok
+                                      ? <Badge variant="muted">{r.status}</Badge>
+                                      : <Badge variant="default" className="border-destructive/30 bg-destructive/15 text-destructive">{r.status || "失败"}</Badge>)}
+                                  </div>
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
                         </TableBody>
                       </Table>
                     )}

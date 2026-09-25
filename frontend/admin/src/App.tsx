@@ -10,6 +10,8 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import EChart, { cssVar } from "@/components/EChart";
+import type { EChartsCoreOption } from "echarts/core";
 import PaginationBar from "./PaginationBar";
 import ApiDocsPanel from "./ApiDocs";
 import { PasswordInput } from "@/components/ui/password-input";
@@ -241,42 +243,38 @@ const SOURCE_LABEL: Record<string, string> = {
 
 /// 手写 SVG 柱状图(零依赖):hover 高亮 + 顶部 tooltip,供趋势卡与用户弹窗复用。
 function LineChart({ points, fmtX }: { points: { ts: number; tokens: number; calls?: number }[]; fmtX?: (ts: number) => string }) {
-  const [hi, setHi] = useState<number | null>(null);
-  const W = 600, H = 160, pad = 6;
-  const n = points.length;
-  const max = Math.max(...points.map((p) => p.tokens), 1);
-  const slot = n > 0 ? (W - 2 * pad) / n : W;
-  const bw = Math.min(18, slot * 0.65);
+  const primary = cssVar("--color-primary", "#6366f1");
+  const border = cssVar("--color-border", "#e4e4e7");
+  const muted = cssVar("--color-muted-foreground", "#71717a");
   const fmt = fmtX ?? ((ts: number) => { const d = new Date(ts * 1000); return `${d.getMonth() + 1}/${d.getDate()}`; });
-  const hov = hi != null && hi >= 0 && hi < n ? hi : null;
-  const tip = hov != null ? points[hov] : null;
-  const tipLeft = hov != null ? Math.min(Math.max(((pad + hov * slot + slot / 2) / W) * 100, 12), 88) : 0;
-  return (
-    <div className="relative">
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="w-full" style={{ height: H }}>
-        {points.map((p, i) => {
-          const h = Math.max((p.tokens / max) * (H - 2 * pad), 3);
-          return p.tokens > 0 ? (
-            <rect key={i} x={pad + i * slot + (slot - bw) / 2} y={H - pad - h} width={bw} height={h} rx="2"
-              fill="var(--color-primary)" opacity={hov === null || hov === i ? 1 : 0.35} />
-          ) : null;
-        })}
-        <rect x="0" y="0" width={W} height={H} fill="transparent" onMouseLeave={() => setHi(null)}
-          onMouseMove={(e) => {
-            const r = e.currentTarget.getBoundingClientRect();
-            const i = Math.floor(((e.clientX - r.left) / r.width) * n);
-            setHi(Math.min(Math.max(i, 0), n - 1));
-          }} />
-      </svg>
-      {tip && (
-        <div className="pointer-events-none absolute top-0 -translate-x-1/2 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs shadow-md"
-          style={{ left: `${tipLeft}%`, background: "var(--color-primary)", color: "var(--color-primary-foreground)" }}>
-          <div className="font-medium">{fmt(tip.ts)}</div>
-          <div className="opacity-80">{tip.tokens.toLocaleString()} tokens{tip.calls != null ? ` · ${tip.calls.toLocaleString()} 次` : ""}</div>
-        </div>
-      )}
-    </div>
-  );
+  const compact = (v: number) => (v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(0)}K` : String(v));
+  const hasCalls = points.some((p) => p.calls != null);
+  const option: EChartsCoreOption = {
+    grid: { left: 8, right: 8, top: 30, bottom: 0, containLabel: true },
+    tooltip: {
+      trigger: "axis",
+      confine: true,
+      formatter: (params: any) => {
+        const list = Array.isArray(params) ? params : [params];
+        const rows = list.map((p: any) => `${p.marker} ${p.seriesName} <b>${Number(p.value).toLocaleString()}</b>`);
+        return `${list[0]?.axisValue ?? ""}<br/>${rows.join("<br/>")}`;
+      },
+    },
+    xAxis: {
+      type: "category", data: points.map((p) => fmt(p.ts)), boundaryGap: true,
+      axisTick: { show: false }, axisLine: { lineStyle: { color: border } },
+      axisLabel: { color: muted, fontSize: 11 },
+    },
+    yAxis: [
+      { type: "value", splitLine: { lineStyle: { type: "dashed", color: border } }, axisLabel: { color: muted, fontSize: 11, formatter: compact } },
+      ...(hasCalls ? [{ type: "value", show: false }] : []),
+    ],
+    series: [
+      { name: "tokens", type: "bar", data: points.map((p) => p.tokens), barMaxWidth: 20, itemStyle: { color: primary, borderRadius: [3, 3, 0, 0] } },
+      ...(hasCalls ? [{ name: "调用次数", type: "line", yAxisIndex: 1, data: points.map((p) => p.calls), smooth: true, symbol: "circle", symbolSize: 5, itemStyle: { color: "#0ea5e9" }, lineStyle: { width: 2, color: "#0ea5e9" } }] : []),
+    ],
+  };
+  return <EChart option={option} height={220} />;
 }
 
 function UserChartDialog({ user, onClose }: { user: UserRow | null; onClose: () => void }) {
@@ -2792,16 +2790,46 @@ function UsagePanel() {
         <CardContent>
           {rows.length === 0 ? <p className="text-sm text-muted-foreground">暂无记录</p> : (
             <Table>
-              <TableHeader><TableRow><TableHead>用户</TableHead><TableHead>模型</TableHead><TableHead>供应商</TableHead><TableHead>输入</TableHead><TableHead>输出</TableHead><TableHead>计费</TableHead><TableHead>费用</TableHead></TableRow></TableHeader>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>时间</TableHead>
+                  <TableHead>用户</TableHead><TableHead>模型</TableHead>
+                  <TableHead className="text-right">输入 (tokens)</TableHead>
+                  <TableHead className="text-right">输出 (tokens)</TableHead>
+                  <TableHead className="text-right">计费 (tokens)</TableHead>
+                  <TableHead className="text-right">耗时</TableHead>
+                  <TableHead className="text-right">费用</TableHead>
+                  <TableHead>状态</TableHead>
+                </TableRow>
+              </TableHeader>
               <TableBody>
-                {rows.map((r, i) => (
-                  <TableRow key={i}>
-                    <TableCell className="mono text-xs">{userMap[r.user_id] ?? String(r.user_id).slice(0, 8)}</TableCell>
-                    <TableCell className="mono">{r.model}</TableCell><TableCell>{provMap[r.provider] ?? r.provider}</TableCell>
-                    <TableCell>{r.input_tokens}</TableCell><TableCell>{r.output_tokens}</TableCell><TableCell className="mono">{r.charged_tokens}</TableCell>
-                    <TableCell className="mono tabular-nums">{r.cost_usd == null ? "—" : fmtCost(r.cost_usd)}</TableCell>
-                  </TableRow>
-                ))}
+                {rows.map((r, i) => {
+                  // created_at 存储约定为 "@unix秒";兼容纯数字与 ISO 字符串。
+                  const raw = String(r.created_at ?? "").replace(/^@/, "");
+                  const tsMs = /^\d+$/.test(raw) ? Number(raw) * 1000 : NaN;
+                  const d = isFinite(tsMs) ? new Date(tsMs) : (r.created_at ? new Date(r.created_at) : null);
+                  const time = d && !isNaN(d.getTime())
+                    ? `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`
+                    : "—";
+                  const ms = r.latency_ms;
+                  const latency = ms != null ? (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`) : "—";
+                  const ok = r.status != null && r.status >= 200 && r.status < 400;
+                  return (
+                    <TableRow key={i}>
+                      <TableCell className="mono whitespace-nowrap text-xs text-muted-foreground" title={r.created_at}>{time}</TableCell>
+                      <TableCell className="mono text-xs">{userMap[r.user_id] ?? String(r.user_id).slice(0, 8)}</TableCell>
+                      <TableCell className="mono text-xs">{r.model || "—"}</TableCell>
+                      <TableCell className="mono text-right tabular-nums">{(r.input_tokens ?? 0).toLocaleString()}</TableCell>
+                      <TableCell className="mono text-right tabular-nums">{(r.output_tokens ?? 0).toLocaleString()}</TableCell>
+                      <TableCell className="mono text-right tabular-nums">{(r.charged_tokens ?? 0).toLocaleString()}</TableCell>
+                      <TableCell className="mono text-right tabular-nums">{latency}</TableCell>
+                      <TableCell className="mono text-right tabular-nums">{r.cost_usd == null ? "—" : fmtCost(r.cost_usd)}</TableCell>
+                      <TableCell>{r.status != null && (ok
+                        ? <Badge variant="muted">{r.status}</Badge>
+                        : <Badge variant="default" className="border-destructive/30 bg-destructive/15 text-destructive">{r.status || "失败"}</Badge>)}</TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           )}
@@ -4193,260 +4221,87 @@ function KpiCard({
 }
 
 /** 请求量(柱状) + P95 延迟(折线)双轴图 */
+/** 请求量(柱状) + P95 延迟(折线)双轴图 */
 function ReqLatencyChart({ points }: { points: MetricsSeriesPoint[] }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [size, setSize] = useState({ w: 800, h: 260 });
-  const [hover, setHover] = useState<number | null>(null);
-  const PAD = { l: 52, r: 60, t: 16, b: 28 };
-
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const ro = new ResizeObserver((es) => {
-      const r = es[0].contentRect;
-      setSize({ w: Math.max(320, Math.floor(r.width)), h: 260 });
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  const plotW = size.w - PAD.l - PAD.r;
-  const plotH = size.h - PAD.t - PAD.b;
-  const n = points.length;
-  const maxReq = Math.max(1, ...points.map((p) => p.requests));
-  const maxLat = Math.max(1, ...points.map((p) => p.p95_ms));
-
-  const xAt = (i: number) => PAD.l + (n <= 1 ? plotW / 2 : (plotW * i) / (n - 1));
-  const yReq = (v: number) => PAD.t + plotH - (plotH * v) / maxReq;
-  const yLat = (v: number) => PAD.t + plotH - (plotH * v) / maxLat;
-
-  const barW = Math.max(2, Math.min(22, (plotW / Math.max(1, n)) * 0.7));
-  const barsPath = points
-    .map((p, i) => {
-      const x = xAt(i);
-      const x0 = x - barW / 2;
-      const y = yReq(p.requests);
-      return `M${x0.toFixed(2)},${(PAD.t + plotH).toFixed(2)} L${x0.toFixed(2)},${y.toFixed(
-        2
-      )} L${(x0 + barW).toFixed(2)},${y.toFixed(2)} L${(x0 + barW).toFixed(2)},${(PAD.t + plotH).toFixed(2)} Z`;
-    })
-    .join(" ");
-  const linePath = points
-    .map((p, i) => `${i === 0 ? "M" : "L"}${xAt(i).toFixed(2)},${yLat(p.p95_ms).toFixed(2)}`)
-    .join(" ");
-
-  const ticksY = 4;
-  const ticksX = 5;
-  const formatTs = (ts: number) => {
+  const border = cssVar("--color-border", "#e4e4e7");
+  const muted = cssVar("--color-muted-foreground", "#71717a");
+  const fmtTs = (ts: number) => {
     const d = new Date(ts * 1000);
     return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   };
-
-  return (
-    <div ref={ref} className="relative w-full">
-      <svg width={size.w} height={size.h}>
-        {Array.from({ length: ticksY + 1 }).map((_, i) => {
-          const y = PAD.t + (plotH * i) / ticksY;
-          return (
-            <line key={i} x1={PAD.l} y1={y} x2={PAD.l + plotW} y2={y} stroke="#e2e8f0" strokeDasharray="3 3" />
-          );
-        })}
-        {Array.from({ length: ticksY + 1 }).map((_, i) => {
-          const y = PAD.t + (plotH * i) / ticksY;
-          const v = (maxReq * (ticksY - i)) / ticksY;
-          return (
-            <text key={`yl${i}`} x={PAD.l - 6} y={y + 4} textAnchor="end" fontSize={10} fill="#64748b">
-              {fmtInt(v)}
-            </text>
-          );
-        })}
-        {Array.from({ length: ticksY + 1 }).map((_, i) => {
-          const y = PAD.t + (plotH * i) / ticksY;
-          const v = (maxLat * (ticksY - i)) / ticksY;
-          return (
-            <text key={`yr${i}`} x={PAD.l + plotW + 6} y={y + 4} textAnchor="start" fontSize={10} fill="#0ea5e9">
-              {fmtInt(v)}
-            </text>
-          );
-        })}
-        {Array.from({ length: ticksX + 1 }).map((_, i) => {
-          const idx = Math.min(n - 1, Math.floor(((n - 1) * i) / ticksX));
-          const x = xAt(idx);
-          const t = points[idx];
-          return (
-            <g key={`x${i}`}>
-              <line x1={x} y1={PAD.t + plotH} x2={x} y2={PAD.t + plotH + 4} stroke="#cbd5e1" />
-              <text x={x} y={PAD.t + plotH + 18} textAnchor="middle" fontSize={10} fill="#64748b">
-                {t ? formatTs(t.ts) : ""}
-              </text>
-            </g>
-          );
-        })}
-        <path d={barsPath} fill="#6366f1" opacity={0.55} />
-        {n >= 2 ? <path d={linePath} stroke="#0ea5e9" strokeWidth={2} fill="none" /> : null}
-        {/* Y 轴标签 */}
-        <text x={8} y={PAD.t + plotH / 2} textAnchor="middle" fontSize={10} fill="#6366f1"
-              transform={`rotate(-90, 8, ${PAD.t + plotH / 2})`}>
-          请求数
-        </text>
-        <text x={size.w - 8} y={PAD.t + plotH / 2} textAnchor="middle" fontSize={10} fill="#0ea5e9"
-              transform={`rotate(90, ${size.w - 8}, ${PAD.t + plotH / 2})`}>
-          P95 (ms)
-        </text>
-        {points.map((_, i) => {
-          const w = n <= 1 ? plotW : plotW / n;
-          const x = PAD.l + i * w;
-          return (
-            <rect
-              key={`hit${i}`}
-              x={x}
-              y={PAD.t}
-              width={w}
-              height={plotH}
-              fill="transparent"
-              onMouseEnter={() => setHover(i)}
-              onMouseLeave={() => setHover((v) => (v === i ? null : v))}
-            />
-          );
-        })}
-        {hover !== null && points[hover] ? (
-          <line
-            x1={xAt(hover)}
-            y1={PAD.t}
-            x2={xAt(hover)}
-            y2={PAD.t + plotH}
-            stroke="#94a3b8"
-            strokeDasharray="3 3"
-          />
-        ) : null}
-      </svg>
-      {hover !== null && points[hover] ? (
-        <div
-          className="pointer-events-none absolute z-10 w-52 rounded-md border border-slate-200 bg-white/95 px-3 py-2 text-xs shadow-md"
-          style={{
-            left: Math.min(size.w - 210, Math.max(0, xAt(hover) + 6)),
-            top: 8,
-          }}
-        >
-          <div className="font-semibold text-slate-800">
-            {new Date(points[hover].ts * 1000).toLocaleString()}
-          </div>
-          <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 tabular-nums text-slate-600">
-            <div>请求数</div>
-            <div className="text-right">{fmtInt(points[hover].requests)}</div>
-            <div>成功</div>
-            <div className="text-right">{fmtInt(points[hover].success)}</div>
-            <div>不可用</div>
-            <div className="text-right text-rose-600">{fmtInt(points[hover].fail_unavailable)}</div>
-            <div>P50</div>
-            <div className="text-right">{fmtMs(points[hover].p50_ms)}</div>
-            <div>P95</div>
-            <div className="text-right text-sky-700">{fmtMs(points[hover].p95_ms)}</div>
-            <div>P99</div>
-            <div className="text-right">{fmtMs(points[hover].p99_ms)}</div>
-            <div>IN tok</div>
-            <div className="text-right">{fmtInt(points[hover].input_tokens)}</div>
-            <div>OUT tok</div>
-            <div className="text-right">{fmtInt(points[hover].output_tokens)}</div>
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
+  const compact = (v: number) => (v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(0)}K` : String(v));
+  const option: EChartsCoreOption = {
+    grid: { left: 8, right: 8, top: 32, bottom: 0, containLabel: true },
+    legend: { top: 0, textStyle: { color: muted, fontSize: 11 }, itemWidth: 14, itemHeight: 8 },
+    tooltip: {
+      trigger: "axis",
+      confine: true,
+      formatter: (params: any) => {
+        const list = Array.isArray(params) ? params : [params];
+        const p = points[list[0]?.dataIndex ?? 0];
+        if (!p) return "";
+        const rows = list.map((x: any) => `${x.marker} ${x.seriesName} <b>${fmtInt(x.value)}</b>`);
+        return [
+          `<b>${new Date(p.ts * 1000).toLocaleString()}</b>`,
+          ...rows,
+          `成功 ${fmtInt(p.success)} · 不可用 <span style="color:#f43f5e">${fmtInt(p.fail_unavailable)}</span>`,
+          `P50 ${fmtMs(p.p50_ms)} · P95 <span style="color:#0284c7">${fmtMs(p.p95_ms)}</span> · P99 ${fmtMs(p.p99_ms)}`,
+          `IN ${fmtInt(p.input_tokens)} · OUT ${fmtInt(p.output_tokens)} tok`,
+        ].join("<br/>");
+      },
+    },
+    xAxis: {
+      type: "category", data: points.map((p) => fmtTs(p.ts)), boundaryGap: true,
+      axisTick: { show: false }, axisLine: { lineStyle: { color: border } },
+      axisLabel: { color: muted, fontSize: 11 },
+    },
+    yAxis: [
+      { type: "value", name: "请求数", nameTextStyle: { color: muted, fontSize: 11 }, splitLine: { lineStyle: { type: "dashed", color: border } }, axisLabel: { color: muted, fontSize: 11, formatter: compact } },
+      { type: "value", name: "P95 (ms)", nameTextStyle: { color: "#0284c7", fontSize: 11 }, splitLine: { show: false }, axisLabel: { color: "#0284c7", fontSize: 11, formatter: compact } },
+    ],
+    series: [
+      { name: "请求数", type: "bar", data: points.map((p) => p.requests), barMaxWidth: 22, itemStyle: { color: "#6366f1", opacity: 0.75, borderRadius: [3, 3, 0, 0] } },
+      { name: "P95 (ms)", type: "line", yAxisIndex: 1, data: points.map((p) => p.p95_ms), smooth: true, symbol: "circle", symbolSize: 5, itemStyle: { color: "#0ea5e9" }, lineStyle: { width: 2, color: "#0ea5e9" } },
+    ],
+  };
+  return <EChart option={option} height={280} />;
 }
 
-/** TPM 时序图 */
+/** TPM 时序图:总量(面积) + 输入/输出分解。 */
 function TpmChart({ points }: { points: MetricsSeriesPoint[] }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const [size, setSize] = useState({ w: 800, h: 220 });
-  const PAD = { l: 52, r: 16, t: 20, b: 28 };
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const ro = new ResizeObserver((es) => {
-      const r = es[0].contentRect;
-      setSize({ w: Math.max(320, Math.floor(r.width)), h: 220 });
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  const plotW = size.w - PAD.l - PAD.r;
-  const plotH = size.h - PAD.t - PAD.b;
-  const n = points.length;
-  // 近似:桶长未知,用 max(input+output) 做 scale 即可(展示趋势)
-  const maxTot = Math.max(1, ...points.map((p) => p.input_tokens + p.output_tokens));
-  const xAt = (i: number) => PAD.l + (n <= 1 ? plotW / 2 : (plotW * i) / (n - 1));
-  const yV = (v: number) => PAD.t + plotH - (plotH * v) / maxTot;
-  const totalLine = points
-    .map((p, i) => `${i === 0 ? "M" : "L"}${xAt(i).toFixed(2)},${yV(p.input_tokens + p.output_tokens).toFixed(2)}`)
-    .join(" ");
-  const inputLine = points
-    .map((p, i) => `${i === 0 ? "M" : "L"}${xAt(i).toFixed(2)},${yV(p.input_tokens).toFixed(2)}`)
-    .join(" ");
-
-  const formatTs = (ts: number) => {
+  const border = cssVar("--color-border", "#e4e4e7");
+  const muted = cssVar("--color-muted-foreground", "#71717a");
+  const fmtTs = (ts: number) => {
     const d = new Date(ts * 1000);
     return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   };
-  const ticksX = 5;
-  const ticksY = 4;
-
-  return (
-    <div ref={ref} className="w-full">
-      <svg width={size.w} height={size.h}>
-        {Array.from({ length: ticksY + 1 }).map((_, i) => {
-          const y = PAD.t + (plotH * i) / ticksY;
-          return (
-            <line key={i} x1={PAD.l} y1={y} x2={PAD.l + plotW} y2={y} stroke="#e2e8f0" strokeDasharray="3 3" />
-          );
-        })}
-        {Array.from({ length: ticksY + 1 }).map((_, i) => {
-          const y = PAD.t + (plotH * i) / ticksY;
-          const v = (maxTot * (ticksY - i)) / ticksY;
-          return (
-            <text key={`yl${i}`} x={PAD.l - 6} y={y + 4} textAnchor="end" fontSize={10} fill="#64748b">
-              {fmtBuckets(v, "")}
-            </text>
-          );
-        })}
-        {Array.from({ length: ticksX + 1 }).map((_, i) => {
-          const idx = Math.min(n - 1, Math.floor(((n - 1) * i) / ticksX));
-          const x = xAt(idx);
-          const t = points[idx];
-          return (
-            <text key={`x${i}`} x={x} y={PAD.t + plotH + 18} textAnchor="middle" fontSize={10} fill="#64748b">
-              {t ? formatTs(t.ts) : ""}
-            </text>
-          );
-        })}
-        {/* 总面积:输入+输出 */}
-        <path
-          d={`${totalLine} L${xAt(n - 1)},${PAD.t + plotH} L${xAt(0)},${PAD.t + plotH} Z`}
-          fill="#10b981"
-          opacity={0.18}
-        />
-        <path d={totalLine} stroke="#10b981" strokeWidth={2} fill="none" />
-        <path
-          d={`${inputLine} L${xAt(n - 1)},${PAD.t + plotH} L${xAt(0)},${PAD.t + plotH} Z`}
-          fill="#6366f1"
-          opacity={0.14}
-        />
-        <path d={inputLine} stroke="#6366f1" strokeWidth={2} fill="none" opacity={0.9} />
-        {/* 图例 */}
-        <g>
-          <rect x={PAD.l + plotW - 180} y={PAD.t - 14} width={10} height={10} fill="#10b981" opacity={0.35} />
-          <text x={PAD.l + plotW - 166} y={PAD.t - 5} fontSize={10} fill="#0f766e">
-            总 tokens (IN+OUT)
-          </text>
-          <rect x={PAD.l + plotW - 180} y={PAD.t + 2} width={10} height={10} fill="#6366f1" opacity={0.35} />
-          <text x={PAD.l + plotW - 166} y={PAD.t + 11} fontSize={10} fill="#4338ca">
-            仅 IN tokens
-          </text>
-        </g>
-      </svg>
-    </div>
-  );
+  const compact = (v: number) => (v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(0)}K` : String(v));
+  const option: EChartsCoreOption = {
+    grid: { left: 8, right: 8, top: 32, bottom: 0, containLabel: true },
+    legend: { top: 0, textStyle: { color: muted, fontSize: 11 }, itemWidth: 14, itemHeight: 8 },
+    tooltip: {
+      trigger: "axis",
+      confine: true,
+      formatter: (params: any) => {
+        const list = Array.isArray(params) ? params : [params];
+        const rows = list.map((x: any) => `${x.marker} ${x.seriesName} <b>${Number(x.value).toLocaleString()}</b>`);
+        return `${list[0]?.axisValue ?? ""}<br/>${rows.join("<br/>")}`;
+      },
+    },
+    xAxis: {
+      type: "category", data: points.map((p) => fmtTs(p.ts)), boundaryGap: false,
+      axisTick: { show: false }, axisLine: { lineStyle: { color: border } },
+      axisLabel: { color: muted, fontSize: 11 },
+    },
+    yAxis: [
+      { type: "value", splitLine: { lineStyle: { type: "dashed", color: border } }, axisLabel: { color: muted, fontSize: 11, formatter: compact } },
+    ],
+    series: [
+      { name: "总 tokens (IN+OUT)", type: "line", data: points.map((p) => p.input_tokens + p.output_tokens), smooth: true, symbol: "none", itemStyle: { color: "#10b981" }, lineStyle: { width: 2.5, color: "#10b981" }, areaStyle: { color: "#10b981", opacity: 0.12 } },
+      { name: "仅 IN tokens", type: "line", data: points.map((p) => p.input_tokens), smooth: true, symbol: "none", itemStyle: { color: "#6366f1" }, lineStyle: { width: 2, color: "#6366f1" } },
+    ],
+  };
+  return <EChart option={option} height={240} />;
 }
 
 function MetricsPanel() {

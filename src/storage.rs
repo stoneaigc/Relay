@@ -1869,7 +1869,7 @@ pub async fn usage_rows_page(
     };
     let rows = if let Some(uid) = user_id {
         q!(
-            "SELECT u.user_id, u.model, u.provider, u.input_tokens, u.output_tokens, u.charged_tokens, u.cost_usd, u.status, u.created_at, rl.final_kind AS kind
+            "SELECT u.user_id, u.model, u.provider, u.input_tokens, u.output_tokens, u.charged_tokens, u.cost_usd, u.status, u.created_at, rl.final_kind AS kind, rl.latency_ms AS latency_ms
              FROM usage_logs u LEFT JOIN request_logs rl ON rl.request_id = u.request_id
              WHERE u.user_id = ? ORDER BY u.id DESC LIMIT ? OFFSET ?",
         )
@@ -1880,7 +1880,7 @@ pub async fn usage_rows_page(
         .await?
     } else {
         q!(
-            "SELECT u.user_id, u.model, u.provider, u.input_tokens, u.output_tokens, u.charged_tokens, u.cost_usd, u.status, u.created_at, rl.final_kind AS kind
+            "SELECT u.user_id, u.model, u.provider, u.input_tokens, u.output_tokens, u.charged_tokens, u.cost_usd, u.status, u.created_at, rl.final_kind AS kind, rl.latency_ms AS latency_ms
              FROM usage_logs u LEFT JOIN request_logs rl ON rl.request_id = u.request_id
              ORDER BY u.id DESC LIMIT ? OFFSET ?",
         )
@@ -1903,6 +1903,7 @@ pub async fn usage_rows_page(
                     "status": r.get::<Option<i64>, _>("status"),
                     "created_at": r.get::<String, _>("created_at"),
                     "kind": r.try_get::<Option<String>, _>("kind").ok().flatten(),
+                    "latency_ms": r.try_get::<Option<i64>, _>("latency_ms").ok().flatten(),
                 })
             })
             .collect(),
