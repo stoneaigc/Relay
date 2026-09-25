@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen } from "lucide-react";
-import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow } from "./api";
+import { api, getToken, setToken, clearToken, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -2699,32 +2699,48 @@ const providerDisplayName = (p: { display_name?: string | null; base_url: string
 
 /** 用量分布单维度条形块(纯 CSS 横向条,top10) */
 function BreakdownBars({ title, rows, metric }: { title: string; rows: UsageBreakdownRow[]; metric: "tokens" | "cost" }) {
+  const border = cssVar("--color-border", "#e4e4e7");
+  const muted = cssVar("--color-muted-foreground", "#71717a");
   const val = (r: UsageBreakdownRow) => (metric === "cost" ? r.cost_usd : r.input_tokens + r.output_tokens);
-  const max = Math.max(...rows.map(val), 0);
-  const gradient = metric === "cost" ? "from-amber-500 to-orange-400" : "from-sky-500 to-indigo-400";
+  const compact = (v: number) => (v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(0)}K` : String(Math.round(v)));
+  const color = metric === "cost" ? "#f59e0b" : "#6366f1";
+  // 排序后反转:ECharts 类目轴自下而上,反转让第一名显示在最上面。
+  const sorted = [...rows].sort((a, b) => val(b) - val(a));
+  const option: EChartsCoreOption = {
+    grid: { left: 8, right: 28, top: 10, bottom: 0, containLabel: true },
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "shadow" },
+      confine: true,
+      formatter: (params: any) => {
+        const p = Array.isArray(params) ? params[0] : params;
+        const r = sorted[p.dataIndex];
+        if (!r) return "";
+        const v = metric === "cost" ? fmtCost(r.cost_usd) : `${(r.input_tokens + r.output_tokens).toLocaleString()} tokens`;
+        return `${r.label}<br/>${p.marker} ${v} · ${r.calls.toLocaleString()} 次`;
+      },
+    },
+    xAxis: { type: "value", splitLine: { lineStyle: { type: "dashed", color: border } }, axisLabel: { color: muted, fontSize: 11, formatter: compact } },
+    yAxis: {
+      type: "category",
+      data: [...sorted].reverse().map((r) => r.label),
+      axisTick: { show: false }, axisLine: { lineStyle: { color: border } },
+      axisLabel: { color: muted, fontSize: 11, width: 96, overflow: "truncate" },
+    },
+    series: [{
+      type: "bar",
+      data: [...sorted].reverse().map((r) => (metric === "cost" ? Number(r.cost_usd.toFixed(4)) : r.input_tokens + r.output_tokens)),
+      barMaxWidth: 14,
+      itemStyle: { color, borderRadius: [0, 3, 3, 0] },
+    }],
+  };
   return (
     <div className="min-w-0">
       <h4 className="text-xs font-medium text-muted-foreground">{title}</h4>
       {rows.length === 0 ? (
         <p className="mt-3 text-sm text-muted-foreground">暂无数据</p>
       ) : (
-        <div className="mt-3 space-y-2.5">
-          {rows.map((r, i) => (
-            <div key={i}>
-              <div className="flex items-baseline justify-between gap-2 text-xs">
-                <span className="min-w-0 truncate font-medium" title={r.label}>{r.label}</span>
-                <span className="mono shrink-0 tabular-nums text-muted-foreground">
-                  {metric === "cost" ? fmtCost(r.cost_usd) : fmtInt(r.input_tokens + r.output_tokens)}
-                  <span className="ml-1.5 text-[10px] text-muted-foreground/70">{fmtInt(r.calls)} 次</span>
-                </span>
-              </div>
-              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                <div className={`h-full rounded-full bg-gradient-to-r ${gradient} transition-[width] duration-300`}
-                  style={{ width: max > 0 ? `${((val(r) / max) * 100).toFixed(1)}%` : "0%" }} />
-              </div>
-            </div>
-          ))}
-        </div>
+        <EChart option={option} height={Math.max(150, rows.length * 34 + 24)} />
       )}
     </div>
   );
@@ -2850,6 +2866,30 @@ function fmtTsShort(ts: number) {
   });
 }
 
+/** 缓存命中率趋势:每 5 分钟一桶,命中(绿)/未命中(灰)堆叠柱。 */
+function CacheTrendChart({ trend }: { trend: CacheTrendPoint[] }) {
+  const option: EChartsCoreOption = {
+    grid: { left: 2, right: 2, top: 6, bottom: 0 },
+    tooltip: {
+      trigger: "axis",
+      confine: true,
+      formatter: (params: any) => {
+        const p = Array.isArray(params) ? params[0] : params;
+        const b = trend[p.dataIndex];
+        if (!b) return "";
+        return `${fmtTsShort(b.ts)}<br/>命中 <b>${b.hits.toLocaleString()}</b> · 未命中 <b>${b.misses.toLocaleString()}</b>`;
+      },
+    },
+    xAxis: { type: "category", data: trend.map((b) => fmtTsShort(b.ts)), show: false },
+    yAxis: { type: "value", show: false },
+    series: [
+      { name: "未命中", type: "bar", stack: "t", data: trend.map((b) => b.misses), itemStyle: { color: "#d4d4d8" }, barMaxWidth: 12 },
+      { name: "命中", type: "bar", stack: "t", data: trend.map((b) => b.hits), itemStyle: { color: "#10b981" }, barMaxWidth: 12 },
+    ],
+  };
+  return <EChart option={option} height={100} />;
+}
+
 function CachePanel() {
   const navigate = useNavigate();
   const [stats, setStats] = useState<CacheStatsResp | null>(null);
@@ -2878,7 +2918,6 @@ function CachePanel() {
   const total = (stats?.hits ?? 0) + (stats?.misses ?? 0);
   const ratePct = total > 0 ? Math.round((stats?.hit_rate ?? 0) * 1000) / 10 : 0;
   const trend = stats?.trend ?? [];
-  const maxBucket = Math.max(...trend.map((b) => b.hits + b.misses), 1);
 
   return (
     <div className="space-y-5">
@@ -2895,13 +2934,11 @@ function CachePanel() {
               命中 {fmtInt(stats?.hits ?? 0)} / 总请求 {fmtInt(total)}
             </div>
             <div className="mt-2 flex h-9 items-end gap-1">
-              {trend.map((b, i) => (
-                <div key={i} className="flex h-full flex-1 flex-col justify-end gap-px"
-                  title={`${fmtTsShort(b.ts)}  命中 ${b.hits} / 未命中 ${b.misses}`}>
-                  {b.misses > 0 && <div className="w-full rounded-sm bg-muted" style={{ height: `${((b.misses / maxBucket) * 100).toFixed(1)}%` }} />}
-                  {b.hits > 0 && <div className="w-full rounded-sm bg-gradient-to-t from-emerald-500 to-teal-400" style={{ height: `${((b.hits / maxBucket) * 100).toFixed(1)}%` }} />}
-                </div>
-              ))}
+              {trend.length > 0 ? (
+                <CacheTrendChart trend={trend} />
+              ) : (
+                <div className="flex h-full w-full items-center justify-center text-[11px] text-muted-foreground">暂无趋势数据</div>
+              )}
             </div>
             <div className="mt-1 text-[10px] text-muted-foreground">近 1 小时 · 每 5 分钟一桶(灰=未命中,绿=命中)</div>
           </CardContent>
