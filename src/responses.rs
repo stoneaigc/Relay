@@ -1,4 +1,4 @@
-﻿//! OpenAI Responses API(`/v1/responses`) ⇄ Chat Completions 协议适配层。
+//! OpenAI Responses API(`/v1/responses`) ⇄ Chat Completions 协议适配层。
 //!
 //! 设计:入站 Responses 请求转换为等价 Chat Completions 请求后复用 `run_chat`
 //! 主管道(路由/熔断/计费/链路/缓存全复用),出站再将 Chat 响应(或 SSE 字节流)
@@ -326,7 +326,7 @@ pub fn chat_sse_to_responses_body(body: Body, model: String) -> Body {
         let mut call_order: Vec<u64> = Vec::new();
         let mut status = "in_progress";
 
-        let mut skeleton = |rid: &str, mdl: &str, st: &str, out: &Vec<Value>, input: u64, output: u64| json!({
+        let skeleton = |rid: &str, mdl: &str, st: &str, out: &Vec<Value>, input: u64, output: u64| json!({
             "id": rid, "object": "response", "created_at": created, "status": st,
             "model": mdl, "output": out,
             "error": Value::Null, "incomplete_details": Value::Null,

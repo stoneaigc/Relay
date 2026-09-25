@@ -5,7 +5,7 @@ import {
   LayoutDashboard, Receipt, MessageSquare, Menu, X, SendHorizontal, Boxes,
   Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen,
 } from "lucide-react";
-import { api, getToken, setToken, clearToken, KeyInfo, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType } from "./api";
+import { api, getToken, setToken, clearToken, KeyInfo, ModelCard, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType } from "./api";
 import { copyText } from "./clipboard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -52,20 +52,42 @@ function CopyButton({ value, label = "复制" }: { value: string; label?: string
   );
 }
 
-/** 可用模型名的可复制小标签:点击即复制,即时显示“已复制”。 */
-function ModelChip({ name }: { name: string }) {
+/** 模型广场卡片:展示名称(点击复制)、能力标签、上下文长度、倍率、缓存与单价等信息。 */
+function ModelCardView({ m }: { m: ModelCard }) {
   const [copied, copy] = useCopy();
+  const ctx = m.context_length != null && m.context_length > 0
+    ? m.context_length >= 1_000_000 ? `${(m.context_length / 1_000_000).toFixed(m.context_length % 1_000_000 ? 1 : 0)}M` : `${Math.round(m.context_length / 1000)}K`
+    : null;
+  const price = (m.input_price != null && m.output_price != null)
+    ? `$${m.input_price.toFixed(2)} / $${m.output_price.toFixed(2)}`
+    : null;
   return (
-    <button type="button" onClick={() => copy(name)}
+    <button type="button" onClick={() => copy(m.name)} title="点击复制模型名"
       className={cn(
-        "mono inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs transition-colors",
+        "group flex flex-col gap-2 rounded-xl border p-3.5 text-left transition-all",
         copied
-          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-600"
-          : "border-border bg-muted text-foreground hover:bg-accent"
+          ? "border-emerald-500/50 bg-emerald-500/5"
+          : "border-border bg-card hover:border-primary/40 hover:shadow-sm"
       )}>
-      {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3 opacity-40" />}
-      {name}
-      {copied && <span>已复制</span>}
+      <div className="flex items-center gap-2">
+        <span className="mono truncate text-sm font-medium" title={m.name}>{m.name}</span>
+        {copied
+          ? <span className="ml-auto inline-flex shrink-0 items-center gap-1 text-xs text-emerald-600"><Check className="h-3.5 w-3.5" />已复制</span>
+          : <Copy className="ml-auto h-3.5 w-3.5 shrink-0 opacity-0 transition-opacity group-hover:opacity-40" />}
+      </div>
+      {(m.labels.length > 0 || m.tags.length > 0) && (
+        <div className="flex flex-wrap gap-1">
+          {m.labels.map((l) => <Badge key={l}>{l}</Badge>)}
+          {m.tags.map((t) => <Badge key={t} variant="muted">{t}</Badge>)}
+        </div>
+      )}
+      <div className="mt-auto grid grid-cols-2 gap-x-3 gap-y-1 border-t pt-2.5 text-xs text-muted-foreground">
+        <span className="flex items-center gap-1" title="上下文窗口">上下文<span className="mono text-foreground">{ctx ?? "—"}</span></span>
+        <span className="flex items-center gap-1" title="计费倍率">倍率<span className="mono text-foreground">×{m.multiplier}</span></span>
+        <span className="flex items-center gap-1" title="每 1M tokens 输入/输出单价">价格<span className="mono truncate text-foreground" title={price ?? "未定价"}>{price ?? "未定价"}</span></span>
+        <span className="flex items-center gap-1" title="该模型聚合的上游部署数">上游<span className="mono text-foreground">{m.upstreams}</span></span>
+        {m.cache && <span className="col-span-2 inline-flex items-center gap-1 text-success" title="支持提示词缓存,命中按折扣计费"><Star className="h-3 w-3" />支持上下文缓存</span>}
+      </div>
     </button>
   );
 }
@@ -232,7 +254,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [usageTotal, setUsageTotal] = useState(0);
   const [usagePage, setUsagePage] = useState(1);
   const [usagePageSize, setUsagePageSize] = useState(20);
-  const [models, setModels] = useState<string[]>([]);
+  const [models, setModels] = useState<ModelCard[]>([]);
   const [series, setSeries] = useState<{ ts: number; tokens: number; calls: number }[]>([]);
   const [seriesDays, setSeriesDays] = useState(30);
   const [reveal, setReveal] = useState<{ kind: string; key: string } | null>(null);
@@ -324,7 +346,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         </header>
 
         {effectiveSection === "chat" ? (
-          <ChatView models={models} onSent={refresh} />
+          <ChatView models={models.map((m) => m.name)} onSent={refresh} />
         ) : effectiveSection === "docs" ? (
           <div className="min-h-0 flex-1 overflow-auto">
             <div className="p-4 md:p-6">
@@ -371,16 +393,16 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                   <Card>
                     <CardHeader>
                       <CardTitle className="flex items-center gap-2 text-base">
-                        <Boxes className="h-4 w-4" />可用模型{models.length > 0 && <span className="text-muted-foreground">· {models.length}</span>}
-                        {models.length > 0 && <span className="ml-auto text-xs font-normal text-muted-foreground">点击复制模型名</span>}
+                        <Boxes className="h-4 w-4" />模型广场{models.length > 0 && <span className="text-muted-foreground">· {models.length}</span>}
+                        {models.length > 0 && <span className="ml-auto text-xs font-normal text-muted-foreground">点击卡片复制模型名</span>}
                       </CardTitle>
                     </CardHeader>
                     <CardContent>
                       {models.length === 0 ? (
                         <p className="text-sm text-muted-foreground">暂无可用模型,请联系管理员为你分配模型组。</p>
                       ) : (
-                        <div className="flex flex-wrap gap-2">
-                          {models.map((m) => <ModelChip key={m} name={m} />)}
+                        <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                          {models.map((m) => <ModelCardView key={m.name} m={m} />)}
                         </div>
                       )}
                     </CardContent>

@@ -21,10 +21,16 @@ pub struct ProviderConn {
 pub struct ModelDef {
     pub provider: String,
     pub upstream_model: String,
+    /// 备注/展示名。
+    pub label: Option<String>,
     /// 输入单价 $/1M tokens(手动定价;None=回退内置默认价表)。
     pub input_price: Option<f64>,
     /// 输出单价 $/1M tokens(手动定价;None=回退内置默认价表)。
     pub output_price: Option<f64>,
+    /// 上下文长度(tokens,管理员配置;None=未标注)。
+    pub context_length: Option<i64>,
+    /// 能力标签(逗号分隔;None=按名称自动推断)。
+    pub tags: Option<String>,
 }
 
 /// 组内一条路由目标。
@@ -35,6 +41,48 @@ pub struct Target {
     pub multiplier: f64,
     /// 路由级语义缓存 opt-in(与全局开关/确定性判定 AND)。
     pub cache_enabled: bool,
+}
+
+/// 门户「模型广场」单张卡片的数据。
+pub struct ModelCard {
+    /// 对外模型名(请求里填的名字)。
+    pub name: String,
+    /// 各部署的备注/展示名(去重)。
+    pub labels: Vec<String>,
+    /// 能力标签(管理员配置优先,否则按名称推断)。
+    pub tags: Vec<String>,
+    /// 上下文长度(tokens;多部署取最大;None=未标注)。
+    pub context_length: Option<i64>,
+    /// 目标中的最小计费倍率。
+    pub multiplier: f64,
+    /// 任一目标启用了语义缓存。
+    pub cache: bool,
+    /// 上游部署数(负载均衡/故障转移候选数)。
+    pub upstreams: usize,
+    /// 最低输入单价 $/1M(NaN=存在未定价部署,按默认价表)。
+    pub input_price: f64,
+    /// 最低输出单价 $/1M(NaN=存在未定价部署)。
+    pub output_price: f64,
+}
+
+/// 按模型名自动推断能力标签(未配置 tags 时的兜底)。
+fn infer_tags(upstream_model: &str) -> Vec<String> {
+    let m = upstream_model.to_ascii_lowercase();
+    let mut tags: Vec<String> = Vec::new();
+    for t in ["视觉", "推理", "向量", "语音"] {
+        tags.push(t.to_string());
+    }
+    tags.retain(|t| match t.as_str() {
+        "视觉" => m.contains("vision") || m.contains("vl") || m.contains("omni"),
+        "推理" => m.contains("reasoner") || m.contains("reasoning") || m.contains("think") || m.contains("o1") || m.contains("o3") || m.ends_with("-r") || m.contains("-r1"),
+        "向量" => m.contains("embedding") || m.contains("embed"),
+        "语音" => m.contains("audio") || m.contains("tts") || m.contains("whisper"),
+        _ => false,
+    });
+    if tags.is_empty() {
+        tags.push("对话".to_string());
+    }
+    tags
 }
 
 /// 高峰/低谷时段规则:按「星期 + 时间段」驱动计费倍率与路由权重覆盖。
@@ -144,6 +192,80 @@ impl Routing {
                 v
             })
             .unwrap_or_default()
+    }
+
+    /// 门户「模型广场」卡片:每个对外模型名一条,聚合展示名/标签/上下文/倍率/缓存/上游数。
+    pub fn group_model_cards(&self, group_id: i64) -> Vec<ModelCard> {
+        let Some(map) = self.groups.get(&group_id) else { return Vec::new() };
+        let mut cards: Vec<ModelCard> = map
+            .iter()
+            .map(|(name, targets)| {
+                let defs: Vec<&ModelDef> = targets
+                    .iter()
+                    .filter_map(|t| self.models.get(&t.model_id))
+                    .collect();
+                // 展示名:优先各部署的 label,去重。
+                let mut labels: Vec<String> = Vec::new();
+                for d in &defs {
+                    if let Some(l) = d.label.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                        if !labels.iter().any(|x| x.eq_ignore_ascii_case(l)) {
+                            labels.push(l.to_string());
+                        }
+                    }
+                }
+                // 标签:管理员配置优先,否则按模型名自动推断;多部署合并去重。
+                let mut tags: Vec<String> = Vec::new();
+                let configured: Vec<&str> = defs
+                    .iter()
+                    .filter_map(|d| d.tags.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+                    .flat_map(|s| s.split(','))
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !configured.is_empty() {
+                    for t in configured {
+                        if !tags.iter().any(|x| x.eq_ignore_ascii_case(t)) {
+                            tags.push(t.to_string());
+                        }
+                    }
+                } else {
+                    for d in &defs {
+                        for t in infer_tags(&d.upstream_model) {
+                            if !tags.contains(&t) {
+                                tags.push(t);
+                            }
+                        }
+                    }
+                }
+                let context_length = defs.iter().filter_map(|d| d.context_length).max();
+                let multiplier = targets
+                    .iter()
+                    .map(|t| t.multiplier)
+                    .fold(f64::INFINITY, f64::min);
+                let cache = targets.iter().any(|t| t.cache_enabled);
+                // 价格:任一部署未定价则视为"按默认价表",否则给出区间。
+                let inputs: Vec<f64> = defs.iter().filter_map(|d| d.input_price).collect();
+                let outputs: Vec<f64> = defs.iter().filter_map(|d| d.output_price).collect();
+                let (input_price, output_price) = if inputs.len() == defs.len() && outputs.len() == defs.len() {
+                    (inputs.iter().cloned().fold(f64::INFINITY, f64::min), outputs.iter().cloned().fold(f64::INFINITY, f64::min))
+                } else {
+                    (f64::NAN, f64::NAN) // NaN = 存在未定价部署
+                };
+                ModelCard {
+                    name: name.clone(),
+                    labels,
+                    tags,
+                    context_length,
+                    multiplier: if multiplier.is_finite() { multiplier } else { 1.0 },
+                    cache,
+                    upstreams: targets.len(),
+                    input_price,
+                    output_price,
+                }
+            })
+            .collect();
+        cards.sort_by(|a, b| a.name.cmp(&b.name));
+        cards
     }
 
     /// 解析该对外模型的全部可用目标,用于「负载均衡 + 故障转移」。
@@ -529,7 +651,7 @@ mod tests {
     // ---- order_by_cost ----
 
     fn mdl(upstream: &str, input_price: Option<f64>, output_price: Option<f64>) -> ModelDef {
-        ModelDef { provider: "p".into(), upstream_model: upstream.into(), input_price, output_price }
+        ModelDef { provider: "p".into(), upstream_model: upstream.into(), label: None, input_price, output_price, context_length: None, tags: None }
     }
 
     #[test]

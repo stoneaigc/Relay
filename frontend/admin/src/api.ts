@@ -63,6 +63,8 @@ export interface ModelRow {
   api_key?: string | null;
   input_price: number | null;
   output_price: number | null;
+  context_length: number | null;
+  tags: string | null;
 }
 
 export interface ProviderRow {
@@ -80,6 +82,8 @@ export interface ProviderModelRow {
   label: string | null;
   input_price: number | null;
   output_price: number | null;
+  context_length: number | null;
+  tags: string | null;
 }
 
 export type ProviderHealthStatus = "ok" | "degraded" | "down" | "broken" | "idle";
@@ -222,7 +226,7 @@ export const api = {
   models: (): Promise<{ data: ModelRow[] }> => req("/admin/api/models"),
   addModel: (body: { label?: string; kind: string; base_url: string; api_key?: string; upstream_model: string; input_price?: number | null; output_price?: number | null; display_name?: string }) =>
     req("/admin/api/models", { method: "POST", body: JSON.stringify(body) }),
-  updateModel: (id: number, body: { kind: string; base_url: string; api_key?: string; upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null }) =>
+  updateModel: (id: number, body: { kind: string; base_url: string; api_key?: string; upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null; context_length?: number | null; tags?: string }) =>
     req(`/admin/api/models/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteModel: (id: number) => req(`/admin/api/models/${id}`, { method: "DELETE" }),
   deleteModelsBatch: (ids: number[]): Promise<{ ok: boolean; deleted: number }> =>

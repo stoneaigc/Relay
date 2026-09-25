@@ -43,6 +43,19 @@ export interface KeyInfo {
   created_at: string;
 }
 
+/** 模型广场卡片:聚合同名部署后的展示信息。价格 null 表示上游未定价。 */
+export interface ModelCard {
+  name: string;
+  labels: string[];
+  tags: string[];
+  context_length: number | null;
+  multiplier: number;
+  cache: boolean;
+  upstreams: number;
+  input_price: number | null;
+  output_price: number | null;
+}
+
 export const api = {
   login: (username: string, password: string) =>
     req("/portal/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
@@ -59,7 +72,7 @@ export const api = {
     req("/portal/api/keys", { method: "POST", body: JSON.stringify({ interface_kind }) }),
   rotateKey: (interface_kind: string) =>
     req("/portal/api/keys/rotate", { method: "POST", body: JSON.stringify({ interface_kind }) }),
-  models: (): Promise<{ data: string[] }> => req("/portal/api/models"),
+  models: (): Promise<{ data: ModelCard[] }> => req("/portal/api/models"),
   summary: (): Promise<{ granted: number; used: number; balance: number }> => req("/portal/api/summary"),
   series: (days?: number): Promise<{ data: { ts: number; tokens: number; calls: number }[] }> =>
     req(`/portal/api/series${typeof days === "number" ? `?days=${days}` : ""}`),

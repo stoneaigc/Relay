@@ -1110,6 +1110,22 @@ where
     Ok(Some(Option::<f64>::deserialize(d)?))
 }
 
+/// 上下文长度三态:缺失=不改动 / null=清除 / 数字=设置(tokens)。
+fn deser_opt_i64<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<i64>::deserialize(d)?))
+}
+
+/// 标签三态:缺失=不改动 / null=清除 / 字符串=设置(逗号分隔)。
+fn deser_opt_string<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<String>::deserialize(d)?))
+}
+
 #[derive(Deserialize)]
 pub struct UpdateModel {
     pub kind: String,
@@ -1121,6 +1137,10 @@ pub struct UpdateModel {
     pub input_price: Option<Option<f64>>,
     #[serde(default, deserialize_with = "deser_opt_f64")]
     pub output_price: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "deser_opt_i64")]
+    pub context_length: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "deser_opt_string")]
+    pub tags: Option<Option<String>>,
 }
 
 /// PATCH /admin/models/:id —— 编辑模型。
@@ -1143,7 +1163,12 @@ pub async fn update_model(
     if !price_ok(body.input_price.flatten()) || !price_ok(body.output_price.flatten()) {
         return Err(ApiError::BadRequest("prices must be finite and >= 0".into()));
     }
-    storage::update_model(&state.db, id, &body.kind, &body.base_url, body.api_key.as_deref(), &body.upstream_model, body.label.as_deref(), body.input_price, body.output_price)
+    if let Some(Some(v)) = body.context_length {
+        if v < 0 {
+            return Err(ApiError::BadRequest("context_length must be >= 0".into()));
+        }
+    }
+    storage::update_model(&state.db, id, &body.kind, &body.base_url, body.api_key.as_deref(), &body.upstream_model, body.label.as_deref(), body.input_price, body.output_price, body.context_length, body.tags.as_ref().map(|o| o.as_deref()))
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;

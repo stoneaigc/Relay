@@ -391,14 +391,30 @@ pub async fn rotate_key(
     })))
 }
 
-/// GET /portal/models —— 当前用户(按其模型组)可用的对外模型名。
+/// GET /portal/models —— 当前用户(按其模型组)可用的模型广场卡片。
 pub async fn models(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let uid = portal_user(&state, &headers)?;
     let group = state.user(&uid).map(|u| u.group()).unwrap_or(0);
-    let data = state.routing.load().group_model_names(group);
+    let cards = state.routing.load().group_model_cards(group);
+    let data: Vec<Value> = cards
+        .iter()
+        .map(|c| {
+            json!({
+                "name": c.name,
+                "labels": c.labels,
+                "tags": c.tags,
+                "context_length": c.context_length,
+                "multiplier": c.multiplier,
+                "cache": c.cache,
+                "upstreams": c.upstreams,
+                "input_price": if c.input_price.is_finite() { json!(c.input_price) } else { Value::Null },
+                "output_price": if c.output_price.is_finite() { json!(c.output_price) } else { Value::Null },
+            })
+        })
+        .collect();
     Ok(Json(json!({ "data": data })))
 }
 

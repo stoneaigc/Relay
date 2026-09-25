@@ -181,6 +181,13 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_plain TEXT")
             .execute(pool)
             .await;
+        // 模型广场元数据:上下文长度与能力标签(逗号分隔)。
+        let _ = q!("ALTER TABLE models ADD COLUMN IF NOT EXISTS context_length BIGINT")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE models ADD COLUMN IF NOT EXISTS tags TEXT")
+            .execute(pool)
+            .await;
         let _ = q!("ALTER TABLE model_groups ADD COLUMN IF NOT EXISTS is_active BIGINT NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
@@ -243,6 +250,9 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE providers ADD COLUMN display_name TEXT").execute(pool).await;
         // Key 明文列:门户端随时查看/复制完整 Key(认证仍走 key_hash)。
         let _ = q!("ALTER TABLE api_keys ADD COLUMN key_plain TEXT").execute(pool).await;
+        // 模型广场元数据:上下文长度与能力标签(逗号分隔)。
+        let _ = q!("ALTER TABLE models ADD COLUMN context_length INTEGER").execute(pool).await;
+        let _ = q!("ALTER TABLE models ADD COLUMN tags TEXT").execute(pool).await;
         let _ = q!("ALTER TABLE model_groups ADD COLUMN is_active INTEGER NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
@@ -511,7 +521,7 @@ pub async fn update_provider(
 /// 列出指定 provider 下的所有模型。
 pub async fn list_models_by_provider(pool: &Db, provider_name: &str) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = q!(
-        "SELECT m.id, m.upstream_model, m.label, m.input_price, m.output_price
+        "SELECT m.id, m.upstream_model, m.label, m.input_price, m.output_price, m.context_length, m.tags
          FROM models m WHERE m.provider = ? ORDER BY m.id"
     ).bind(provider_name).fetch_all(pool).await?;
     Ok(rows.iter().map(|r| serde_json::json!({
@@ -520,6 +530,8 @@ pub async fn list_models_by_provider(pool: &Db, provider_name: &str) -> anyhow::
         "label": r.get::<Option<String>,_>("label"),
         "input_price": r.get::<Option<f64>,_>("input_price"),
         "output_price": r.get::<Option<f64>,_>("output_price"),
+        "context_length": r.try_get::<Option<i64>,_>("context_length").unwrap_or(None),
+        "tags": r.try_get::<Option<String>,_>("tags").unwrap_or(None),
     })).collect())
 }
 
@@ -567,7 +579,7 @@ pub async fn add_model_returning(
 }
 
 /// 更新模型:改其上游连接(provider 的 kind/base_url,密钥仅在提供时覆盖)+ 上游模型名/备注。
-/// 价格为三态:`None`=不改动 / `Some(None)`=清除定价 / `Some(Some(v))`=设置单价。
+/// 价格/上下文长度/标签为三态:`None`=不改动 / `Some(None)`=清除 / `Some(Some(v))`=设置。
 pub async fn update_model(
     pool: &Db,
     id: i64,
@@ -578,6 +590,8 @@ pub async fn update_model(
     label: Option<&str>,
     input_price: Option<Option<f64>>,
     output_price: Option<Option<f64>>,
+    context_length: Option<Option<i64>>,
+    tags: Option<Option<&str>>,
 ) -> anyhow::Result<()> {
     let prov: Option<String> = q!("SELECT provider FROM models WHERE id = ?")
         .bind(id).fetch_optional(pool).await?.map(|r| r.get("provider"));
@@ -597,6 +611,13 @@ pub async fn update_model(
     }
     if let Some(v) = output_price {
         q!("UPDATE models SET output_price = ? WHERE id = ?").bind(v).bind(id).execute(pool).await?;
+    }
+    if let Some(v) = context_length {
+        q!("UPDATE models SET context_length = ? WHERE id = ?").bind(v).bind(id).execute(pool).await?;
+    }
+    if let Some(v) = tags {
+        let cleaned = v.map(|s| s.trim().trim_end_matches(',')).filter(|s| !s.is_empty());
+        q!("UPDATE models SET tags = ? WHERE id = ?").bind(cleaned).bind(id).execute(pool).await?;
     }
     Ok(())
 }
@@ -619,7 +640,7 @@ pub async fn delete_model_cascade(pool: &Db, id: i64) -> anyhow::Result<bool> {
 
 pub async fn list_models(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = q!(
-        "SELECT m.id, m.upstream_model, m.label, m.input_price, m.output_price, p.name as provider_name, p.kind, p.base_url, p.api_key
+        "SELECT m.id, m.upstream_model, m.label, m.input_price, m.output_price, m.context_length, m.tags, p.name as provider_name, p.kind, p.base_url, p.api_key
          FROM models m LEFT JOIN providers p ON p.name = m.provider ORDER BY p.name, m.id")
         .fetch_all(pool).await?;
     Ok(rows.iter().map(|r| serde_json::json!({
@@ -628,6 +649,8 @@ pub async fn list_models(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
         "label": r.get::<Option<String>,_>("label"),
         "input_price": r.get::<Option<f64>,_>("input_price"),
         "output_price": r.get::<Option<f64>,_>("output_price"),
+        "context_length": r.try_get::<Option<i64>,_>("context_length").unwrap_or(None),
+        "tags": r.try_get::<Option<String>,_>("tags").unwrap_or(None),
         "provider": r.get::<Option<String>,_>("provider_name"),
         "kind": r.get::<Option<String>,_>("kind"),
         "base_url": r.get::<Option<String>,_>("base_url"),
@@ -915,12 +938,15 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
             kind, base_url: r.get("base_url"), api_key: r.get("api_key"), concurrency: None,
         });
     }
-    for r in q!("SELECT id, provider, upstream_model, input_price, output_price FROM models").fetch_all(pool).await? {
+    for r in q!("SELECT id, provider, upstream_model, label, input_price, output_price, context_length, tags FROM models").fetch_all(pool).await? {
         routing.models.insert(r.get::<i64, _>("id"), ModelDef {
             provider: r.get("provider"),
             upstream_model: r.get("upstream_model"),
+            label: r.try_get("label").unwrap_or(None),
             input_price: r.try_get("input_price").unwrap_or(None),
             output_price: r.try_get("output_price").unwrap_or(None),
+            context_length: r.try_get("context_length").unwrap_or(None),
+            tags: r.try_get("tags").unwrap_or(None),
         });
     }
     for r in q!("SELECT id, name, strategy FROM model_groups").fetch_all(pool).await? {
@@ -2655,7 +2681,7 @@ mod tests {
         assert_eq!(models[0]["output_price"], 10.0);
 
         // 三态更新:输入价改为 3.0,输出价清除定价
-        update_model(&db, id, "openai", "https://api.test.com/v1", None, "gpt-4o", None, Some(Some(3.0)), Some(None))
+        update_model(&db, id, "openai", "https://api.test.com/v1", None, "gpt-4o", None, Some(Some(3.0)), Some(None), None, None)
             .await.unwrap();
         let models = list_models_by_provider(&db, &provider).await.unwrap();
         assert_eq!(models[0]["input_price"], 3.0);

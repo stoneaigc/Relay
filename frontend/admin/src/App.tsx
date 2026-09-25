@@ -1035,7 +1035,7 @@ function ModelsPanel() {
                         })()}
                         <Button variant="ghost" size="sm" className="h-7 px-2" title="测试连通性" onClick={() => runTest(m.id)}><Activity className="h-3 w-3" /></Button>
                         <Button variant="ghost" size="sm" className="h-7 px-2" title="模型定价" onClick={() => setPriceTarget({ p, m })}><DollarSign className="h-3 w-3" /></Button>
-                        <Button variant="ghost" size="sm" className="h-7 px-2" title="编辑模型" onClick={() => setEditModel({ id: m.id, label: m.label, kind: p.kind, base_url: p.base_url, upstream_model: m.upstream_model, provider: p.name, input_price: m.input_price, output_price: m.output_price })}><Pencil className="h-3 w-3" /></Button>
+                        <Button variant="ghost" size="sm" className="h-7 px-2" title="编辑模型" onClick={() => setEditModel({ id: m.id, label: m.label, kind: p.kind, base_url: p.base_url, upstream_model: m.upstream_model, provider: p.name, input_price: m.input_price, output_price: m.output_price, context_length: m.context_length, tags: m.tags })}><Pencil className="h-3 w-3" /></Button>
                         <Button variant="ghost" size="sm" className="h-7 px-2 text-destructive" title="删除模型" onClick={() => delModel(p.name, m)}><Trash2 className="h-3 w-3" /></Button>
                       </div>
                     </div>
@@ -1326,14 +1326,23 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
 function EditModelDialog({ model, onClose, onSaved }: { model: ModelRow; onClose: () => void; onSaved: () => void }) {
   const [label, setLabel] = useState(model.label ?? "");
   const [upstream, setUpstream] = useState(model.upstream_model);
+  const [ctxLen, setCtxLen] = useState(model.context_length != null ? String(model.context_length) : "");
+  const [tags, setTags] = useState(model.tags ?? "");
   const [err, setErr] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
   const submit = async () => {
     setErr("");
+    const t = ctxLen.trim();
+    if (t && (!isFinite(Number(t)) || Number(t) < 0)) { setErr("上下文长度必须是 ≥ 0 的整数"); return; }
     try {
-      await api.updateModel(model.id, { kind: model.kind || "openai", base_url: model.base_url || "", upstream_model: upstream.trim(), label: label.trim() || undefined });
+      await api.updateModel(model.id, {
+        kind: model.kind || "openai", base_url: model.base_url || "",
+        upstream_model: upstream.trim(), label: label.trim() || undefined,
+        context_length: t ? Number(t) : null,
+        tags: tags.trim().replace(/,+$/, "") || undefined,
+      });
       onSaved();
     } catch (e: any) { setErr(e.message); }
   };
@@ -1354,8 +1363,15 @@ function EditModelDialog({ model, onClose, onSaved }: { model: ModelRow; onClose
         <div className="space-y-3">
           <div><label className="mb-1 block text-xs text-muted-foreground">上游模型名</label>
             <Input value={upstream} onChange={(e) => setUpstream(e.target.value)} /></div>
-          <div><label className="mb-1 block text-xs text-muted-foreground">备注</label>
-            <Input value={label} onChange={(e) => setLabel(e.target.value)} /></div>
+          <div><label className="mb-1 block text-xs text-muted-foreground">备注(门户模型广场展示名)</label>
+            <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="留空则不显示备注" /></div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="mb-1 block text-xs text-muted-foreground">上下文长度 (tokens,可选)</label>
+              <Input type="number" min="0" step="1" placeholder="如 128000" value={ctxLen} onChange={(e) => setCtxLen(e.target.value)} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">标签 (逗号分隔,可选)</label>
+              <Input placeholder="如 视觉,推理" value={tags} onChange={(e) => setTags(e.target.value)} /></div>
+          </div>
+          <p className="text-xs text-muted-foreground">标签与上下文长度展示在门户「模型广场」；标签留空时按模型名自动推断(视觉/推理/向量/语音/对话)。</p>
           <Button variant="outline" size="sm" onClick={doTest} disabled={testing} className="w-full">
             <Activity className="h-4 w-4 mr-1" />{testing ? "测试中..." : "测试连通性"}
           </Button>
