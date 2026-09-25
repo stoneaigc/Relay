@@ -9,12 +9,24 @@ export async function copyText(t: string): Promise<boolean> {
   try {
     const ta = document.createElement("textarea");
     ta.value = t;
+    ta.setAttribute("readonly", "");
     ta.style.position = "fixed";
+    ta.style.top = "0";
+    ta.style.left = "0";
     ta.style.opacity = "0";
     document.body.appendChild(ta);
+    // Dialog 的焦点陷阱会干扰 focus/select,这里用 Range 选区 + setSelectionRange 双保险,并保存/恢复用户原有选区。
+    const sel = window.getSelection();
+    const saved = sel?.rangeCount ? sel.getRangeAt(0) : null;
+    const range = document.createRange();
+    range.selectNodeContents(ta);
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    ta.setSelectionRange(0, t.length);
     ta.focus();
-    ta.select();
     const ok = document.execCommand("copy");
+    sel?.removeAllRanges();
+    if (saved && sel) sel.addRange(saved);
     document.body.removeChild(ta);
     return ok;
   } catch {

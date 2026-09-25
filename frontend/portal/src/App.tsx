@@ -828,6 +828,7 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
         <div>
           <div className="mb-1 text-xs text-muted-foreground">API Key</div>
           <div className="mono rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active ? active.key_prefix : "—"}</div>
+          {active && <p className="mt-1 text-xs text-muted-foreground">完整 Key 仅在创建/刷新时显示一次;若遗失,点击「刷新 Key」重新生成(旧 Key 立即失效)。</p>}
         </div>
         {active
           ? <Button variant="outline" disabled={busy} onClick={() => setConfirmOpen(true)}><RefreshCw className="h-4 w-4" />刷新 Key</Button>
@@ -857,11 +858,23 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
 }
 
 function RevealContent({ kind, apiKey }: { kind: string; apiKey: string }) {
-  const [state, setState] = useState<"idle" | "ok" | "fail">("idle");
+  const [state, setState] = useState<"idle" | "ok" | "sel">("idle");
+  const keyRef = useRef<HTMLDivElement>(null);
   const copy = async () => {
-    const ok = await copyText(apiKey);
-    setState(ok ? "ok" : "fail");
-    if (ok) window.setTimeout(() => setState("idle"), 2500);
+    if (await copyText(apiKey)) {
+      setState("ok");
+      window.setTimeout(() => setState("idle"), 2500);
+      return;
+    }
+    // 复制命令失败(HTTP 环境被浏览器策略拦截):自动全选 Key 文本,用户 Ctrl+C 手动完成。
+    if (keyRef.current) {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(keyRef.current);
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    }
+    setState("sel");
   };
   return (
     <DialogContent>
@@ -869,12 +882,13 @@ function RevealContent({ kind, apiKey }: { kind: string; apiKey: string }) {
         <DialogTitle>你的新 {kind === "openai" ? "OpenAI" : "Anthropic"} Key</DialogTitle>
         <DialogDescription className="text-destructive">⚠️ 仅此一次显示,关闭后无法再次查看,请立即复制保存。</DialogDescription>
       </DialogHeader>
-      <div className="mono select-all rounded-lg border bg-muted/50 px-3 py-3 text-sm break-all">{apiKey}</div>
+      <div ref={keyRef} className="mono select-all rounded-lg border bg-muted/50 px-3 py-3 text-sm break-all" title="点击可全选">{apiKey}</div>
       <Button onClick={copy} variant={state === "ok" ? "secondary" : "default"}>
         {state === "ok" && <><Check className="h-4 w-4" />已复制</>}
-        {state === "fail" && <><X className="h-4 w-4" />复制失败,请手动选中复制</>}
+        {state === "sel" && <><Check className="h-4 w-4" />已全选,请按 Ctrl+C 复制</>}
         {state === "idle" && <><Copy className="h-4 w-4" />复制</>}
       </Button>
+      {state === "sel" && <p className="text-xs text-muted-foreground">若 Ctrl+C 无效,请长按(手机)或双击 Key 文本手动选中复制。</p>}
     </DialogContent>
   );
 }
