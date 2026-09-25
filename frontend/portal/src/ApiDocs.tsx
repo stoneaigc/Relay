@@ -322,7 +322,7 @@ export default function DocsView() {
         <CodeBlock title="GET /v1/models 响应" code={MODELS_RESP} />
         <CodeBlock title="POST /v1/chat/completions 响应(非流式)" code={CHAT_RESP} />
         <p className="text-sm text-muted-foreground">
-          计费按实际 token 用量结算,余额与明细在「概览」和「用量明细」实时可见。
+          计费按实际 token 用量结算,余额与明细在「概览」和「对话日志」实时可见。
         </p>
       </Section>
 

@@ -92,6 +92,64 @@ function ModelCardView({ m }: { m: ModelCard }) {
   );
 }
 
+/** 模型广场独立页:顶部概要与能力标签筛选,下方为可复制模型卡片网格。 */
+function ModelsView({ models }: { models: ModelCard[] }) {
+  const [tag, setTag] = useState<string | null>(null);
+  const allTags: string[] = [];
+  for (const m of models) {
+    for (const t of m.tags) {
+      if (!allTags.some((x) => x.toLowerCase() === t.toLowerCase())) allTags.push(t);
+    }
+  }
+  const shown = tag ? models.filter((m) => m.tags.some((t) => t.toLowerCase() === tag.toLowerCase())) : models;
+  const cacheCount = models.filter((m) => m.cache).length;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm text-muted-foreground">
+          共 <span className="mono font-medium text-foreground">{models.length}</span> 个可用模型
+          {cacheCount > 0 && <> · <span className="mono font-medium text-foreground">{cacheCount}</span> 个支持缓存</>}
+        </span>
+        {allTags.length > 0 && (
+          <div className="ml-auto flex flex-wrap items-center gap-1.5">
+            <button onClick={() => setTag(null)}
+              className={cn("rounded-full border px-3 py-1 text-xs transition-colors",
+                tag === null ? "border-primary/40 bg-primary/15 text-primary" : "border-border text-muted-foreground hover:bg-accent")}>
+              全部
+            </button>
+            {allTags.map((t) => (
+              <button key={t} onClick={() => setTag(tag === t ? null : t)}
+                className={cn("rounded-full border px-3 py-1 text-xs transition-colors",
+                  tag === t ? "border-primary/40 bg-primary/15 text-primary" : "border-border text-muted-foreground hover:bg-accent")}>
+                {t}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      {models.length === 0 ? (
+        <Card>
+          <CardContent className="py-12 text-center text-sm text-muted-foreground">
+            暂无可用模型,请联系管理员为你分配模型组。
+          </CardContent>
+        </Card>
+      ) : shown.length === 0 ? (
+        <Card>
+          <CardContent className="py-12 text-center text-sm text-muted-foreground">
+            没有「{tag}」标签的模型。
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+          {shown.map((m) => <ModelCardView key={m.name} m={m} />)}
+        </div>
+      )}
+      <p className="text-xs text-muted-foreground">点击卡片即可复制模型名,在 API 调用的 model 字段中使用。</p>
+    </div>
+  );
+}
+
 function LineChart({ points }: { points: { ts: number; tokens: number }[] }) {
   const W = 600, H = 150, pad = 10;
   const n = points.length;
@@ -235,12 +293,13 @@ function Login({ onSuccess }: { onSuccess: () => void }) {
   );
 }
 
-type Section = "overview" | "chat" | "rewards" | "usage" | "docs";
+type Section = "overview" | "models" | "chat" | "rewards" | "usage" | "docs";
 const NAV_ALL: { path: string; label: string; icon: any }[] = [
   { path: "/", label: "概览", icon: LayoutDashboard },
+  { path: "/models", label: "模型广场", icon: Boxes },
   { path: "/chat", label: "对话", icon: MessageSquare },
   { path: "/rewards", label: "奖励", icon: Gift },
-  { path: "/usage", label: "用量明细", icon: Receipt },
+  { path: "/usage", label: "对话日志", icon: Receipt },
   { path: "/docs", label: "API 文档", icon: BookOpen },
 ];
 
@@ -261,13 +320,14 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [rewardsEnabled, setRewardsEnabled] = useState(false);
   const nav = NAV_ALL.filter((n) => n.path !== "/rewards" || rewardsEnabled);
   const section: Section = loc.pathname.startsWith("/chat") ? "chat"
+    : loc.pathname.startsWith("/models") ? "models"
     : loc.pathname.startsWith("/rewards") ? "rewards"
     : loc.pathname.startsWith("/usage") ? "usage"
     : loc.pathname.startsWith("/docs") ? "docs" : "overview";
   // 奖励功能关闭时,强制回退到概览页
   const effectiveSection = section === "rewards" && !rewardsEnabled ? "overview" as Section : section;
-  const title = section === "chat" ? "对话" : section === "rewards" ? "奖励"
-    : section === "usage" ? "用量明细" : section === "docs" ? "API 文档" : "概览";
+  const title = section === "chat" ? "对话" : section === "models" ? "模型广场" : section === "rewards" ? "奖励"
+    : section === "usage" ? "对话日志" : section === "docs" ? "API 文档" : "概览";
 
   const loadUsage = async () => {
     try {
@@ -347,6 +407,12 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
 
         {effectiveSection === "chat" ? (
           <ChatView models={models.map((m) => m.name)} onSent={refresh} />
+        ) : effectiveSection === "models" ? (
+          <div className="min-h-0 flex-1 overflow-auto">
+            <div className="p-4 md:p-6">
+              <ModelsView models={models} />
+            </div>
+          </div>
         ) : effectiveSection === "docs" ? (
           <div className="min-h-0 flex-1 overflow-auto">
             <div className="p-4 md:p-6">
@@ -392,23 +458,6 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                   </div>
                   <Card>
                     <CardHeader>
-                      <CardTitle className="flex items-center gap-2 text-base">
-                        <Boxes className="h-4 w-4" />模型广场{models.length > 0 && <span className="text-muted-foreground">· {models.length}</span>}
-                        {models.length > 0 && <span className="ml-auto text-xs font-normal text-muted-foreground">点击卡片复制模型名</span>}
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      {models.length === 0 ? (
-                        <p className="text-sm text-muted-foreground">暂无可用模型,请联系管理员为你分配模型组。</p>
-                      ) : (
-                        <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
-                          {models.map((m) => <ModelCardView key={m.name} m={m} />)}
-                        </div>
-                      )}
-                    </CardContent>
-                  </Card>
-                  <Card>
-                    <CardHeader>
                       <div className="flex items-center justify-between gap-3">
                         <CardTitle className="text-base">用量趋势</CardTitle>
                         <div className="flex gap-1">
@@ -440,7 +489,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                 <RewardsView />
               ) : (
                 <Card>
-                  <CardHeader><CardTitle className="text-base">用量明细({usageTotal})</CardTitle></CardHeader>
+                  <CardHeader><CardTitle className="text-base">对话日志({usageTotal})</CardTitle></CardHeader>
                   <CardContent>
                     {usage.length === 0 ? <p className="text-sm text-muted-foreground">暂无调用记录</p> : (
                       <Table>
