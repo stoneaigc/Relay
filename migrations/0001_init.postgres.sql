@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   interface_kind TEXT NOT NULL,
   key_hash       TEXT NOT NULL UNIQUE,
   key_prefix     TEXT NOT NULL,
+  key_plain      TEXT,                             -- 完整 Key 明文:门户端随时查看/复制(认证仍走 key_hash)
   revoked        BIGINT NOT NULL DEFAULT 0,
   created_at     TEXT NOT NULL
 );

@@ -38,6 +38,7 @@ export interface KeyInfo {
   id: string;
   interface_kind: string;
   key_prefix: string;
+  key_plain?: string | null;
   revoked: boolean;
   created_at: string;
 }

@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   interface_kind TEXT NOT NULL,                    -- openai | anthropic
   key_hash       TEXT NOT NULL UNIQUE,             -- sha256(明文)
   key_prefix     TEXT NOT NULL,                    -- 掩码展示用
+  key_plain      TEXT,                             -- 完整 Key 明文:门户端随时查看/复制(认证仍走 key_hash)
   revoked        INTEGER NOT NULL DEFAULT 0,
   created_at     TEXT NOT NULL
 );

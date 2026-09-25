@@ -827,8 +827,18 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
         </div>
         <div>
           <div className="mb-1 text-xs text-muted-foreground">API Key</div>
-          <div className="mono rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active ? active.key_prefix : "—"}</div>
-          {active && <p className="mt-1 text-xs text-muted-foreground">完整 Key 仅在创建/刷新时显示一次;若遗失,点击「刷新 Key」重新生成(旧 Key 立即失效)。</p>}
+          {active?.key_plain ? (
+            <div className="flex items-center gap-2">
+              <div className="mono flex-1 rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active.key_plain}</div>
+              <CopyButton value={active.key_plain} label="复制 API Key" />
+            </div>
+          ) : (
+            <div className="space-y-1">
+              <div className="mono rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active ? active.key_prefix : "—"}</div>
+              {active && <p className="text-xs text-muted-foreground">该 Key 创建于旧版本,无法回显完整内容;点击「刷新 Key」重新生成后即可随时查看和复制。</p>}
+            </div>
+          )}
+          {active && active.key_plain && <p className="mt-1 text-xs text-muted-foreground">完整 Key 随时可查看和复制;点击「刷新 Key」可重新生成(旧 Key 立即失效)。</p>}
         </div>
         {active
           ? <Button variant="outline" disabled={busy} onClick={() => setConfirmOpen(true)}><RefreshCw className="h-4 w-4" />刷新 Key</Button>
@@ -880,7 +890,7 @@ function RevealContent({ kind, apiKey }: { kind: string; apiKey: string }) {
     <DialogContent>
       <DialogHeader>
         <DialogTitle>你的新 {kind === "openai" ? "OpenAI" : "Anthropic"} Key</DialogTitle>
-        <DialogDescription className="text-destructive">⚠️ 仅此一次显示,关闭后无法再次查看,请立即复制保存。</DialogDescription>
+        <DialogDescription>请立即复制保存;之后也可在密钥页随时查看和复制,「刷新 Key」可重新生成。</DialogDescription>
       </DialogHeader>
       <div ref={keyRef} className="mono select-all rounded-lg border bg-muted/50 px-3 py-3 text-sm break-all" title="点击可全选">{apiKey}</div>
       <Button onClick={copy} variant={state === "ok" ? "secondary" : "default"}>
@@ -888,7 +898,7 @@ function RevealContent({ kind, apiKey }: { kind: string; apiKey: string }) {
         {state === "sel" && <><Check className="h-4 w-4" />已全选,请按 Ctrl+C 复制</>}
         {state === "idle" && <><Copy className="h-4 w-4" />复制</>}
       </Button>
-      {state === "sel" && <p className="text-xs text-muted-foreground">若 Ctrl+C 无效,请长按(手机)或双击 Key 文本手动选中复制。</p>}
+      {state === "sel" && <p className="text-xs text-muted-foreground">若 Ctrl+C 无效,请长按(手机)或双击 Key 文本手动选中复制;关闭后也可在密钥页随时查看。</p>}
     </DialogContent>
   );
 }

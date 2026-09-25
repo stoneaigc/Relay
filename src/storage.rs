@@ -177,6 +177,10 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE providers ADD COLUMN IF NOT EXISTS display_name TEXT")
             .execute(pool)
             .await;
+        // Key 明文列:门户端随时查看/复制完整 Key(认证仍走 key_hash)。
+        let _ = q!("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_plain TEXT")
+            .execute(pool)
+            .await;
         let _ = q!("ALTER TABLE model_groups ADD COLUMN IF NOT EXISTS is_active BIGINT NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
@@ -237,6 +241,8 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
             .await;
         // 供应商自定义显示名(空=按 base_url 域名展示)。
         let _ = q!("ALTER TABLE providers ADD COLUMN display_name TEXT").execute(pool).await;
+        // Key 明文列:门户端随时查看/复制完整 Key(认证仍走 key_hash)。
+        let _ = q!("ALTER TABLE api_keys ADD COLUMN key_plain TEXT").execute(pool).await;
         let _ = q!("ALTER TABLE model_groups ADD COLUMN is_active INTEGER NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
@@ -1689,11 +1695,12 @@ pub struct KeyRow {
     pub id: Uuid,
     pub interface_kind: String,
     pub key_prefix: String,
+    pub key_plain: Option<String>,
     pub revoked: i64,
     pub created_at: String,
 }
 
-/// 创建一把 Key,写库;返回 (明文, 哈希, KeyRow)。明文只此一次。
+/// 创建一把 Key,写库;返回 (明文, 哈希, KeyRow)。明文同时落 key_plain 列,门户端可随时查看/复制。
 pub async fn create_key(
     pool: &Db,
     user_id: Uuid,
@@ -1703,28 +1710,27 @@ pub async fn create_key(
     let id = Uuid::new_v4();
     let created = now_iso();
     q!(
-        "INSERT INTO api_keys (id, user_id, interface_kind, key_hash, key_prefix, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO api_keys (id, user_id, interface_kind, key_hash, key_prefix, key_plain, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(user_id.to_string())
     .bind(interface_kind)
     .bind(&hash)
     .bind(&prefix)
+    .bind(&plaintext)
     .bind(&created)
     .execute(pool)
     .await?;
-    Ok((
-        plaintext,
-        hash,
-        KeyRow {
-            id,
-            interface_kind: interface_kind.to_string(),
-            key_prefix: prefix,
-            revoked: 0,
-            created_at: created,
-        },
-    ))
+    let row = KeyRow {
+        id,
+        interface_kind: interface_kind.to_string(),
+        key_prefix: prefix,
+        key_plain: Some(plaintext.clone()),
+        revoked: 0,
+        created_at: created,
+    };
+    Ok((plaintext, hash, row))
 }
 
 /// 吊销某用户某接口下所有有效 Key,返回被吊销的哈希(供内存 map 删除)。
@@ -1751,7 +1757,7 @@ pub async fn revoke_active_keys(
 
 pub async fn list_keys(pool: &Db, user_id: Uuid) -> anyhow::Result<Vec<KeyRow>> {
     let rows = q!(
-        "SELECT id, interface_kind, key_prefix, revoked, created_at
+        "SELECT id, interface_kind, key_prefix, key_plain, revoked, created_at
          FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
     )
     .bind(user_id.to_string())
@@ -1763,6 +1769,7 @@ pub async fn list_keys(pool: &Db, user_id: Uuid) -> anyhow::Result<Vec<KeyRow>> 
                 id: Uuid::parse_str(r.get::<String, _>("id").as_str())?,
                 interface_kind: r.get("interface_kind"),
                 key_prefix: r.get("key_prefix"),
+                key_plain: r.try_get::<Option<String>, _>("key_plain").unwrap_or(None),
                 revoked: r.get("revoked"),
                 created_at: r.get("created_at"),
             })

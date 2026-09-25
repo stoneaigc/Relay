@@ -304,6 +304,8 @@ pub async fn list_keys(
                 "id": k.id,
                 "interface_kind": k.interface_kind,
                 "key_prefix": k.key_prefix,
+                // 完整 Key 明文:仅返回给 Key 属主本人,门户端随时查看/复制。
+                "key_plain": k.key_plain,
                 "revoked": k.revoked != 0,
                 "created_at": k.created_at,
             })
