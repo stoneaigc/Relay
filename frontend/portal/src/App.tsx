@@ -6,6 +6,7 @@ import {
   Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen,
 } from "lucide-react";
 import { api, getToken, setToken, clearToken, KeyInfo, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType } from "./api";
+import { copyText } from "./clipboard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -27,13 +28,15 @@ const APP_BASE = (() => {
 
 const fmtDay = (ts: number) => { const d = new Date(ts * 1000); return `${d.getMonth() + 1}/${d.getDate()}`; };
 
-/** 复制到剪贴板,并给出 ~1.4s 的“已复制”反馈状态。 */
+/** 复制到剪贴板,并给出 ~1.4s 的“已复制”反馈状态;复制失败(HTTP 环境异常等)不误报。 */
 function useCopy(): [boolean, (t: string) => void] {
   const [copied, setCopied] = useState(false);
   const copy = (t: string) => {
-    navigator.clipboard?.writeText(t);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1400);
+    void copyText(t).then((ok) => {
+      if (!ok) return;
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1400);
+    });
   };
   return [copied, copy];
 }
@@ -854,17 +857,23 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
 }
 
 function RevealContent({ kind, apiKey }: { kind: string; apiKey: string }) {
-  const [copied, setCopied] = useState(false);
-  const copy = () => { navigator.clipboard.writeText(apiKey); setCopied(true); };
+  const [state, setState] = useState<"idle" | "ok" | "fail">("idle");
+  const copy = async () => {
+    const ok = await copyText(apiKey);
+    setState(ok ? "ok" : "fail");
+    if (ok) window.setTimeout(() => setState("idle"), 2500);
+  };
   return (
     <DialogContent>
       <DialogHeader>
         <DialogTitle>你的新 {kind === "openai" ? "OpenAI" : "Anthropic"} Key</DialogTitle>
         <DialogDescription className="text-destructive">⚠️ 仅此一次显示,关闭后无法再次查看,请立即复制保存。</DialogDescription>
       </DialogHeader>
-      <div className="mono rounded-lg border bg-muted/50 px-3 py-3 text-sm break-all">{apiKey}</div>
-      <Button onClick={copy} variant={copied ? "secondary" : "default"}>
-        {copied ? <><Check className="h-4 w-4" />已复制</> : <><Copy className="h-4 w-4" />复制</>}
+      <div className="mono select-all rounded-lg border bg-muted/50 px-3 py-3 text-sm break-all">{apiKey}</div>
+      <Button onClick={copy} variant={state === "ok" ? "secondary" : "default"}>
+        {state === "ok" && <><Check className="h-4 w-4" />已复制</>}
+        {state === "fail" && <><X className="h-4 w-4" />复制失败,请手动选中复制</>}
+        {state === "idle" && <><Copy className="h-4 w-4" />复制</>}
       </Button>
     </DialogContent>
   );

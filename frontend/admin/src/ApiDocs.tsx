@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import { copyText } from "./clipboard";
 
 const BASE = "http://localhost:8080";
 
@@ -214,9 +215,10 @@ function CopyBtn({ code }: { code: string }) {
     <button
       title="复制"
       onClick={async () => {
-        try { await navigator.clipboard.writeText(code); } catch { /* 忽略 */ }
-        setOk(true);
-        setTimeout(() => setOk(false), 1500);
+        if (await copyText(code)) {
+          setOk(true);
+          setTimeout(() => setOk(false), 1500);
+        }
       }}
       className="rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-white/10 hover:text-white"
     >
