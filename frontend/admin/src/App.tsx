@@ -2697,17 +2697,20 @@ const providerDisplayName = (p: { display_name?: string | null; base_url: string
   return h;
 };
 
-/** 用量分布单维度条形块(纯 CSS 横向条,top10) */
+/** 用量分布单维度条形块(ECharts 横向条形图,top10,渐变+排名强调+条尾数值) */
 function BreakdownBars({ title, rows, metric }: { title: string; rows: UsageBreakdownRow[]; metric: "tokens" | "cost" }) {
   const border = cssVar("--color-border", "#e4e4e7");
   const muted = cssVar("--color-muted-foreground", "#71717a");
   const val = (r: UsageBreakdownRow) => (metric === "cost" ? r.cost_usd : r.input_tokens + r.output_tokens);
   const compact = (v: number) => (v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(0)}K` : String(Math.round(v)));
-  const color = metric === "cost" ? "#f59e0b" : "#6366f1";
+  // tokens=靛紫,费用=琥珀;浅→深横向渐变,第一名不透明强调,其余降透明度形成层次。
+  const c = metric === "cost"
+    ? { light: "#fcd34d", base: "#f59e0b" }
+    : { light: "#a5b4fc", base: "#6366f1" };
   // 排序后反转:ECharts 类目轴自下而上,反转让第一名显示在最上面。
   const sorted = [...rows].sort((a, b) => val(b) - val(a));
   const option: EChartsCoreOption = {
-    grid: { left: 8, right: 28, top: 10, bottom: 0, containLabel: true },
+    grid: { left: 8, right: 100, top: 10, bottom: 0, containLabel: true },
     tooltip: {
       trigger: "axis",
       axisPointer: { type: "shadow" },
@@ -2717,10 +2720,13 @@ function BreakdownBars({ title, rows, metric }: { title: string; rows: UsageBrea
         const r = sorted[p.dataIndex];
         if (!r) return "";
         const v = metric === "cost" ? fmtCost(r.cost_usd) : `${(r.input_tokens + r.output_tokens).toLocaleString()} tokens`;
-        return `${r.label}<br/>${p.marker} ${v} · ${r.calls.toLocaleString()} 次`;
+        return `<b>${r.label}</b><br/>${p.marker} ${v}<br/><span style="color:${muted}">${r.calls.toLocaleString()} 次调用 · 占 Top10 的 ${p.percent}%</span>`;
       },
     },
-    xAxis: { type: "value", splitLine: { lineStyle: { type: "dashed", color: border } }, axisLabel: { color: muted, fontSize: 11, formatter: compact } },
+    xAxis: {
+      type: "value", splitLine: { show: false },
+      axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false },
+    },
     yAxis: {
       type: "category",
       data: [...sorted].reverse().map((r) => r.label),
@@ -2729,9 +2735,38 @@ function BreakdownBars({ title, rows, metric }: { title: string; rows: UsageBrea
     },
     series: [{
       type: "bar",
-      data: [...sorted].reverse().map((r) => (metric === "cost" ? Number(r.cost_usd.toFixed(4)) : r.input_tokens + r.output_tokens)),
+      data: [...sorted].reverse().map((r, i, arr) => ({
+        value: metric === "cost" ? Number(r.cost_usd.toFixed(4)) : r.input_tokens + r.output_tokens,
+        itemStyle: {
+          // 声明式横向渐变(浅→深);Top1(数组末位)不透明强调,其余整体降透明度。
+          color: {
+            type: "linear", x: 0, y: 0, x2: 1, y2: 0,
+            colorStops: [
+              { offset: 0, color: c.light },
+              { offset: 1, color: c.base },
+            ],
+          },
+          opacity: i === arr.length - 1 ? 1 : 0.62,
+          borderRadius: [0, 3, 3, 0],
+        },
+      })),
       barMaxWidth: 14,
-      itemStyle: { color, borderRadius: [0, 3, 3, 0] },
+      showBackground: true,
+      backgroundStyle: { color: "rgba(113,113,122,0.08)", borderRadius: [0, 3, 3, 0] },
+      // 条尾直显数值,无需悬停即可读数;完整明细在 tooltip。
+      label: {
+        show: true,
+        position: "right",
+        distance: 6,
+        color: muted,
+        fontSize: 11,
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        formatter: (p: any) => {
+          const r = sorted[p.dataIndex];
+          return r ? `${compact(Number(p.value))} · ${r.calls.toLocaleString()}次` : "";
+        },
+      },
+      emphasis: { itemStyle: { shadowBlur: 8, shadowColor: "rgba(99,102,241,0.35)", shadowOffsetX: 1 } },
     }],
   };
   return (
