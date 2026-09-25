@@ -829,16 +829,16 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
           <div className="mb-1 text-xs text-muted-foreground">API Key</div>
           {active?.key_plain ? (
             <div className="flex items-center gap-2">
-              <div className="mono flex-1 rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active.key_plain}</div>
+              <div className="mono flex-1 rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active.key_prefix}</div>
               <CopyButton value={active.key_plain} label="复制 API Key" />
             </div>
           ) : (
             <div className="space-y-1">
               <div className="mono rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active ? active.key_prefix : "—"}</div>
-              {active && <p className="text-xs text-muted-foreground">该 Key 创建于旧版本,无法回显完整内容;点击「刷新 Key」重新生成后即可随时查看和复制。</p>}
+              {active && <p className="text-xs text-muted-foreground">该 Key 创建于旧版本,无法回显完整内容;点击「刷新 Key」重新生成后即可复制。</p>}
             </div>
           )}
-          {active && active.key_plain && <p className="mt-1 text-xs text-muted-foreground">完整 Key 随时可查看和复制;点击「刷新 Key」可重新生成(旧 Key 立即失效)。</p>}
+          {active && active.key_plain && <p className="mt-1 text-xs text-muted-foreground">Key 以掩码显示,点右侧按钮复制完整值;「刷新 Key」可重新生成(旧 Key 立即失效)。</p>}
         </div>
         {active
           ? <Button variant="outline" disabled={busy} onClick={() => setConfirmOpen(true)}><RefreshCw className="h-4 w-4" />刷新 Key</Button>
