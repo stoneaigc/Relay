@@ -26,6 +26,6 @@ if git diff --cached --quiet; then
 else
   git -c user.name="stoneaigc" -c user.email="stoneaigc@users.noreply.github.com" \
     commit -m "docs: sync wiki from docs/wiki"
-  git push -u origin HEAD:main
+  git push -u origin HEAD
   echo "==> Wiki 已推送:https://github.com/$REPO/wiki"
 fi
