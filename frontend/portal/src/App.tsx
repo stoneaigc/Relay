@@ -3,7 +3,7 @@ import { BrowserRouter, NavLink, useLocation } from "react-router-dom";
 import {
   Wallet, KeyRound, Copy, RefreshCw, Plus, LogOut, Check,
   LayoutDashboard, Receipt, MessageSquare, Menu, X, SendHorizontal, Boxes,
-  Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen,
+  Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen, AlertTriangle,
 } from "lucide-react";
 import { api, getToken, setToken, clearToken, healthz, KeyInfo, ModelCard, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType } from "./api";
 import { copyText } from "./clipboard";
@@ -953,7 +953,14 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
           ) : (
             <div className="space-y-1">
               <div className="mono rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active ? active.key_prefix : "—"}</div>
-              {active && <p className="text-xs text-muted-foreground">该 Key 创建于旧版本,无法回显完整内容;点击「刷新 Key」重新生成后即可复制。</p>}
+              {active && (
+                <p className="flex items-start gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs leading-5 text-amber-700 dark:text-amber-400">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>
+                    旧版本创建的 Key 不保存明文，无法直接复制。点击下方「刷新 Key」重新生成一把：新 Key 立即可复制，旧 Key 随即失效。
+                  </span>
+                </p>
+              )}
             </div>
           )}
           {active && active.key_plain && <p className="mt-1 text-xs text-muted-foreground">Key 以掩码显示,点右侧按钮复制完整值;「刷新 Key」可重新生成(旧 Key 立即失效)。</p>}

@@ -48,6 +48,12 @@ location /relay/ {
     proxy_ssl_server_name off;
     proxy_ssl_name $proxy_host;
     add_header X-Cache $upstream_cache_status;
+
+    # ---- 防升级缓存坑:SPA 入口页不缓存,发版后浏览器立刻拿到新前端 ----
+    # 静态资源文件名带内容 hash,可放心长缓存;此规则只豁免后台/门户入口页。
+    if ($uri ~ "^/relay/(admin|portal)/?$") {
+        add_header Cache-Control "no-cache" always;
+    }
 }
 
 # ---- ③ 站点根路径兜底(可选):访问 https://host:8443/ 也进管理后台 --------
@@ -73,6 +79,7 @@ location /relay/ {
 | `proxy_buffering off` | SSE 流式对话默认被 nginx 攒缓冲,回复一坨一坨出来甚至长时间空白 |
 | `proxy_read/send_timeout 600s` | 默认 60s,推理模型长思考、长流式会被中途掐断(504) |
 | `client_max_body_size 50m` | 默认 1m,多模态图片 base64 请求体直接 413 |
+| 入口页 `no-cache` | 浏览器沿用缓存的旧 `index.html`,发版后页面"看着没升级"(实测坑) |
 | ③ 根路径兜底 | 整站只跑 Relay 时,访问根地址也能进后台 |
 
 ## 常见问题
