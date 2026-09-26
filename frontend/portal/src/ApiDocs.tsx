@@ -347,6 +347,11 @@ export default function DocsView() {
             </TableRow>
             <TableRow>
               <TableCell><MethodBadge m="POST" /></TableCell>
+              <TableCell><K>/v1/responses</K></TableCell>
+              <TableCell className="text-muted-foreground">OpenAI Responses 协议(同模型同 Key,网关自动适配)</TableCell>
+            </TableRow>
+            <TableRow>
+              <TableCell><MethodBadge m="POST" /></TableCell>
               <TableCell><K>/v1/messages</K></TableCell>
               <TableCell className="text-muted-foreground">Anthropic 协议消息(<K>max_tokens</K> 必填;SDK 自动带 <K>anthropic-version</K>)</TableCell>
             </TableRow>

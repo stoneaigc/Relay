@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, ReactNode } from "react";
-import { BrowserRouter, NavLink, useLocation } from "react-router-dom";
+import { BrowserRouter, NavLink, useLocation, useNavigate } from "react-router-dom";
 import {
   Wallet, KeyRound, Copy, RefreshCw, Plus, LogOut, Check,
   LayoutDashboard, Receipt, MessageSquare, Menu, X, SendHorizontal, Boxes,
@@ -12,8 +12,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/ui/password-input";
 import { Badge } from "@/components/ui/badge";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import EChart, { cssVar } from "@/components/EChart";
 import type { EChartsCoreOption } from "echarts/core";
@@ -54,8 +54,8 @@ function CopyButton({ value, label = "复制" }: { value: string; label?: string
   );
 }
 
-/** 模型广场卡片:展示名称(点击复制)、能力标签、上下文长度、倍率、缓存与单价等信息。 */
-function ModelCardView({ m }: { m: ModelCard }) {
+/** 模型广场卡片:点击查看详情;悬浮复制图标直接复制模型名。 */
+function ModelCardView({ m, onDetail }: { m: ModelCard; onDetail: (m: ModelCard) => void }) {
   const [copied, copy] = useCopy();
   const ctx = m.context_length != null && m.context_length > 0
     ? m.context_length >= 1_000_000 ? `${(m.context_length / 1_000_000).toFixed(m.context_length % 1_000_000 ? 1 : 0)}M` : `${Math.round(m.context_length / 1000)}K`
@@ -64,7 +64,7 @@ function ModelCardView({ m }: { m: ModelCard }) {
     ? `$${m.input_price.toFixed(2)} / $${m.output_price.toFixed(2)}`
     : null;
   return (
-    <button type="button" onClick={() => copy(m.name)} title="点击复制模型名"
+    <button type="button" onClick={() => onDetail(m)} title="点击查看模型详情"
       className={cn(
         "group flex flex-col gap-2 rounded-xl border p-3.5 text-left transition-all",
         copied
@@ -75,7 +75,7 @@ function ModelCardView({ m }: { m: ModelCard }) {
         <span className="mono truncate text-sm font-medium" title={m.name}>{m.name}</span>
         {copied
           ? <span className="ml-auto inline-flex shrink-0 items-center gap-1 text-xs text-emerald-600"><Check className="h-3.5 w-3.5" />已复制</span>
-          : <Copy className="ml-auto h-3.5 w-3.5 shrink-0 opacity-0 transition-opacity group-hover:opacity-40" />}
+          : <Copy className="ml-auto h-3.5 w-3.5 shrink-0 opacity-0 transition-opacity group-hover:opacity-40" onClick={(e) => { e.stopPropagation(); copy(m.name); }} />}
       </div>
       {(m.labels.length > 0 || m.tags.length > 0) && (
         <div className="flex flex-wrap gap-1">
@@ -94,9 +94,72 @@ function ModelCardView({ m }: { m: ModelCard }) {
   );
 }
 
-/** 模型广场独立页:顶部概要与能力标签筛选,下方为可复制模型卡片网格。 */
+/// 模型详情弹窗:上下文/倍率/单价/上游部署数/缓存 + 协议兼容入口 + 复制模型名。
+function ModelDetailDialog({ m, onClose }: { m: ModelCard | null; onClose: () => void }) {
+  const navigate = useNavigate();
+  const ctx = m?.context_length != null && m.context_length > 0
+    ? (m.context_length >= 1_000_000
+        ? `${(m.context_length / 1_000_000).toFixed(m.context_length % 1_000_000 ? 1 : 0)}M`
+        : `${Math.round(m.context_length / 1000)}K`) + " tokens"
+    : "—";
+  // 网关内置协议互转:同一模型四种入口皆可调,按客户端使用的 SDK 自选。
+  const protos: [string, string][] = [
+    ["/v1/chat/completions", "OpenAI 对话补全"],
+    ["/v1/responses", "OpenAI Responses"],
+    ["/v1/messages", "Anthropic Messages"],
+    ["/v1/embeddings", "向量 Embeddings"],
+  ];
+  return (
+    <Dialog open={!!m} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <span className="mono">{m?.name}</span>
+            {m && <CopyButton value={m.name} label="复制模型名" />}
+          </DialogTitle>
+          <DialogDescription>同一模型可通过多种协议入口调用,网关自动完成协议互转。</DialogDescription>
+        </DialogHeader>
+        {m && (
+          <div className="space-y-4">
+            {(m.labels.length > 0 || m.tags.length > 0) && (
+              <div className="flex flex-wrap gap-1">
+                {m.labels.map((l) => <Badge key={l}>{l}</Badge>)}
+                {m.tags.map((t) => <Badge key={t} variant="muted">{t}</Badge>)}
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+              <div><div className="text-xs text-muted-foreground">上下文窗口</div><div className="mono">{ctx}</div></div>
+              <div><div className="text-xs text-muted-foreground">计费倍率</div><div className="mono">×{m.multiplier}</div></div>
+              <div><div className="text-xs text-muted-foreground">输入单价</div><div className="mono">{m.input_price != null ? `$${m.input_price.toFixed(2)} / 1M tokens` : "未定价"}</div></div>
+              <div><div className="text-xs text-muted-foreground">输出单价</div><div className="mono">{m.output_price != null ? `$${m.output_price.toFixed(2)} / 1M tokens` : "未定价"}</div></div>
+              <div><div className="text-xs text-muted-foreground">上游部署数</div><div className="mono">{m.upstreams}</div></div>
+              <div><div className="text-xs text-muted-foreground">上下文缓存</div><div>{m.cache ? <span className="text-success">支持(命中按折扣)</span> : <span className="text-muted-foreground">不支持</span>}</div></div>
+            </div>
+            <div>
+              <div className="mb-1 text-xs font-medium text-muted-foreground">兼容调用入口</div>
+              <div className="space-y-1">
+                {protos.map(([p, d]) => (
+                  <div key={p} className="flex items-center justify-between gap-2 rounded-md bg-muted/40 px-2 py-1 text-xs">
+                    <span className="mono">{p}</span>
+                    <span className="text-muted-foreground">{d}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <Button variant="outline" className="w-full" onClick={() => { onClose(); navigate("/docs"); }}>
+              <BookOpen className="h-4 w-4" /> 查看调用示例(API 文档)
+            </Button>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** 模型广场独立页:顶部概要与能力标签筛选,下方为模型卡片网格(点击查看详情)。 */
 function ModelsView({ models }: { models: ModelCard[] }) {
   const [tag, setTag] = useState<string | null>(null);
+  const [detail, setDetail] = useState<ModelCard | null>(null);
   const allTags: string[] = [];
   for (const m of models) {
     for (const t of m.tags) {
@@ -144,10 +207,11 @@ function ModelsView({ models }: { models: ModelCard[] }) {
         </Card>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
-          {shown.map((m) => <ModelCardView key={m.name} m={m} />)}
+          {shown.map((m) => <ModelCardView key={m.name} m={m} onDetail={setDetail} />)}
         </div>
       )}
-      <p className="text-xs text-muted-foreground">点击卡片即可复制模型名,在 API 调用的 model 字段中使用。</p>
+      <p className="text-xs text-muted-foreground">点击卡片查看模型详情与兼容的调用入口;悬浮复制图标可直接复制模型名。</p>
+      <ModelDetailDialog m={detail} onClose={() => setDetail(null)} />
     </div>
   );
 }
@@ -643,7 +707,7 @@ function ChatView({ models, onSent }: { models: string[]; onSent: () => void }) 
           {msgs.length === 0 ? (
             <div className="pt-20 text-center text-sm text-muted-foreground">
               <MessageSquare className="mx-auto mb-3 h-8 w-8 opacity-40" />
-              开始和模型对话吧 — 调用会按你的账户余额计费
+              开始和模型对话吧 — 对话经网关真实计费,按 tokens 记入「对话日志」。
             </div>
           ) : msgs.map((m, i) => (
             <div key={i} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
@@ -942,6 +1006,21 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
             <div className="mono flex-1 rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{baseUrl}</div>
             <CopyButton value={baseUrl} label="复制 Base URL" />
           </div>
+        </div>
+        <div>
+          <div className="mb-1 text-xs text-muted-foreground">可用端点(同一把 Key 通用)</div>
+          <div className="space-y-1">
+            {(kind === "openai"
+              ? [["/v1/chat/completions", "对话补全(流式/非流式)"], ["/v1/responses", "OpenAI Responses"], ["/v1/embeddings", "向量 Embeddings"], ["/v1/models", "模型列表"]]
+              : [["/v1/messages", "Anthropic 对话(流式/非流式)"], ["/v1/models", "模型列表"]]
+            ).map(([p, d]) => (
+              <div key={p} className="flex items-center justify-between gap-2 rounded-md bg-muted/40 px-2 py-1 text-xs">
+                <span className="mono">{p}</span>
+                <span className="text-muted-foreground">{d}</span>
+              </div>
+            ))}
+          </div>
+          <p className="mt-1 text-[11px] text-muted-foreground">完整请求示例见「API 文档」。</p>
         </div>
         <div>
           <div className="mb-1 text-xs text-muted-foreground">API Key</div>

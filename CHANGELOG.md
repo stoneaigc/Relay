@@ -11,6 +11,8 @@
 - **在线安装升级模式增强**：重复执行同一条命令即一键升级——自动从 systemd 单元定位安装目录、从 `relay.env` / `config/default.toml` 识别服务端口；当前版本已是最新时提示跳过（`FORCE=1` 强制重装）；升级中显式更换端口会同步改写 `relay.env` 的 `RELAY_SERVER__BIND`
 - **部署文档 Wiki**：新增 `docs/wiki/`（Home / 安装与升级 / Nginx 反向代理 / 管理后台功能介绍 / 用户门户功能介绍 / 架构与配置 / FAQ / _Sidebar 导航），README 快速开始重排为「在线安装 → 离线安装 → Docker → 本地开发」并按开源项目惯例重构（特性速览 / 五分钟主流程 / 定位差异 / Star History / 交流社区占位）
 - **管理端概览重设计**：新增今日运营 KPI 卡（今日调用 / 今日 tokens 含输入·输出 / 今日费用 / 缓存命中率含节省 tokens，彩色图标徽章）与累计一览条（用户 / 总调用 / 总消耗 tokens 含输入·输出 / 总余额）；消耗趋势改为**输入（天蓝）/ 输出（翠绿）堆叠柱 + 调用次数折线**，页脚汇总区间输入·输出·费用。后端 `/admin/api/overview` 与 `/overview/series` 相应新增输入 / 输出 / 费用聚合与今日块（旧字段保持兼容）
+- **门户模型详情弹窗**：模型广场点击卡片弹出详情——上下文窗口、计费倍率、输入/输出单价、上游部署数、上下文缓存、**兼容调用入口**（OpenAI Chat · OpenAI Responses · Anthropic Messages · Embeddings，网关自动协议互转），一键复制模型名并跳转 API 文档；卡片悬浮复制图标保留快捷复制
+- **门户概览接口卡列出可用端点**：OpenAI 接口卡展示 `/v1/chat/completions`、`/v1/responses`、`/v1/embeddings`、`/v1/models`，Anthropic 卡展示 `/v1/messages`（同一把 Key 全部通用）；门户 API 文档协议端点表补 `/v1/responses` 行；对话页空态明确「对话经网关真实计费，按 tokens 记入对话日志」
 
 ### 变更
 
