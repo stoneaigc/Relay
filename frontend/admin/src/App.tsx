@@ -3149,6 +3149,15 @@ function SettingsPanel() {
   const [portalSaving, setPortalSaving] = useState(false);
   const [portalNote, setPortalNote] = useState("");
   const [portalErr, setPortalErr] = useState("");
+  // 软件更新
+  const [version, setVersion] = useState("");
+  const [updateInfo, setUpdateInfo] = useState<{ current: string; latest: string | null; has_update: boolean; release_url?: string; error?: string } | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const checkUpdate = async () => {
+    setUpdateChecking(true);
+    try { setUpdateInfo(await api.versionCheck()); } catch { setUpdateInfo(null); } finally { setUpdateChecking(false); }
+  };
+  useEffect(() => { healthz().then((h) => setVersion(h.version)).catch(() => {}); }, []);
 
   const load = async () => {
     setLoading(true);
@@ -3558,6 +3567,44 @@ function SettingsPanel() {
             {portalNote && <span className="text-xs text-success">{portalNote}</span>}
             {portalErr && <span className="text-xs text-destructive">{portalErr}</span>}
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <CardTitle className="text-base">软件更新</CardTitle>
+            <Badge variant="muted">当前 v{version}</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" onClick={checkUpdate} disabled={updateChecking}>
+              {updateChecking ? "检查中…" : "检查更新"}
+            </Button>
+            {updateInfo?.has_update && updateInfo.latest && (
+              <Badge>新版本 v{updateInfo.latest} 可用</Badge>
+            )}
+            {!updateInfo?.has_update && updateInfo?.latest && !updateInfo?.error && (
+              <span className="text-xs text-muted-foreground">已是最新版本</span>
+            )}
+          </div>
+          {updateInfo?.error && (
+            <p className="text-xs text-muted-foreground">{updateInfo.error}。</p>
+          )}
+          {updateInfo?.has_update && updateInfo.release_url && (
+            <p className="text-xs text-muted-foreground">
+              前往{" "}
+              <a href={updateInfo.release_url} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                GitHub Releases
+              </a>{" "}
+              下载新版本包,解压后执行{" "}
+              <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[12px] text-foreground">sudo ./install.sh</code>{" "}
+              即可原地升级(配置与数据保留);Linux 服务器也可直接运行{" "}
+              <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[12px] text-foreground">sudo ./upgrade.sh</code>{" "}
+              一键升级。
+            </p>
+          )}
         </CardContent>
       </Card>
     </div>

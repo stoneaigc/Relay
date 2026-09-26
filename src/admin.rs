@@ -2318,6 +2318,71 @@ pub async fn test_embedding(
 
 // ---- 系统配置:邮箱 ----
 
+/// 语义化版本比较:latest 是否严格大于 current(仅比较数字段,忽略 v 前缀与后缀)。
+fn version_newer(latest: &str, current: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
+        s.trim_start_matches('v')
+            .split('.')
+            .map(|x| x.trim().parse().unwrap_or(0))
+            .collect()
+    };
+    let (l, c) = (parse(latest), parse(current));
+    for i in 0..3 {
+        let li = l.get(i).copied().unwrap_or(0);
+        let ci = c.get(i).copied().unwrap_or(0);
+        if li != ci {
+            return li > ci;
+        }
+    }
+    false
+}
+
+/// GET /admin/version/check —— 检查更新:比对 GitHub 最新 Release 与当前版本。
+/// 离线/网络受限时不报错,返回 has_update=false 并附说明。
+pub async fn version_check(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let current = env!("CARGO_PKG_VERSION");
+    let repo =
+        std::env::var("RELAY_UPDATE_REPO").unwrap_or_else(|_| "stoneaigc/Relay".to_string());
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .user_agent("relay-upgrade-check")
+        .build()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let resp = client
+        .get(format!("https://api.github.com/repos/{repo}/releases/latest"))
+        .send()
+        .await;
+    let Ok(resp) = resp else {
+        return Ok(Json(json!({
+            "current": current, "latest": Value::Null, "has_update": false,
+            "error": "无法连接 GitHub(离线或网络受限),请手动检查 Releases 页面",
+        })));
+    };
+    if !resp.status().is_success() {
+        return Ok(Json(json!({
+            "current": current, "latest": Value::Null, "has_update": false,
+            "error": format!("GitHub 返回 {}", resp.status().as_u16()),
+        })));
+    }
+    let j: Value = resp.json().await.unwrap_or(Value::Null);
+    let tag = j["tag_name"].as_str().unwrap_or("").trim().to_string();
+    let latest = tag.trim_start_matches('v').to_string();
+    let release_url = j["html_url"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("https://github.com/{repo}/releases"));
+    Ok(Json(json!({
+        "current": current,
+        "latest": if latest.is_empty() { Value::Null } else { json!(latest) },
+        "has_update": !latest.is_empty() && version_newer(&latest, current),
+        "release_url": release_url,
+    })))
+}
+
 /// GET /admin/settings/email -- 回显邮箱配置(授权码不回显,仅返回 has_password)。
 pub async fn get_email_settings(
     State(state): State<Arc<AppState>>,

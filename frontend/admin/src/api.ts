@@ -232,6 +232,8 @@ export const api = {
     req("/admin/api/models", { method: "POST", body: JSON.stringify(body) }),
   updateModel: (id: number, body: { kind: string; base_url: string; api_key?: string; upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null; context_length?: number | null; tags?: string }) =>
     req(`/admin/api/models/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  versionCheck: (): Promise<{ current: string; latest: string | null; has_update: boolean; release_url?: string; error?: string }> =>
+    req("/admin/api/version/check"),
   deleteModel: (id: number) => req(`/admin/api/models/${id}`, { method: "DELETE" }),
   deleteModelsBatch: (ids: number[]): Promise<{ ok: boolean; deleted: number }> =>
     req("/admin/api/models/batch-delete", { method: "POST", body: JSON.stringify({ ids }) }),

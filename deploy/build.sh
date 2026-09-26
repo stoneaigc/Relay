@@ -28,7 +28,7 @@ cp target/release/relay "$STAGE/relay"
 cp -r frontend/admin/dist  "$STAGE/frontend/admin/dist"
 cp -r frontend/portal/dist "$STAGE/frontend/portal/dist"
 cp config/default.toml "$STAGE/config/"
-cp deploy/install.sh deploy/relay.service "$STAGE/"
+cp deploy/install.sh deploy/upgrade.sh deploy/relay.service "$STAGE/"
 cp README.md "$STAGE/"
 
 echo "==> [4/4] 打包 tar.gz"

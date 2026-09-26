@@ -354,6 +354,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/settings/embedding/test", post(admin::test_embedding))
         .route("/settings/logging", get(admin::get_logging_settings).post(admin::save_logging_settings))
         .route("/settings/portal", get(admin::get_portal_settings).post(admin::save_portal_settings))
+        // 检查更新(比对 GitHub 最新 Release)
+        .route("/version/check", get(admin::version_check))
         // ---- 上游治理仪表盘 ----
         .route("/upstreams", get(admin::list_upstreams))
         .route("/upstreams/reset", post(admin::reset_all_breakers))

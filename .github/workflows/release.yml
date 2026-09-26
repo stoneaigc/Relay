@@ -93,6 +93,7 @@ jobs:
           cp -r frontend/portal/dist        "dist/${PKG}/frontend/portal/dist"
           # 部署脚本 + systemd 模板放到包根目录
           install -m 0755 deploy/install.sh "dist/${PKG}/install.sh"
+          install -m 0755 deploy/upgrade.sh "dist/${PKG}/upgrade.sh"
           cp deploy/relay.service           "dist/${PKG}/relay.service"
           tar -C dist -czf "${PKG}.tar.gz" "${PKG}"
           echo "PKG=${PKG}" >> "$GITHUB_ENV"
