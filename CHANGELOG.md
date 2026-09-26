@@ -16,6 +16,7 @@
 - `install.sh` 现将 `install.sh` / `upgrade.sh` 一并落入安装目录（`/opt/relay/upgrade.sh` 可就地一键升级）
 - `install.sh` 的 systemd 注册/重启逻辑加守卫：无 systemd 环境（如 Alpine/OpenRC）不再中途异常退出（此前二进制已替换但因 `systemctl` 缺失中止，服务仍运行旧程序），改为跳过注册并输出手动重启指引
 - 门户「旧 Key 无法复制」提示从灰色小字改为醒目琥珀警示框——0.2.0 之前创建的 Key 不存明文（仅哈希，无法找回），隐藏复制按钮属预期行为，点「刷新 Key」重新生成即恢复可复制
+- 管理端概览「用户消耗排行」「按模型统计」由表格改为 ECharts 横向条形图（与用量分布同视觉语言：渐变条 + 第一名强调 + 条尾直显 tokens 与调用次数，tooltip 含占比）
 - Nginx 示例配置补「SPA 入口页 no-cache」规则：防发版后浏览器沿用缓存的旧 `index.html`，页面"看着没升级"
 - `init-wiki.sh` 同步时剥离文档首个 H1——GitHub Wiki 每页顶部已显示页面名，避免标题重复
 

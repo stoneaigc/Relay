@@ -244,7 +244,7 @@ const SOURCE_LABEL: Record<string, string> = {
   admin: "管理员", phone: "手机号", wechat: "微信", alipay: "支付宝", email: "邮箱",
 };
 
-/// 手写 SVG 柱状图(零依赖):hover 高亮 + 顶部 tooltip,供趋势卡与用户弹窗复用。
+/// 用量趋势柱线图(ECharts):tokens 柱 + 可选调用次数折线,供概览趋势卡与用户弹窗复用。
 function LineChart({ points, fmtX }: { points: { ts: number; tokens: number; calls?: number }[]; fmtX?: (ts: number) => string }) {
   const primary = cssVar("--color-primary", "#6366f1");
   const border = cssVar("--color-border", "#e4e4e7");
@@ -522,6 +522,56 @@ function TrendCard() {
   );
 }
 
+/// 概览排行条形图(ECharts 横向条形图,与「用量分布」同视觉语言);替代原统计表格,条尾直显 tokens 与调用次数。
+function RankBars({ rows }: { rows: { label: string; used: number; calls: number }[] }) {
+  const border = cssVar("--color-border", "#e4e4e7");
+  const muted = cssVar("--color-muted-foreground", "#71717a");
+  const compact = (v: number) => (v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(0)}K` : String(Math.round(v)));
+  // 排序后反转:ECharts 类目轴自下而上,反转让第一名显示在最上面。
+  const sorted = [...rows].sort((a, b) => b.used - a.used);
+  const option: EChartsCoreOption = {
+    grid: { left: 8, right: 100, top: 10, bottom: 0, containLabel: true },
+    tooltip: {
+      trigger: "axis", axisPointer: { type: "shadow" }, confine: true,
+      formatter: (params: any) => {
+        const p = Array.isArray(params) ? params[0] : params;
+        const r = sorted[p.dataIndex];
+        if (!r) return "";
+        return `<b>${r.label}</b><br/>${p.marker} ${r.used.toLocaleString()} tokens<br/><span style="color:${muted}">${r.calls.toLocaleString()} 次调用 · 占比 ${p.percent}%</span>`;
+      },
+    },
+    xAxis: { type: "value", splitLine: { show: false }, axisLabel: { show: false }, axisLine: { show: false }, axisTick: { show: false } },
+    yAxis: {
+      type: "category",
+      data: [...sorted].reverse().map((r) => r.label),
+      axisTick: { show: false }, axisLine: { lineStyle: { color: border } },
+      axisLabel: { color: muted, fontSize: 11, width: 96, overflow: "truncate" },
+    },
+    series: [{
+      type: "bar",
+      data: [...sorted].reverse().map((r, i, arr) => ({
+        value: r.used,
+        itemStyle: {
+          // 浅→深横向渐变;第一名不透明强调,其余降透明度形成层次。
+          color: { type: "linear", x: 0, y: 0, x2: 1, y2: 0, colorStops: [{ offset: 0, color: "#a5b4fc" }, { offset: 1, color: "#6366f1" }] },
+          opacity: i === arr.length - 1 ? 1 : 0.62,
+          borderRadius: [0, 3, 3, 0],
+        },
+      })),
+      barMaxWidth: 14,
+      showBackground: true,
+      backgroundStyle: { color: "rgba(113,113,122,0.08)", borderRadius: [0, 3, 3, 0] },
+      label: {
+        show: true, position: "right", distance: 6, color: muted, fontSize: 11,
+        fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        formatter: (p: any) => { const r = sorted[p.dataIndex]; return r ? `${compact(Number(p.value))} · ${r.calls.toLocaleString()}次` : ""; },
+      },
+      emphasis: { itemStyle: { shadowBlur: 8, shadowColor: "rgba(99,102,241,0.35)", shadowOffsetX: 1 } },
+    }],
+  };
+  return <EChart option={option} height={Math.max(150, sorted.length * 34 + 24)} />;
+}
+
 function OverviewPanel() {
   const [d, setD] = useState<any | null>(null);
   useEffect(() => { api.overview().then(setD); }, []);
@@ -542,23 +592,7 @@ function OverviewPanel() {
           <CardHeader><CardTitle className="text-base">用户消耗排行</CardTitle></CardHeader>
           <CardContent>
             {d.top_users.length === 0 ? <p className="text-sm text-muted-foreground">暂无消耗</p> : (
-              <Table>
-                <TableHeader><TableRow><TableHead>用户</TableHead><TableHead>已用 tokens</TableHead><TableHead>调用数</TableHead></TableRow></TableHeader>
-                <TableBody>
-                  {d.top_users.map((u: any) => (
-                    <TableRow key={u.user_id}>
-                      <TableCell>
-                        <div className="flex items-center gap-2">
-                          <Avatar name={u.name || u.user_id} />
-                          <span>{u.name || <span className="mono text-xs text-muted-foreground">{String(u.user_id).slice(0, 8)}</span>}</span>
-                        </div>
-                      </TableCell>
-                      <TableCell className="mono">{fmt(u.used)}</TableCell>
-                      <TableCell>{fmt(u.calls)}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+              <RankBars rows={d.top_users.map((u: any) => ({ label: u.name || String(u.user_id).slice(0, 8), used: u.used, calls: u.calls }))} />
             )}
           </CardContent>
         </Card>
@@ -567,18 +601,7 @@ function OverviewPanel() {
           <CardHeader><CardTitle className="text-base">按模型统计</CardTitle></CardHeader>
           <CardContent>
             {d.by_model.length === 0 ? <p className="text-sm text-muted-foreground">暂无消耗</p> : (
-              <Table>
-                <TableHeader><TableRow><TableHead>模型</TableHead><TableHead>已用 tokens</TableHead><TableHead>调用数</TableHead></TableRow></TableHeader>
-                <TableBody>
-                  {d.by_model.map((m: any, i: number) => (
-                    <TableRow key={i}>
-                      <TableCell className="mono">{m.model || "—"}</TableCell>
-                      <TableCell className="mono">{fmt(m.used)}</TableCell>
-                      <TableCell>{fmt(m.calls)}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+              <RankBars rows={d.by_model.map((m: any) => ({ label: m.model || "—", used: m.used, calls: m.calls }))} />
             )}
           </CardContent>
         </Card>
