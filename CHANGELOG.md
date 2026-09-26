@@ -8,6 +8,7 @@
 ### 新增
 
 - **在线安装（参考 1Panel 快速安装体验）**：`deploy/install-online.sh` —— 一条命令 + 交互引导（安装目录 / 端口 / 管理员账号，默认值直接回车），自动查询最新 Release、下载对应架构包、生成随机 JWT 密钥与管理员强密码（`relay.env`，chmod 600）、注册 systemd、健康检查；支持免交互环境变量与镜像加速（`DL_PREFIX`）；已安装时自动进入升级模式（保留配置与数据）
+- **在线安装升级模式增强**：重复执行同一条命令即一键升级——自动从 systemd 单元定位安装目录、从 `relay.env` / `config/default.toml` 识别服务端口；当前版本已是最新时提示跳过（`FORCE=1` 强制重装）；升级中显式更换端口会同步改写 `relay.env` 的 `RELAY_SERVER__BIND`
 - **部署文档 Wiki**：新增 `docs/wiki/`（Home / 安装与升级 / Nginx 反向代理 / 管理后台功能介绍 / 用户门户功能介绍 / 架构与配置 / FAQ / _Sidebar 导航），README 快速开始重排为「在线安装 → 离线安装 → Docker → 本地开发」并按开源项目惯例重构（特性速览 / 五分钟主流程 / 定位差异 / Star History / 交流社区占位）
 
 ### 变更

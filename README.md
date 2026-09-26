@@ -53,7 +53,7 @@ curl -fsSL https://raw.githubusercontent.com/stoneaigc/Relay/main/deploy/install
   && sudo bash install-online.sh
 ```
 
-自动完成：架构检测 → 下载最新 Release → 交互引导（端口/管理员密码，均有默认值，直接回车）→ 生成随机 JWT 密钥 → 注册 systemd → 健康检查。支持免交互（环境变量）与镜像加速（`DL_PREFIX`），详见 [Wiki · 安装与升级](https://github.com/stoneaigc/Relay/wiki/%E5%AE%89%E8%A3%85%E4%B8%8E%E5%8D%87%E7%BA%A7)。
+自动完成：架构检测 → 下载最新 Release → 交互引导（端口/管理员密码，均有默认值，直接回车）→ 生成随机 JWT 密钥 → 注册 systemd → 健康检查。**已安装时再次执行同一命令即一键升级**（自动识别安装目录与端口、保留配置与数据、同版本自动跳过）。支持免交互（环境变量）与镜像加速（`DL_PREFIX`），详见 [Wiki · 安装与升级](https://github.com/stoneaigc/Relay/wiki/%E5%AE%89%E8%A3%85%E4%B8%8E%E5%8D%87%E7%BA%A7)。
 
 ### 方式二：离线安装（内网 / 手动下载）
 

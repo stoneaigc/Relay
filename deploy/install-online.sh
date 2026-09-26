@@ -6,7 +6,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/stoneaigc/Relay/main/deploy/install-online.sh -o install-online.sh && sudo bash install-online.sh
 #
 # 交互引导:安装目录 / 服务端口 / 管理员账号(回车即用默认值)。
-# 已安装时自动进入升级模式:保留配置与数据,只替换程序。
+# 已安装时自动进入升级模式:自动识别安装目录与端口,保留配置与数据,只替换程序;
+# 当前版本已是最新时直接跳过(FORCE=1 可强制重装)。
 #
 # 免交互(CI/自动化):所有提问都可用环境变量跳过,例如
 #   sudo NONINTERACTIVE=1 RELAY_PORT=9000 RELAY_ADMIN_PASSWORD='S3cret!' bash install-online.sh
@@ -14,15 +15,18 @@
 # 可用环境变量:
 #   RELAY_VERSION         指定版本(如 0.2.1),缺省 = 最新 Release
 #   INSTALL_DIR           安装目录(默认 /opt/relay)
-#   RELAY_PORT            服务端口(默认 8080)
+#   RELAY_PORT            服务端口(默认 8080;升级时缺省自动从已安装配置识别)
 #   RELAY_ADMIN_USERNAME  管理后台用户名(默认 admin,仅首次)
 #   RELAY_ADMIN_PASSWORD  管理后台密码(缺省自动随机生成,仅首次)
 #   REPO                  GitHub 仓库(默认 stoneaigc/Relay)
 #   DL_PREFIX             下载加速前缀(默认 https://github.com,可换镜像)
+#   FORCE                 升级模式下同版本也强制重装(默认:版本相同则跳过)
 # ============================================================================
 set -euo pipefail
 
 REPO="${REPO:-stoneaigc/Relay}"
+INSTALL_DIR_SET="${INSTALL_DIR:+1}"   # 调用方是否显式指定安装目录
+RELAY_PORT_SET="${RELAY_PORT:+1}"     # 调用方是否显式指定端口
 INSTALL_DIR="${INSTALL_DIR:-/opt/relay}"
 RELAY_PORT="${RELAY_PORT:-8080}"
 RELAY_ADMIN_USERNAME="${RELAY_ADMIN_USERNAME:-admin}"
@@ -84,16 +88,45 @@ fi
 echo "==> 目标版本: v$RELAY_VERSION"
 
 # ---- 2. 已安装检测(升级模式) ---------------------------------------------
+# 识别规则:安装目录下有 relay 可执行文件 → 升级模式;默认目录未命中且调用方
+# 未显式指定目录时,再从 systemd 单元的 WorkingDirectory 自动定位真实安装目录。
+if [ -z "$INSTALL_DIR_SET" ] && [ ! -x "$INSTALL_DIR/relay" ] && command -v systemctl >/dev/null 2>&1; then
+  UNIT_DIR="$(systemctl show relay -p WorkingDirectory --value 2>/dev/null | tail -n1 | sed 's/^WorkingDirectory=//' | tr -d '[:space:]')"
+  if [ -n "$UNIT_DIR" ] && [ -x "$UNIT_DIR/relay" ]; then
+    INSTALL_DIR="$UNIT_DIR"
+    info "从 systemd 单元检测到安装目录:$INSTALL_DIR"
+  fi
+fi
+
 UPGRADE=0
+CUR=""
 if [ -x "$INSTALL_DIR/relay" ]; then
   UPGRADE=1
-  CUR="$(curl -fsS -m 5 "http://127.0.0.1:${RELAY_PORT}/healthz" 2>/dev/null \
-    | grep -o '"version":"[^"]*"' | cut -d'"' -f4 || true)"
+  # 已安装端口:优先调用方显式指定的 RELAY_PORT,否则从 relay.env / default.toml 识别
+  ENV_PORT=""
+  if [ -f "$INSTALL_DIR/relay.env" ]; then
+    ENV_PORT="$(grep -E '^RELAY_SERVER__BIND=' "$INSTALL_DIR/relay.env" 2>/dev/null | tail -n1 | sed 's/.*://' | tr -d '[:space:]')"
+  fi
+  if [ -z "$ENV_PORT" ] && [ -f "$INSTALL_DIR/config/default.toml" ]; then
+    ENV_PORT="$(sed -n 's/^\s*bind\s*=\s*.*:\([0-9]\{1,5\}\)[^0-9]*$/\1/p' "$INSTALL_DIR/config/default.toml" 2>/dev/null | tail -n1)"
+  fi
+  case "$ENV_PORT" in ''|*[!0-9]*) ENV_PORT="" ;; esac
+  if [ -z "$RELAY_PORT_SET" ] && [ -n "$ENV_PORT" ]; then
+    RELAY_PORT="$ENV_PORT"
+    info "从已安装配置检测到服务端口:$RELAY_PORT"
+  fi
+  HEALTH_URL="http://127.0.0.1:${RELAY_PORT}/healthz"
+  CUR="$(curl -fsS -m 5 "$HEALTH_URL" 2>/dev/null | grep -o '"version":"[^"]*"' | cut -d'"' -f4 || true)"
   echo "==> 检测到已安装:${INSTALL_DIR}/relay(当前 ${CUR:-未知版本})"
   echo "==> 将进入升级模式:保留 config / relay.env / 数据库,只替换程序文件。"
   if [ "$INTERACTIVE" = "1" ]; then
     read -r -p "确认升级到 v$RELAY_VERSION? [Y/n]: " yn || yn="Y"
     case "$yn" in [nN]*) abort "已取消。";; esac
+  fi
+  # 版本相同:无需重装(FORCE=1 可强制)
+  if [ "$CUR" = "$RELAY_VERSION" ] && [ -z "${FORCE:-}" ]; then
+    info "当前已是最新版本 v$CUR,无需升级。如需强制重装:FORCE=1 sudo bash $0"
+    exit 0
   fi
 fi
 
@@ -149,6 +182,17 @@ elif [ ! -f "$ENV_FILE" ]; then
   # 升级但从未有过 relay.env(旧版本装的):至少把端口固化下来
   echo "RELAY_SERVER__BIND=0.0.0.0:${RELAY_PORT}" > "$ENV_FILE"
   chmod 600 "$ENV_FILE"
+fi
+
+# 升级模式:端口与已安装配置不一致(显式传参或交互中修改)时,同步更新 relay.env
+if [ "$UPGRADE" = "1" ] && [ -f "$ENV_FILE" ] && [ "$ENV_PORT" != "$RELAY_PORT" ]; then
+  if grep -q '^RELAY_SERVER__BIND=' "$ENV_FILE"; then
+    sed -i "s,^RELAY_SERVER__BIND=.*,RELAY_SERVER__BIND=0.0.0.0:${RELAY_PORT}," "$ENV_FILE"
+  else
+    printf 'RELAY_SERVER__BIND=0.0.0.0:%s\n' "$RELAY_PORT" >> "$ENV_FILE"
+  fi
+  chmod 600 "$ENV_FILE"
+  info "已更新 $ENV_FILE 的监听端口为 ${RELAY_PORT}"
 fi
 
 # ---- 6. 执行安装(install.sh 幂等:装程序/注册 systemd/保配置) ------------
