@@ -1,10 +1,7 @@
-<div align="center">
-
 # Relay
 
-**自托管 LLM API 网关 · 单进程 Rust 二进制 · 默认零外部依赖**
-
-把任意多家模型供应商收敛成一个 **OpenAI / Anthropic 兼容入口**：智能路由 · 协议互转 · 故障转移 · 语义缓存 · 计费管控 · 全链路追踪，自带用户门户与运营后台，发 Key、计费、审计开箱即用。
+> **自托管 LLM API 网关 · 单进程 Rust 二进制 · 默认零外部依赖**
+> 把任意多家模型供应商收敛成一个 **OpenAI / Anthropic 兼容入口**：智能路由 · 协议互转 · 故障转移 · 语义缓存 · 计费管控 · 全链路追踪；自带用户门户与运营后台，发 Key、计费、审计开箱即用。
 
 [![CI](https://github.com/stoneaigc/Relay/actions/workflows/ci.yml/badge.svg)](https://github.com/stoneaigc/Relay/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/stoneaigc/Relay)](https://github.com/stoneaigc/Relay/releases/latest)
@@ -12,8 +9,6 @@
 [![Stars](https://img.shields.io/github/stars/stoneaigc/Relay?style=social)](https://github.com/stoneaigc/Relay/stargazers)
 
 [📖 完整文档（Wiki）](https://github.com/stoneaigc/Relay/wiki) · [🚀 快速开始](#-快速开始) · [💬 交流社区](#-交流社区) · [⬇️ Releases](https://github.com/stoneaigc/Relay/releases)
-
-</div>
 
 <!-- TODO: 在此插入两张截图（docs/images/portal.png 用户门户、docs/images/admin.png 运营后台） -->
 
