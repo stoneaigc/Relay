@@ -33,6 +33,12 @@ else
   cp -r "$SRC/frontend" "$INSTALL_DIR/frontend"
 fi
 
+# ---- 部署脚本:安装/升级脚本落到安装目录,后续可就地升级 -------------------
+install -m 0755 "$SRC/install.sh" "$INSTALL_DIR/install.sh"
+if [ -f "$SRC/upgrade.sh" ]; then
+  install -m 0755 "$SRC/upgrade.sh" "$INSTALL_DIR/upgrade.sh"
+fi
+
 # 配置:仅首次安装时写入,避免覆盖线上已改过的配置
 mkdir -p "$INSTALL_DIR/config"
 if [ ! -f "$INSTALL_DIR/config/default.toml" ]; then

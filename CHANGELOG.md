@@ -3,6 +3,17 @@
 本文件记录 Relay 每个版本的变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- **在线安装（参考 1Panel 快速安装体验）**：`deploy/install-online.sh` —— 一条命令 + 交互引导（安装目录 / 端口 / 管理员账号，默认值直接回车），自动查询最新 Release、下载对应架构包、生成随机 JWT 密钥与管理员强密码（`relay.env`，chmod 600）、注册 systemd、健康检查；支持免交互环境变量与镜像加速（`DL_PREFIX`）；已安装时自动进入升级模式（保留配置与数据）
+- **部署文档 Wiki**：新增 `docs/wiki/`（Home / 安装与升级 / Nginx 反向代理），README 快速开始重排为「在线安装 → 离线安装 → Docker → 本地开发」四方式，附 GitHub Wiki 一键导入命令
+
+### 变更
+
+- `install.sh` 现将 `install.sh` / `upgrade.sh` 一并落入安装目录（`/opt/relay/upgrade.sh` 可就地一键升级）
+
 ## [0.2.1] - 2026-09-26
 
 ### 修复

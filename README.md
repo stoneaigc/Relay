@@ -9,7 +9,7 @@
 
 <!-- TODO: 建议在此处补充两张截图（docs/images/portal.png 用户门户、docs/images/admin.png 运营后台），让访客直观看到双前端门面 -->
 
-[核心能力](#核心能力) · [快速开始](#快速开始) · [数据面接口](#数据面接口) · [为什么选 Relay](#为什么选-relay) · [可观测](#可观测) · [性能基准](#性能基准) · [配置](#配置) · [部署形态](#部署形态) · [开发与 CI](#开发与-ci) · [路线图](#路线图) · [FAQ 与安全](#faq-与安全)
+[核心能力](#核心能力) · [快速开始](#快速开始) · [数据面接口](#数据面接口) · [为什么选 Relay](#为什么选-relay) · [可观测](#可观测) · [性能基准](#性能基准) · [配置](#配置) · [部署形态](#部署形态) · [开发与 CI](#开发与-ci) · [路线图](#路线图) · [FAQ 与安全](#faq-与安全) · [Wiki](docs/wiki/Home.md)
 
 ---
 
@@ -45,9 +45,20 @@
 - **Docker**：任意支持 Docker Compose v2 的环境
 - **本地开发**：Rust stable（edition 2021）+ Node ≥ 20（构建前端）；基准脚本需 Node ≥ 18
 
-### 方式一：下载 Release 包部署（推荐）
+### 方式一：在线安装（推荐，一条命令）
 
-前往 [GitHub Releases](https://github.com/stoneaigc/Relay/releases/latest) 下载对应架构的 `relay-<版本>-linux-<架构>.tar.gz`（架构后缀为 `x86_64` / `arm64`，musl 静态链接），然后：
+参考 1Panel 的快速安装体验——**一条命令 + 交互引导**，自动完成下载、配置、注册 systemd 服务与健康检查：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/stoneaigc/Relay/main/deploy/install-online.sh -o install-online.sh \
+  && sudo bash install-online.sh
+```
+
+交互引导项均有默认值（安装目录 `/opt/relay`、端口 `8080`、管理员 `admin` + 自动生成的强密码），直接回车即可。脚本同时自动生成随机 JWT 密钥（`relay.env`，`chmod 600`），比手写默认配置更安全。支持免交互（环境变量）与镜像加速（`DL_PREFIX`），详见 [Wiki · 安装与升级](docs/wiki/安装与升级.md)。
+
+### 方式二：离线安装（内网 / 手动下载）
+
+服务器无法访问 GitHub 时，从 [GitHub Releases](https://github.com/stoneaigc/Relay/releases/latest) 下载对应架构的 `relay-<版本>-linux-<架构>.tar.gz`（架构后缀为 `x86_64` / `arm64`，musl 静态链接），上传服务器后：
 
 ```bash
 tar xzf relay-*.tar.gz && cd relay-*/
@@ -55,7 +66,9 @@ sudo ./install.sh                     # 默认装 /opt/relay,自动注册 system
 curl http://localhost:8080/healthz    # 探活
 ```
 
-### 方式二：Docker Compose
+> ⚠️ 离线安装默认管理员为 `admin / Relay@123`、JWT 密钥为开发默认值，生产环境启动前务必编辑 `/opt/relay/relay.env` 覆盖（在线安装会自动生成）。
+
+### 方式三：Docker Compose
 
 ```bash
 docker compose up -d --build        # 默认 SQLite,数据落 named volume
@@ -64,7 +77,7 @@ curl http://localhost:8080/healthz
 
 > **注意**：compose 中的 `RELAY_AUTH__JWT_SECRET` / `RELAY_ADMIN__PASSWORD` 默认是注释态，对外部署前务必取消注释并覆盖默认口令，详见下方[部署形态](#部署形态)。
 
-### 方式三：本地开发
+### 方式四：本地开发
 
 ```bash
 cargo run                                            # 后端 :8080,首次启动自动建表
@@ -73,6 +86,11 @@ cd frontend/admin  && npm install && npm run dev     # 管理后台 :5174
 ```
 
 > 首次启动自动播种 3 个示例奖励任务；默认管理员与初始配置见 `config/default.toml`，**生产务必用环境变量覆盖**。
+
+### 升级与子路径反代
+
+- **升级**：在线装的直接 `sudo bash /opt/relay/upgrade.sh`（自动备份、可回滚）；离线装的下载新包重新执行 `install.sh`（配置与数据自动保留）。也可在管理后台「设置 → 软件更新」一键检查。
+- **Nginx 子路径对外暴露**（如 `https://域名/relay/admin/`）：完整配置与兜底规则见 [Wiki · Nginx 反向代理](docs/wiki/Nginx-反向代理.md)。
 
 ### 五分钟走完主流程
 
@@ -232,8 +250,11 @@ RELAY_DATABASE__TYPE=postgres
 
 两种部署通道（详见[快速开始](#快速开始)与仓库 `deploy/` 脚本）：
 
-- **Release 包 / 源码构建 → systemd**：单二进制 + 静态前端，专用系统用户运行，幂等升级；敏感变量可写入 `/opt/relay/relay.env`（systemd EnvironmentFile 自动注入）。
+- **在线安装（推荐）**：`install-online.sh` 一条命令交互式安装，自动下载双架构 Release 包、生成随机 JWT 密钥与管理员凭据、注册 systemd；后续 `upgrade.sh` 一键升级（自动备份、可回滚）。
+- **离线安装 / Release 包 → systemd**：单二进制 + 静态前端，专用系统用户运行，幂等升级；敏感变量可写入 `/opt/relay/relay.env`（systemd EnvironmentFile 自动注入）。
 - **Docker Compose**：`docker compose up -d --build`，SQLite 默认、`--profile pg` 一键切 Postgres。
+
+部署细节（在线 / 离线 / 升级 / 卸载 / Nginx 子路径反代完整配置）见 [Wiki · 安装与升级](docs/wiki/安装与升级.md) 与 [Wiki · Nginx 反向代理](docs/wiki/Nginx-反向代理.md)。
 
 **生产检查清单**：
 
