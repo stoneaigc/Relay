@@ -59,7 +59,7 @@ rand_str() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1" || true; }
 # ---- 0. 前置检查 ----------------------------------------------------------
 [ "$(id -u)" -eq 0 ] || abort "需要 root 权限,请用 sudo 运行。"
 command -v curl >/dev/null 2>&1 || abort "缺少 curl,请先安装:apt install curl / yum install curl"
-command -v systemctl >/dev/null 2>&1 || warn "未检测到 systemd,安装脚本将无法注册开机自启(可手动运行 $INSTALL_DIR/relay)"
+command -v systemctl >/dev/null 2>&1 || warn "未检测到 systemd,将跳过服务注册与自动重启;完成后请手动启动 $INSTALL_DIR/relay"
 
 ARCH="$(uname -m)"
 case "$ARCH" in

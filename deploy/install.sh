@@ -62,13 +62,20 @@ fi
 # 属主交给服务用户:SQLite 库写在安装目录(User=relay 需要写权限)
 chown -R relay:relay "$INSTALL_DIR"
 
-# systemd 单元:把占位符替换成实际安装目录
-echo "==> 安装 systemd 服务:$SERVICE"
-sed "s#@INSTALL_DIR@#${INSTALL_DIR}#g" "$SRC/relay.service" \
-  > "/etc/systemd/system/${SERVICE}.service"
-systemctl daemon-reload
-systemctl enable "$SERVICE" >/dev/null
-systemctl restart "$SERVICE"
+# systemd 单元:把占位符替换成实际安装目录;重启服务以加载新程序(升级路径的关键一步)
+if command -v systemctl >/dev/null 2>&1; then
+  echo "==> 安装 systemd 服务:$SERVICE"
+  sed "s#@INSTALL_DIR@#${INSTALL_DIR}#g" "$SRC/relay.service" \
+    > "/etc/systemd/system/${SERVICE}.service"
+  systemctl daemon-reload
+  systemctl enable "$SERVICE" >/dev/null
+  systemctl restart "$SERVICE"
+else
+  # 无 systemd(如 Alpine/OpenRC):跳过注册,由调用方/人工重启加载新程序
+  echo "==> 未检测到 systemd,跳过服务注册与自动重启。"
+  echo "    如旧服务仍在运行,请手动重启以加载新程序,例如:"
+  echo "    pkill -f '$INSTALL_DIR/relay' && nohup $INSTALL_DIR/relay >> $INSTALL_DIR/relay.log 2>&1 &"
+fi
 
 echo
 echo "==> 完成。状态/日志:"

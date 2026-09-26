@@ -14,6 +14,7 @@
 ### 变更
 
 - `install.sh` 现将 `install.sh` / `upgrade.sh` 一并落入安装目录（`/opt/relay/upgrade.sh` 可就地一键升级）
+- `install.sh` 的 systemd 注册/重启逻辑加守卫：无 systemd 环境（如 Alpine/OpenRC）不再中途异常退出（此前二进制已替换但因 `systemctl` 缺失中止，服务仍运行旧程序），改为跳过注册并输出手动重启指引
 - `init-wiki.sh` 同步时剥离文档首个 H1——GitHub Wiki 每页顶部已显示页面名，避免标题重复
 
 ## [0.2.1] - 2026-09-26
