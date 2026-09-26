@@ -181,7 +181,7 @@ if [ "$UPGRADE" = "0" ]; then
   echo "  用户门户 : http://${IP}:${RELAY_PORT}/portal/"
   echo "  管理账号 : ${RELAY_ADMIN_USERNAME}"
   echo "  管理密码 : ${RELAY_ADMIN_PASSWORD}  (已写入 ${ENV_FILE},请妥善保管)"
-  echo "  首次登录后请立即在「设置」中修改强密码。"
+  echo "  修改管理密码 : 编辑 ${ENV_FILE} 中 RELAY_ADMIN__PASSWORD 后重启服务(systemctl restart relay)"
 else
   echo "  升级完成,配置与数据均已保留。"
 fi
