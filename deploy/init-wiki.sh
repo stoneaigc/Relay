@@ -18,7 +18,15 @@ else
   git init -b main "$WT"
 fi
 
-cp "$SRC"/*.md "$WT/"
+# GitHub Wiki 每页顶部已显示页面名,内容里再写首个 H1 会与之重复——同步时剥离
+for f in "$SRC"/*.md; do
+  base="$(basename "$f")"
+  if head -n1 "$f" | grep -q '^# '; then
+    tail -n +2 "$f" > "$WT/$base"
+  else
+    cp "$f" "$WT/$base"
+  fi
+done
 cd "$WT"
 git add -A
 if git diff --cached --quiet; then

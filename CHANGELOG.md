@@ -13,6 +13,7 @@
 ### 变更
 
 - `install.sh` 现将 `install.sh` / `upgrade.sh` 一并落入安装目录（`/opt/relay/upgrade.sh` 可就地一键升级）
+- `init-wiki.sh` 同步时剥离文档首个 H1——GitHub Wiki 每页顶部已显示页面名，避免标题重复
 
 ## [0.2.1] - 2026-09-26
 
