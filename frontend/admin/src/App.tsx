@@ -549,7 +549,7 @@ function RankBars({ rows }: { rows: { label: string; used: number; calls: number
   // 排序后反转:ECharts 类目轴自下而上,反转让第一名显示在最上面。
   const sorted = [...rows].sort((a, b) => b.used - a.used);
   const option: EChartsCoreOption = {
-    grid: { left: 8, right: 100, top: 10, bottom: 0, containLabel: true },
+    grid: { left: 8, right: 124, top: 10, bottom: 0, containLabel: true },
     tooltip: {
       trigger: "axis", axisPointer: { type: "shadow" }, confine: true,
       formatter: (params: any) => {
@@ -583,7 +583,7 @@ function RankBars({ rows }: { rows: { label: string; used: number; calls: number
       label: {
         show: true, position: "right", distance: 6, color: muted, fontSize: 11,
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-        formatter: (p: any) => { const r = sorted[p.dataIndex]; return r ? `${compact(Number(p.value))} · ${r.calls.toLocaleString()}次` : ""; },
+        formatter: (p: any) => { const r = sorted[p.dataIndex]; return r ? `${compact(Number(p.value))} tokens · ${r.calls.toLocaleString()}次` : ""; },
       },
       emphasis: { itemStyle: { shadowBlur: 8, shadowColor: "rgba(99,102,241,0.35)", shadowOffsetX: 1 } },
     }],
@@ -2803,7 +2803,7 @@ function BreakdownBars({ title, rows, metric }: { title: string; rows: UsageBrea
   // 排序后反转:ECharts 类目轴自下而上,反转让第一名显示在最上面。
   const sorted = [...rows].sort((a, b) => val(b) - val(a));
   const option: EChartsCoreOption = {
-    grid: { left: 8, right: 100, top: 10, bottom: 0, containLabel: true },
+    grid: { left: 8, right: 124, top: 10, bottom: 0, containLabel: true },
     tooltip: {
       trigger: "axis",
       axisPointer: { type: "shadow" },
@@ -2856,7 +2856,8 @@ function BreakdownBars({ title, rows, metric }: { title: string; rows: UsageBrea
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
         formatter: (p: any) => {
           const r = sorted[p.dataIndex];
-          return r ? `${compact(Number(p.value))} · ${r.calls.toLocaleString()}次` : "";
+          // 条尾直显数值并携带单位:tokens 模式带 "tokens",费用模式带 "$" 前缀。
+          return r ? `${metric === "cost" ? "$" : ""}${compact(Number(p.value))}${metric === "tokens" ? " tokens" : ""} · ${r.calls.toLocaleString()}次` : "";
         },
       },
       emphasis: { itemStyle: { shadowBlur: 8, shadowColor: "rgba(99,102,241,0.35)", shadowOffsetX: 1 } },
@@ -4433,7 +4434,6 @@ function KpiCard({
 }
 
 /** 请求量(柱状) + P95 延迟(折线)双轴图 */
-/** 请求量(柱状) + P95 延迟(折线)双轴图 */
 function ReqLatencyChart({ points }: { points: MetricsSeriesPoint[] }) {
   const border = cssVar("--color-border", "#e4e4e7");
   const muted = cssVar("--color-muted-foreground", "#71717a");
@@ -4924,7 +4924,7 @@ function AuditPanel() {
           <div className="flex items-center justify-between gap-3">
             <div>
               <CardTitle className="text-base">操作审计({loading ? "…" : total})</CardTitle>
-              <p className="mt-1 text-xs text-muted-foreground">记录管理端全部变更操作(POST/PUT/PATCH/DELETE),含登录尝试。</p>
+              <p className="mt-1 text-xs text-muted-foreground">记录管理后台的人工操作（谁、何时、从哪个 IP 改了什么配置）与登录行为。数据面 API 调用的自动追踪在「请求链路」。</p>
             </div>
             <Button size="sm" variant="outline" className="h-8" onClick={() => load()}>
               <RefreshCw className="h-3.5 w-3.5" />
@@ -5044,7 +5044,10 @@ function RequestLogPanel() {
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
-            <CardTitle className="text-base">请求链路({loading ? "…" : total})</CardTitle>
+            <div>
+              <CardTitle className="text-base">请求链路({loading ? "…" : total})</CardTitle>
+              <p className="mt-1 text-xs text-muted-foreground">数据面 API（/v1/...）每次调用的自动追踪：候选顺序、failover 时间线、tokens 与耗时。管理后台的人工操作记录在「操作审计」，两者互不相关。</p>
+            </div>
             <div className="flex items-center gap-2">
               <div className="relative">
                 <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -5095,8 +5098,8 @@ function RequestLogPanel() {
                   <TableHead>路径</TableHead>
                   <TableHead>最终上游</TableHead>
                   <TableHead>状态</TableHead>
-                  <TableHead className="text-right">Tokens</TableHead>
-                  <TableHead className="text-right">延迟</TableHead>
+                  <TableHead className="text-right" title="↑ 输入 tokens · ↓ 输出 tokens；悬停单元格看精确值">Tokens（↑入 ↓出）</TableHead>
+                  <TableHead className="text-right">延迟 (ms)</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -5148,7 +5151,9 @@ function RequestLogPanel() {
                         </TableCell>
                         <TableCell className="text-right mono text-xs whitespace-nowrap">
                           {r.input_tokens > 0 || r.output_tokens > 0 ? (
-                            <span>↑{r.input_tokens.toLocaleString()} ↓{r.output_tokens.toLocaleString()}</span>
+                            <span title={`输入 ${r.input_tokens.toLocaleString()} tokens · 输出 ${r.output_tokens.toLocaleString()} tokens · 计费 ${r.charged_tokens.toLocaleString()} tokens`}>
+                              ↑{r.input_tokens.toLocaleString()} ↓{r.output_tokens.toLocaleString()}
+                            </span>
                           ) : <span className="text-muted-foreground">—</span>}
                         </TableCell>
                         <TableCell className="text-right text-xs whitespace-nowrap">
@@ -5243,10 +5248,11 @@ function RequestLogPanel() {
                                   ) : null)}
                                 </div>
                               )}
-                              {/* Tokens 汇总 */}
-                              <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                                <span>Tokens: <span className="mono text-foreground">↑{r.input_tokens.toLocaleString()} ↓{r.output_tokens.toLocaleString()}</span></span>
-                                {r.charged_tokens > 0 && <span>计费: <span className="mono text-foreground">{r.charged_tokens.toLocaleString()}</span></span>}
+                              {/* Tokens 汇总(↑=输入 ↓=输出;计费口径见提示) */}
+                              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                                <span>输入 <span className="mono text-foreground">{r.input_tokens.toLocaleString()}</span> tokens</span>
+                                <span>输出 <span className="mono text-foreground">{r.output_tokens.toLocaleString()}</span> tokens</span>
+                                <span title="计费口径 tokens；语义缓存命中时按折扣计费">计费 <span className="mono text-foreground">{r.charged_tokens.toLocaleString()}</span> tokens（缓存命中按折扣）</span>
                                 {r.stream && <Badge variant="muted" className="text-[10px]">stream</Badge>}
                               </div>
                             </div>

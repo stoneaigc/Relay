@@ -153,7 +153,6 @@ function ModelsView({ models }: { models: ModelCard[] }) {
 }
 
 function LineChart({ points }: { points: { ts: number; tokens: number; calls: number }[] }) {
-  const primary = cssVar("--color-primary", "#6366f1");
   const border = cssVar("--color-border", "#e4e4e7");
   const muted = cssVar("--color-muted-foreground", "#71717a");
   const fmtDay2 = (ts: number) => { const d = new Date(ts * 1000); return `${d.getMonth() + 1}/${d.getDate()}`; };
@@ -179,8 +178,9 @@ function LineChart({ points }: { points: { ts: number; tokens: number; calls: nu
       { type: "value", show: false },
     ],
     series: [
-      { name: "tokens", type: "bar", data: points.map((p) => p.tokens), barMaxWidth: 18, itemStyle: { color: primary, borderRadius: [3, 3, 0, 0] } },
-      { name: "调用次数", type: "line", yAxisIndex: 1, data: points.map((p) => p.calls), smooth: true, symbol: "circle", symbolSize: 5, itemStyle: { color: "#0ea5e9" }, lineStyle: { width: 2, color: "#0ea5e9" } },
+      // 柱色用靛紫(数据可视化强调色),不用近黑的主色,避免整页灰黑观感。
+      { name: "tokens", type: "bar", data: points.map((p) => p.tokens), barMaxWidth: 18, itemStyle: { color: "#6366f1", borderRadius: [3, 3, 0, 0] } },
+      { name: "调用次数", type: "line", yAxisIndex: 1, data: points.map((p) => p.calls), smooth: true, symbol: "circle", symbolSize: 5, itemStyle: { color: "#f59e0b" }, lineStyle: { width: 2, color: "#f59e0b" } },
     ],
   };
   return <EChart option={option} height={190} />;
@@ -499,7 +499,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                           <LineChart points={series} />
                           <div className="mt-1 flex justify-between text-xs text-muted-foreground">
                             <span>{fmtDay(series[0].ts)}</span>
-                            <span>峰值 {Math.max(0, ...series.map((d) => d.tokens)).toLocaleString()} / 天</span>
+                            <span>峰值 {Math.max(0, ...series.map((d) => d.tokens)).toLocaleString()} tokens / 天</span>
                             <span>{fmtDay(series[series.length - 1].ts)}</span>
                           </div>
                         </>
