@@ -631,7 +631,8 @@ function OverviewPanel() {
   useEffect(() => { api.overview().then(setD).catch(() => {}); }, []);
   useEffect(() => { api.cacheStats().then(setCs).catch(() => {}); }, []);
   const fmt = (n: number | undefined | null) => (n ?? 0).toLocaleString();
-  const money = (n: number | undefined | null) => `$${(n ?? 0) < 100 ? (n ?? 0).toFixed(4) : (n ?? 0).toFixed(2)}`;
+  // 费用动态精度:小于 1 分钱时保留 3 位有效数字(0.0000305 -> "$0.0000305"),避免被抹成 $0.0000。
+  const money = (n: number | undefined | null) => { const v = n ?? 0; return `$${v !== 0 && v < 0.01 ? v.toPrecision(3) : v < 100 ? v.toFixed(4) : v.toFixed(2)}`; };
   const t = d?.today;
   if (!d) return <p className="text-sm text-muted-foreground">加载中…</p>;
   return (
