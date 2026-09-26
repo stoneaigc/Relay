@@ -192,8 +192,8 @@ export const api = {
   login: (username: string, password: string) =>
     req("/admin/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
 
-  overview: () => req("/admin/api/overview"),
-  overviewSeries: (granularity: "day" | "week" | "month"): Promise<{ granularity: string; data: { ts: number; tokens: number; calls: number }[] }> =>
+  overview: (): Promise<OverviewResp> => req("/admin/api/overview"),
+  overviewSeries: (granularity: "day" | "week" | "month"): Promise<{ granularity: string; data: OverviewSeriesPoint[] }> =>
     req(`/admin/api/overview/series?granularity=${granularity}`),
 
   users: (page?: number, pageSize?: number, q?: string): Promise<{ data: UserRow[]; total: number; page: number; page_size: number; total_pages: number }> => {
@@ -493,6 +493,25 @@ export interface FallbackSettingsBody extends FallbackSettingsResp {}
 
 /** 5 分钟一桶的命中/未命中趋势(共 12 桶,oldest → newest) */
 export interface CacheTrendPoint { ts: number; hits: number; misses: number }
+
+export interface OverviewSeriesPoint { ts: number; tokens: number; calls: number; input_tokens?: number; output_tokens?: number; cost_usd?: number }
+
+export interface OverviewToday { tokens: number; calls: number; input_tokens: number; output_tokens: number; cost_usd: number }
+
+export interface OverviewResp {
+  total_users: number;
+  active_users: number;
+  total_balance: number;
+  total_used: number;
+  total_requests: number;
+  total_input_tokens?: number;
+  total_output_tokens?: number;
+  total_cost_usd?: number;
+  /** 今日运营数据(按本地日切);旧版后端无此字段 */
+  today?: OverviewToday;
+  top_users: { user_id: string; name: string | null; used: number; calls: number }[];
+  by_model: { model: string | null; used: number; calls: number }[];
+}
 
 export interface CacheStatsResp {
   hits: number;

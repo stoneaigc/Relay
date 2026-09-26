@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen } from "lucide-react";
-import { api, getToken, setToken, clearToken, healthz, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow } from "./api";
+import { api, getToken, setToken, clearToken, healthz, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -244,16 +244,22 @@ const SOURCE_LABEL: Record<string, string> = {
   admin: "管理员", phone: "手机号", wechat: "微信", alipay: "支付宝", email: "邮箱",
 };
 
-/// 用量趋势柱线图(ECharts):tokens 柱 + 可选调用次数折线,供概览趋势卡与用户弹窗复用。
-function LineChart({ points, fmtX }: { points: { ts: number; tokens: number; calls?: number }[]; fmtX?: (ts: number) => string }) {
-  const primary = cssVar("--color-primary", "#6366f1");
+/// 用量趋势柱线图(ECharts):有输入/输出明细时为堆叠柱(输入=天蓝/输出=翠绿),否则单色计费柱;可选调用次数折线。供概览趋势卡与用户弹窗复用。
+function LineChart({ points, fmtX }: { points: { ts: number; tokens: number; calls?: number; input_tokens?: number; output_tokens?: number }[]; fmtX?: (ts: number) => string }) {
   const border = cssVar("--color-border", "#e4e4e7");
   const muted = cssVar("--color-muted-foreground", "#71717a");
   const fmt = fmtX ?? ((ts: number) => { const d = new Date(ts * 1000); return `${d.getMonth() + 1}/${d.getDate()}`; });
   const compact = (v: number) => (v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(0)}K` : String(v));
   const hasCalls = points.some((p) => p.calls != null);
+  const hasInOut = points.some((p) => p.input_tokens != null || p.output_tokens != null);
   const option: EChartsCoreOption = {
-    grid: { left: 8, right: 8, top: 30, bottom: 0, containLabel: true },
+    grid: { left: 8, right: 8, top: hasInOut ? 34 : 30, bottom: 0, containLabel: true },
+    ...(hasInOut ? {
+      legend: {
+        top: 0, left: 0, itemWidth: 10, itemHeight: 10, icon: "roundRect",
+        textStyle: { color: muted, fontSize: 11 },
+      },
+    } : {}),
     tooltip: {
       trigger: "axis",
       confine: true,
@@ -273,8 +279,13 @@ function LineChart({ points, fmtX }: { points: { ts: number; tokens: number; cal
       ...(hasCalls ? [{ type: "value", show: false }] : []),
     ],
     series: [
-      { name: "tokens", type: "bar", data: points.map((p) => p.tokens), barMaxWidth: 20, itemStyle: { color: primary, borderRadius: [3, 3, 0, 0] } },
-      ...(hasCalls ? [{ name: "调用次数", type: "line", yAxisIndex: 1, data: points.map((p) => p.calls), smooth: true, symbol: "circle", symbolSize: 5, itemStyle: { color: "#0ea5e9" }, lineStyle: { width: 2, color: "#0ea5e9" } }] : []),
+      ...(hasInOut ? [
+        { name: "输入", type: "bar", stack: "tok", data: points.map((p) => p.input_tokens ?? 0), barMaxWidth: 20, itemStyle: { color: "#38bdf8" } },
+        { name: "输出", type: "bar", stack: "tok", data: points.map((p) => p.output_tokens ?? 0), barMaxWidth: 20, itemStyle: { color: "#34d399", borderRadius: [3, 3, 0, 0] } },
+      ] : [
+        { name: "tokens", type: "bar", data: points.map((p) => p.tokens), barMaxWidth: 20, itemStyle: { color: "#6366f1", borderRadius: [3, 3, 0, 0] } },
+      ]),
+      ...(hasCalls ? [{ name: "调用次数", type: "line", yAxisIndex: 1, data: points.map((p) => p.calls), smooth: true, symbol: "circle", symbolSize: 5, itemStyle: { color: "#f59e0b" }, lineStyle: { width: 2, color: "#f59e0b" } }] : []),
     ],
   };
   return <EChart option={option} height={220} />;
@@ -476,7 +487,7 @@ const GRAN_LABEL: Record<Gran, string> = { day: "按天", week: "按周", month:
 
 function TrendCard() {
   const [gran, setGran] = useState<Gran>("day");
-  const [data, setData] = useState<{ ts: number; tokens: number; calls: number }[] | null>(null);
+  const [data, setData] = useState<OverviewSeriesPoint[] | null>(null);
   useEffect(() => { setData(null); api.overviewSeries(gran).then((r) => setData(r.data)).catch(() => setData([])); }, [gran]);
 
   const fmtX = (ts: number) => {
@@ -485,6 +496,9 @@ function TrendCard() {
     return `${d.getMonth() + 1}/${d.getDate()}`;
   };
   const total = (data ?? []).reduce((a, p) => a + p.tokens, 0);
+  const sumIn = (data ?? []).reduce((a, p) => a + (p.input_tokens ?? 0), 0);
+  const sumOut = (data ?? []).reduce((a, p) => a + (p.output_tokens ?? 0), 0);
+  const sumCost = (data ?? []).reduce((a, p) => a + (p.cost_usd ?? 0), 0);
   const peak = Math.max(0, ...(data ?? []).map((p) => p.tokens));
   const peakUnit = gran === "day" ? "天" : gran === "week" ? "周" : "月";
 
@@ -510,9 +524,14 @@ function TrendCard() {
         ) : (
           <>
             <LineChart points={data} fmtX={fmtX} />
-            <div className="mt-1 flex justify-between text-xs text-muted-foreground">
+            <div className="mt-1 flex flex-wrap justify-between gap-x-3 text-xs text-muted-foreground">
               <span>{fmtX(data[0].ts)}</span>
-              <span>共 {total.toLocaleString()} tokens · 峰值 {peak.toLocaleString()} / {peakUnit}</span>
+              <span>
+                共 {total.toLocaleString()} tokens
+                {sumIn + sumOut > 0 ? `（输入 ${sumIn.toLocaleString()} · 输出 ${sumOut.toLocaleString()}）` : ""}
+                {sumCost > 0 ? ` · 费用 $${sumCost.toFixed(4)}` : ""}
+                {" "}· 峰值 {peak.toLocaleString()} / {peakUnit}
+              </span>
               <span>{fmtX(data[data.length - 1].ts)}</span>
             </div>
           </>
@@ -572,27 +591,77 @@ function RankBars({ rows }: { rows: { label: string; used: number; calls: number
   return <EChart option={option} height={Math.max(150, sorted.length * 34 + 24)} />;
 }
 
-function OverviewPanel() {
-  const [d, setD] = useState<any | null>(null);
-  useEffect(() => { api.overview().then(setD); }, []);
-  const fmt = (n: number) => (n ?? 0).toLocaleString();
+const KPI_TONES = {
+  indigo: "bg-indigo-500/10 text-indigo-600",
+  sky: "bg-sky-500/10 text-sky-600",
+  emerald: "bg-emerald-500/10 text-emerald-600",
+  amber: "bg-amber-500/10 text-amber-600",
+} as const;
 
+/// 概览 KPI 卡:彩色图标徽章 + 大数字 + 辅助说明。
+function OverviewKpi({ label, value, sub, icon, tone }: { label: string; value: string; sub?: string; icon: React.ReactNode; tone: keyof typeof KPI_TONES }) {
+  return (
+    <Card>
+      <CardContent className="pt-5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs text-muted-foreground">{label}</span>
+          <span className={cn("flex h-7 w-7 items-center justify-center rounded-lg", KPI_TONES[tone])}>{icon}</span>
+        </div>
+        <div className="mono mt-1.5 text-2xl font-bold tracking-tight">{value}</div>
+        {sub && <div className="mt-1 truncate text-xs text-muted-foreground">{sub}</div>}
+      </CardContent>
+    </Card>
+  );
+}
+
+/// 累计一览单元:紧凑小统计块。
+function MiniStat({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div className="mono mt-0.5 truncate text-lg font-bold tracking-tight">{value}</div>
+      {sub && <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{sub}</div>}
+    </div>
+  );
+}
+
+function OverviewPanel() {
+  const [d, setD] = useState<OverviewResp | null>(null);
+  const [cs, setCs] = useState<CacheStatsResp | null>(null);
+  useEffect(() => { api.overview().then(setD).catch(() => {}); }, []);
+  useEffect(() => { api.cacheStats().then(setCs).catch(() => {}); }, []);
+  const fmt = (n: number | undefined | null) => (n ?? 0).toLocaleString();
+  const money = (n: number | undefined | null) => `$${(n ?? 0) < 100 ? (n ?? 0).toFixed(4) : (n ?? 0).toFixed(2)}`;
+  const t = d?.today;
   if (!d) return <p className="text-sm text-muted-foreground">加载中…</p>;
   return (
     <div className="space-y-5">
+      {/* 今日运营 KPI:调用 / tokens(输入·输出) / 费用 / 缓存 */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="用户数" value={fmt(d.total_users)} sub={`活跃 ${fmt(d.active_users)}`} />
-        <StatCard label="全站总消耗 (tokens)" value={fmt(d.total_used)} />
-        <StatCard label="全站总余额 (tokens)" value={fmt(d.total_balance)} />
-        <StatCard label="总调用数" value={fmt(d.total_requests)} />
+        <OverviewKpi tone="sky" icon={<Activity className="h-4 w-4" />} label="今日调用" value={fmt(t?.calls)} sub={`计费 ${fmt(t?.tokens)} tokens`} />
+        <OverviewKpi tone="indigo" icon={<Zap className="h-4 w-4" />} label="今日 tokens" value={fmt(t?.tokens)} sub={`输入 ${fmt(t?.input_tokens)} · 输出 ${fmt(t?.output_tokens)}`} />
+        <OverviewKpi tone="amber" icon={<DollarSign className="h-4 w-4" />} label="今日费用" value={money(t?.cost_usd)} sub={`累计 ${money(d?.total_cost_usd)}`} />
+        <OverviewKpi tone="emerald" icon={<Database className="h-4 w-4" />} label="缓存命中率" value={cs ? `${(cs.hit_rate * 100).toFixed(1)}%` : "…"} sub={cs ? `命中 ${fmt(cs.hits)} 次 · 节省 ${fmt(cs.tokens_saved)} tokens` : "语义缓存统计"} />
       </div>
+
+      {/* 累计一览 */}
+      <Card>
+        <CardContent className="grid grid-cols-2 gap-4 py-4 sm:grid-cols-4">
+          <MiniStat label="用户数" value={fmt(d?.total_users)} sub={`活跃 ${fmt(d?.active_users)}`} />
+          <MiniStat label="总调用" value={fmt(d?.total_requests)} />
+          <MiniStat label="总消耗 tokens" value={fmt(d?.total_used)} sub={`输入 ${fmt(d?.total_input_tokens)} · 输出 ${fmt(d?.total_output_tokens)}`} />
+          <MiniStat label="总余额 tokens" value={fmt(d?.total_balance)} />
+        </CardContent>
+      </Card>
+
+      <TrendCard />
 
       <div className="grid gap-5 lg:grid-cols-2">
         <Card>
           <CardHeader><CardTitle className="text-base">用户消耗排行</CardTitle></CardHeader>
           <CardContent>
             {d.top_users.length === 0 ? <p className="text-sm text-muted-foreground">暂无消耗</p> : (
-              <RankBars rows={d.top_users.map((u: any) => ({ label: u.name || String(u.user_id).slice(0, 8), used: u.used, calls: u.calls }))} />
+              <RankBars rows={d.top_users.map((u) => ({ label: u.name || String(u.user_id).slice(0, 8), used: u.used, calls: u.calls }))} />
             )}
           </CardContent>
         </Card>
@@ -601,13 +670,11 @@ function OverviewPanel() {
           <CardHeader><CardTitle className="text-base">按模型统计</CardTitle></CardHeader>
           <CardContent>
             {d.by_model.length === 0 ? <p className="text-sm text-muted-foreground">暂无消耗</p> : (
-              <RankBars rows={d.by_model.map((m: any) => ({ label: m.model || "—", used: m.used, calls: m.calls }))} />
+              <RankBars rows={d.by_model.map((m) => ({ label: m.model || "—", used: m.used, calls: m.calls }))} />
             )}
           </CardContent>
         </Card>
       </div>
-
-      <TrendCard />
     </div>
   );
 }

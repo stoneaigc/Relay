@@ -125,7 +125,8 @@ pub async fn overview(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
-    let data = storage::overview(&state.db)
+    let tz = state.config().defaults.tz_offset_hours;
+    let data = storage::overview(&state.db, tz)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(data))

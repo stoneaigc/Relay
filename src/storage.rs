@@ -1921,13 +1921,35 @@ pub async fn user_used(pool: &Db, user_id: Uuid) -> anyhow::Result<i64> {
 }
 
 /// 管理端概览统计(累计)。
-pub async fn overview(pool: &Db) -> anyhow::Result<serde_json::Value> {
+pub async fn overview(pool: &Db, tz_offset_hours: i64) -> anyhow::Result<serde_json::Value> {
     let total_users: i64 = q!("SELECT COUNT(*) AS c FROM users").fetch_one(pool).await?.get("c");
     let active: i64 = q!("SELECT COUNT(*) AS c FROM users WHERE status = 0").fetch_one(pool).await?.get("c");
     let total_balance: i64 = q!("SELECT CAST(COALESCE(SUM(token_balance),0) AS BIGINT) AS s FROM users").fetch_one(pool).await?.get("s");
     let agg = q!("SELECT CAST(COALESCE(SUM(charged_tokens),0) AS BIGINT) AS used, COUNT(*) AS reqs FROM usage_logs").fetch_one(pool).await?;
     let total_used: i64 = agg.get("used");
     let total_requests: i64 = agg.get("reqs");
+
+    // 输入 / 输出 / 费用累计(全站)
+    let agg2 = q!(
+        "SELECT CAST(COALESCE(SUM(input_tokens),0) AS BIGINT) AS it,
+                CAST(COALESCE(SUM(output_tokens),0) AS BIGINT) AS ot,
+                COALESCE(SUM(cost_usd),0.0) AS cost
+         FROM usage_logs"
+    )
+    .fetch_one(pool)
+    .await?;
+
+    // 今日运营数据(按本地日切):调用 / 计费 tokens / 输入 / 输出 / 费用
+    let today = q!(
+        "SELECT CAST(COALESCE(SUM(charged_tokens),0) AS BIGINT) AS tok, COUNT(*) AS c,
+                CAST(COALESCE(SUM(input_tokens),0) AS BIGINT) AS it,
+                CAST(COALESCE(SUM(output_tokens),0) AS BIGINT) AS ot,
+                COALESCE(SUM(cost_usd),0.0) AS cost
+         FROM usage_logs WHERE ts >= ?"
+    )
+    .bind(today_start(tz_offset_hours))
+    .fetch_one(pool)
+    .await?;
 
     let top = q!(
         "SELECT l.user_id AS uid, COALESCE(u.username, u.phone) AS name,
@@ -1958,6 +1980,16 @@ pub async fn overview(pool: &Db) -> anyhow::Result<serde_json::Value> {
         "total_balance": total_balance,
         "total_used": total_used,
         "total_requests": total_requests,
+        "total_input_tokens": agg2.get::<i64, _>("it"),
+        "total_output_tokens": agg2.get::<i64, _>("ot"),
+        "total_cost_usd": agg2.get::<f64, _>("cost"),
+        "today": {
+            "tokens": today.get::<i64, _>("tok"),
+            "calls": today.get::<i64, _>("c"),
+            "input_tokens": today.get::<i64, _>("it"),
+            "output_tokens": today.get::<i64, _>("ot"),
+            "cost_usd": today.get::<f64, _>("cost"),
+        },
         "top_users": top_users,
         "by_model": by_model,
     }))
@@ -2168,7 +2200,10 @@ pub async fn global_series(
     // 一次性取范围内每日聚合,再按桶累加。
     let range_start = starts[0] * 86400 - offset;
     let rows = q!(
-        "SELECT ((ts + ?) / 86400) AS d, CAST(COALESCE(SUM(charged_tokens),0) AS BIGINT) AS tok, COUNT(*) AS c
+        "SELECT ((ts + ?) / 86400) AS d, CAST(COALESCE(SUM(charged_tokens),0) AS BIGINT) AS tok, COUNT(*) AS c,
+                CAST(COALESCE(SUM(input_tokens),0) AS BIGINT) AS it,
+                CAST(COALESCE(SUM(output_tokens),0) AS BIGINT) AS ot,
+                COALESCE(SUM(cost_usd),0.0) AS cost
          FROM usage_logs WHERE ts >= ? GROUP BY d",
     )
     .bind(offset)
@@ -2176,24 +2211,44 @@ pub async fn global_series(
     .fetch_all(pool)
     .await?;
 
-    let mut daily: std::collections::HashMap<i64, (i64, i64)> = std::collections::HashMap::new();
+    // (计费 tokens, 调用数, 输入, 输出, 费用)
+    let mut daily: std::collections::HashMap<i64, (i64, i64, i64, i64, f64)> = std::collections::HashMap::new();
     for r in rows {
-        daily.insert(r.get::<i64, _>("d"), (r.get::<i64, _>("tok"), r.get::<i64, _>("c")));
+        daily.insert(
+            r.get::<i64, _>("d"),
+            (
+                r.get::<i64, _>("tok"),
+                r.get::<i64, _>("c"),
+                r.get::<i64, _>("it"),
+                r.get::<i64, _>("ot"),
+                r.get::<f64, _>("cost"),
+            ),
+        );
     }
 
     let mut out = Vec::with_capacity(starts.len());
     for (i, &lo) in starts.iter().enumerate() {
         let hi = if i + 1 < starts.len() { starts[i + 1] - 1 } else { today_idx };
-        let (mut tok, mut calls) = (0i64, 0i64);
+        let (mut tok, mut calls, mut it, mut ot, mut cost) = (0i64, 0i64, 0i64, 0i64, 0f64);
         let mut d = lo;
         while d <= hi {
-            if let Some(&(t, c)) = daily.get(&d) {
+            if let Some(&(t, c, di, do_, co)) = daily.get(&d) {
                 tok += t;
                 calls += c;
+                it += di;
+                ot += do_;
+                cost += co;
             }
             d += 1;
         }
-        out.push(serde_json::json!({ "ts": lo * 86400 - offset, "tokens": tok, "calls": calls }));
+        out.push(serde_json::json!({
+            "ts": lo * 86400 - offset,
+            "tokens": tok,
+            "calls": calls,
+            "input_tokens": it,
+            "output_tokens": ot,
+            "cost_usd": cost,
+        }));
     }
     Ok(out)
 }
