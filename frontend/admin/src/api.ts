@@ -11,6 +11,10 @@ export const getToken = () => localStorage.getItem(TOKEN_KEY);
 export const setToken = (t: string) => localStorage.setItem(TOKEN_KEY, t);
 export const clearToken = () => localStorage.removeItem(TOKEN_KEY);
 
+/** 网关健康与版本(公开端点,无需鉴权;用于界面角落展示服务版本)。 */
+export const healthz = (): Promise<{ status: string; version: string }> =>
+  fetch(SITE_PREFIX + "/healthz").then((r) => (r.ok ? r.json() : { status: "?", version: "" })).catch(() => ({ status: "?", version: "" }));
+
 async function req(path: string, opts: RequestInit = {}) {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",

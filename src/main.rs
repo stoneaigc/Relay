@@ -400,7 +400,7 @@ async fn main() -> anyhow::Result<()> {
     let app = axum::middleware::from_fn(strip_web_prefix).layer(app);
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    tracing::info!("Relay listening on {}", bind);
+    tracing::info!("Relay v{} listening on {}", env!("CARGO_PKG_VERSION"), bind);
 
     let shutdown_state = Arc::clone(&state);
     // with_connect_info:中间件经 ConnectInfo 提取客户端 IP。

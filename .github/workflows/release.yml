@@ -108,15 +108,31 @@ jobs:
     needs: package
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all packages
         uses: actions/download-artifact@v4
         with:
           path: dist
+
+      # Release note 优先取 CHANGELOG.md 中对应版本段落;提取不到时回退为空,
+      # 由 generate_release_notes 按提交自动生成兜底。
+      - name: Extract release notes from CHANGELOG
+        run: |
+          VER="${VERSION#v}"
+          awk -v ver="$VER" '
+            $0 ~ "^## \\[" ver "\\]" { flag=1; next }
+            /^## \[/ && flag { exit }
+            flag { print }
+          ' CHANGELOG.md > body.md || true
+          [ -s body.md ] || echo "" > body.md
+          echo "---- release body ----"; cat body.md
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.VERSION }}     # tag 不存在时按当前提交自动创建
           name: ${{ env.VERSION }}
-          generate_release_notes: true     # 自动按提交生成 Release notes
+          body_path: body.md               # CHANGELOG 对应段落
+          generate_release_notes: true     # 追加自动生成的提交列表与 Full Changelog 链接
           files: dist/**/*.tar.gz

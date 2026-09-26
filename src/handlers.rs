@@ -133,8 +133,11 @@ fn apply_relay_headers(resp: &mut Response, hdrs: &[(&'static str, String)]) {
     }
 }
 
-pub async fn health() -> &'static str {
-    "ok"
+pub async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 /// GET /v1/models —— 返回逻辑模型清单(OpenAI 格式)。

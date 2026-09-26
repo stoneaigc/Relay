@@ -5,7 +5,7 @@ import {
   LayoutDashboard, Receipt, MessageSquare, Menu, X, SendHorizontal, Boxes,
   Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen,
 } from "lucide-react";
-import { api, getToken, setToken, clearToken, KeyInfo, ModelCard, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType } from "./api";
+import { api, getToken, setToken, clearToken, healthz, KeyInfo, ModelCard, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType } from "./api";
 import { copyText } from "./clipboard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -337,6 +337,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [seriesDays, setSeriesDays] = useState(30);
   const [reveal, setReveal] = useState<{ kind: string; key: string } | null>(null);
   const [rewardsEnabled, setRewardsEnabled] = useState(false);
+  const [version, setVersion] = useState("");
+  useEffect(() => { healthz().then((h) => setVersion(h.version)).catch(() => {}); }, []);
   const nav = NAV_ALL.filter((n) => n.path !== "/rewards" || rewardsEnabled);
   const section: Section = loc.pathname.startsWith("/chat") ? "chat"
     : loc.pathname.startsWith("/models") ? "models"
@@ -404,6 +406,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground" onClick={onLogout}>
           <LogOut className="h-4 w-4" />退出登录
         </Button>
+        {version && <div className="px-3 pt-2 text-[10px] text-muted-foreground/60">Relay v{version}</div>}
       </div>
     </>
   );
