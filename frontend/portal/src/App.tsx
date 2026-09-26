@@ -85,8 +85,8 @@ function ModelCardView({ m, onDetail }: { m: ModelCard; onDetail: (m: ModelCard)
       )}
       <div className="mt-auto grid grid-cols-2 gap-x-3 gap-y-1 border-t pt-2.5 text-xs text-muted-foreground">
         <span className="flex items-center gap-1" title="上下文窗口">上下文<span className="mono text-foreground">{ctx ?? "—"}</span></span>
-        <span className="flex items-center gap-1" title="计费倍率">倍率<span className="mono text-foreground">×{m.multiplier}</span></span>
-        <span className="flex items-center gap-1" title="每 1M tokens 输入/输出单价">价格<span className="mono truncate text-foreground" title={price ?? "未定价"}>{price ?? "未定价"}</span></span>
+        <span className="flex items-center gap-1" title="该模型路由的计费倍率,实际单价 = 模型单价 × 倍率">倍率<span className="mono text-foreground">×{m.multiplier}</span></span>
+        <span className="flex items-center gap-1" title="每 1M tokens 模型单价(未含倍率)">价格<span className="mono truncate text-foreground" title={price != null ? `${price} $/1M tokens(未含倍率)` : "未定价"}>{price ?? "未定价"}</span></span>
         <span className="flex items-center gap-1" title="该模型聚合的上游部署数">上游<span className="mono text-foreground">{m.upstreams}</span></span>
         {m.cache && <span className="col-span-2 inline-flex items-center gap-1 text-success" title="支持提示词缓存,命中按折扣计费"><Star className="h-3 w-3" />支持上下文缓存</span>}
       </div>
@@ -102,13 +102,18 @@ function ModelDetailDialog({ m, onClose }: { m: ModelCard | null; onClose: () =>
         ? `${(m.context_length / 1_000_000).toFixed(m.context_length % 1_000_000 ? 1 : 0)}M`
         : `${Math.round(m.context_length / 1000)}K`) + " tokens"
     : "—";
-  // 网关内置协议互转:同一模型四种入口皆可调,按客户端使用的 SDK 自选。
-  const protos: [string, string][] = [
-    ["/v1/chat/completions", "OpenAI 对话补全"],
-    ["/v1/responses", "OpenAI Responses"],
-    ["/v1/messages", "Anthropic Messages"],
-    ["/v1/embeddings", "向量 Embeddings"],
-  ];
+  // 网关内置协议互转:按模型能力提供入口——对话/多模态模型走三大对话端点,向量模型走 Embeddings。
+  const isEmbedding = m ? m.tags.some((t) => t.toLowerCase().includes("向量") || t.toLowerCase().includes("embedding")) : false;
+  const protos: [string, string][] = isEmbedding
+    ? [["/v1/embeddings", "向量 Embeddings(输入文本,返回向量)"]]
+    : [
+        ["/v1/chat/completions", "OpenAI 对话补全"],
+        ["/v1/responses", "OpenAI Responses"],
+        ["/v1/messages", "Anthropic Messages"],
+      ];
+  // 实际计费单价 = 模型单价 × 路由倍率。
+  const effIn = m?.input_price != null ? m.input_price * m.multiplier : null;
+  const effOut = m?.output_price != null ? m.output_price * m.multiplier : null;
   return (
     <Dialog open={!!m} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-lg">
@@ -117,7 +122,7 @@ function ModelDetailDialog({ m, onClose }: { m: ModelCard | null; onClose: () =>
             <span className="mono">{m?.name}</span>
             {m && <CopyButton value={m.name} label="复制模型名" />}
           </DialogTitle>
-          <DialogDescription>同一模型可通过多种协议入口调用,网关自动完成协议互转。</DialogDescription>
+          <DialogDescription>按模型能力提供兼容的调用入口，网关自动完成协议互转；实际计费以下方「实际计费单价」为准。</DialogDescription>
         </DialogHeader>
         {m && (
           <div className="space-y-4">
@@ -130,10 +135,16 @@ function ModelDetailDialog({ m, onClose }: { m: ModelCard | null; onClose: () =>
             <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
               <div><div className="text-xs text-muted-foreground">上下文窗口</div><div className="mono">{ctx}</div></div>
               <div><div className="text-xs text-muted-foreground">计费倍率</div><div className="mono">×{m.multiplier}</div></div>
-              <div><div className="text-xs text-muted-foreground">输入单价</div><div className="mono">{m.input_price != null ? `$${m.input_price.toFixed(2)} / 1M tokens` : "未定价"}</div></div>
-              <div><div className="text-xs text-muted-foreground">输出单价</div><div className="mono">{m.output_price != null ? `$${m.output_price.toFixed(2)} / 1M tokens` : "未定价"}</div></div>
+              <div><div className="text-xs text-muted-foreground">模型单价(输入/输出)</div><div className="mono">{m.input_price != null && m.output_price != null ? `$${m.input_price.toFixed(2)} / $${m.output_price.toFixed(2)} · 1M tokens` : "未定价"}</div></div>
               <div><div className="text-xs text-muted-foreground">上游部署数</div><div className="mono">{m.upstreams}</div></div>
               <div><div className="text-xs text-muted-foreground">上下文缓存</div><div>{m.cache ? <span className="text-success">支持(命中按折扣)</span> : <span className="text-muted-foreground">不支持</span>}</div></div>
+            </div>
+            <div className="rounded-lg bg-muted/40 px-3 py-2 text-xs leading-5">
+              {effIn != null && effOut != null ? (
+                <>实际计费单价（= 模型单价 × 倍率）：输入 <b className="mono">${effIn.toFixed(2)}</b> / 输出 <b className="mono">${effOut.toFixed(2)}</b> 每 1M tokens</>
+              ) : (
+                <>该模型未定价，调用按 $0 计。</>
+              )}
             </div>
             <div>
               <div className="mb-1 text-xs font-medium text-muted-foreground">兼容调用入口</div>
