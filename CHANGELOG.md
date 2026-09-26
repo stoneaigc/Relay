@@ -3,6 +3,12 @@
 本文件记录 Relay 每个版本的变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.1] - 2026-09-26
+
+### 修复
+
+- **子路径反代（剥前缀模式）无尾斜杠入口资源 404**：nginx `proxy_pass` 带尾斜杠（如 `proxy_pass http://127.0.0.1:8081/;`，会剥离 `/relay/` 前缀）时，访问 `https://host/relay/admin`（无尾斜杠）返回的页面把相对资源解析到了 `/relay/assets/`（少一层 `admin`）导致 404。现在网关对该入口返回**相对 Location 301**（`admin/`），浏览器按当前地址解析自动保留任何反代前缀，落到 `/relay/admin/`；根路径 `/` 的门户跳转同步改为相对。不剥前缀的 nginx 配置行为不变（两种配置均可用）。
+
 ## [0.2.0] - 2026-09-25
 
 本版本聚焦**门户体验升级**与**可观测性图表全面 ECharts 化**。

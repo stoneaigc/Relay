@@ -80,8 +80,16 @@ async fn strip_web_prefix(req: Request, next: Next) -> Response {
             }
             next.run(Request::from_parts(parts, body)).await
         }
-        // 无前缀(根路径部署):原样通过。
-        None => next.run(req).await,
+        // 无前缀(根路径部署,或 nginx proxy_pass 尾斜杠已剥掉前缀):
+        // 精确 /admin、/portal 无尾斜杠时,用「相对 Location」301 —— 浏览器按当前地址解析,
+        // 自动保留任何反代前缀(如 /relay/admin → admin/ → /relay/admin/),相对资源才不会错位。
+        None => {
+            if path == "/admin" || path == "/portal" {
+                let app = &path[1..];
+                return Redirect::permanent(&format!("{app}/")).into_response();
+            }
+            next.run(req).await
+        }
     }
 }
 
@@ -396,7 +404,7 @@ async fn main() -> anyhow::Result<()> {
         // ---- 静态前端 ----
         .nest_service("/portal", spa("portal"))
         .nest_service("/admin", spa("admin"))
-        .route("/", get(|| async { axum::response::Redirect::to("/portal/") }));
+        .route("/", get(|| async { axum::response::Redirect::to("portal/") }));
     // 子路径反代兼容:URI 改写必须在路由匹配之前生效,故包在 Router 外层
     // (Router::layer 的中间件在匹配后才执行,改 URI 无效)。
     let app = axum::middleware::from_fn(strip_web_prefix).layer(app);
