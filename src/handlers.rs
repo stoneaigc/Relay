@@ -697,6 +697,7 @@ pub async fn run_chat(
                     Err(e) => {
                         // 非重试错误(4xx / 解析错 / 权限不足 ...):记 per-upstream + 全局 fail_other 后直接返回
                         state.record_metrics_request(Some(&ukey), 400, up_start.elapsed()).await;
+                        state.breaker_neutral(&ukey).await;
                         attempts.push(RequestAttempt {
                             kind: "openai".into(),
                             provider: provider_name.clone(),
@@ -809,6 +810,7 @@ pub async fn run_chat(
                     }
                     Err(e) => {
                         state.record_metrics_request(Some(&ukey), 400, up_start.elapsed()).await;
+                        state.breaker_neutral(&ukey).await;
                         attempts.push(RequestAttempt {
                             kind: "anthropic".into(),
                             provider: provider_name.clone(),
@@ -935,6 +937,7 @@ fn anthropic_stream_response(
         let mut input = 0u32;
         let mut output = 0u32;
         let mut finish = "stop";
+        let mut stream_ok = true;
         let id = format!("chatcmpl-{}", &uuid::Uuid::new_v4().to_string()[..8]);
         // Anthropic content block index -> OpenAI tool_call index。
         let mut block_to_tool: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
@@ -1013,6 +1016,7 @@ fn anthropic_stream_response(
                     }
                 }
                 Err(e) => {
+                    stream_ok = false;
                     yield Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
                     break;
                 }
@@ -1022,15 +1026,22 @@ fn anthropic_stream_response(
         let charged = ((input as f64 + output as f64) * multiplier * user.bill_multiplier()).round() as i64;
         user.deduct(charged);
         user.record_tokens(input.saturating_add(output));
+        let status = if stream_ok { 200u16 } else { crate::state::METRIC_STATUS_UNAVAILABLE };
         let _ = state.usage_tx.send(UsageEvent {
             user_id, key_id, cost_usd: 0.0, model, provider: provider_name, upstream_model,
-            input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200,
+            input_tokens: input, output_tokens: output, charged_tokens: charged, status,
             request_id: Some(trace.request_id.clone()),
         }).await;
         // 补记指标 tokens(Anthropic stream → OpenAI SSE)
         let k = UpstreamKey::new(ProviderKind::Anthropic, &base_url, api_key.as_deref());
         state.record_metrics_tokens(Some(&k), input as u64, output as u64).await;
-        trace.emit_success(&state, input, output, charged).await;
+        if stream_ok {
+            trace.emit_success(&state, input, output, charged).await;
+        } else {
+            // 中途断流:按失败收口并让熔断感知,不再虚记成功。
+            state.breaker_unavailable(&k).await;
+            trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
+        }
     };
 
     let mut resp = sse_response(s);
@@ -1370,6 +1381,7 @@ pub async fn run_messages(
                     }
                     Err(e) => {
                         state.record_metrics_request(Some(&ukey), 400, up_start.elapsed()).await;
+                        state.breaker_neutral(&ukey).await;
                         attempts.push(RequestAttempt {
                             kind: "anthropic".into(),
                             provider: provider_name.clone(),
@@ -1467,6 +1479,7 @@ pub async fn run_messages(
                     }
                     Err(e) => {
                         state.record_metrics_request(Some(&ukey), 400, up_start.elapsed()).await;
+                        state.breaker_neutral(&ukey).await;
                         attempts.push(RequestAttempt {
                             kind: "openai".into(),
                             provider: provider_name.clone(),
@@ -1576,30 +1589,50 @@ fn anthropic_passthrough_stream(
         let _guard = guard;
         let _slot = slot;
         let mut upstream = resp.bytes_stream();
-        let mut buf: Vec<u8> = Vec::new();
+        let mut rw = SseRewriter::new(SseFlavor::AnthropicPassthrough);
         let mut input = 0u32;
         let mut output = 0u32;
+        let mut stream_ok = true;
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(bytes) => {
-                    // 透传 Anthropic 事件,仅把 model 名改回对外名,同时扫 usage。
-                    buf.extend_from_slice(&bytes);
-                    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                        let line: Vec<u8> = buf.drain(..=pos).collect();
-                        let s = String::from_utf8_lossy(&line);
-                        if let Some(p) = s.trim().strip_prefix("data:") {
-                            if let Ok(v) = serde_json::from_str::<Value>(p.trim()) {
-                                if let Some(i) = v.pointer("/message/usage/input_tokens").and_then(|x| x.as_u64()) { input = i as u32; }
-                                if let Some(o) = v.pointer("/usage/output_tokens").and_then(|x| x.as_u64()) { output = o as u32; }
-                            }
-                        }
+                    // 透传 Anthropic 事件:行缓冲后 JSON 级改写 model 名,同时扫 usage。
+                    let out = rw.feed(&bytes, &model, &mut input, &mut output);
+                    if !out.is_empty() {
+                        yield Ok::<Bytes, std::io::Error>(Bytes::from(out));
                     }
-                    yield Ok::<Bytes, std::io::Error>(rewrite_model(&bytes, &upstream_model, &model));
                 }
-                Err(e) => { yield Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())); break; }
+                Err(e) => {
+                    stream_ok = false;
+                    yield Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                    break;
+                }
             }
         }
-        anth_charge(&state, &user, key_id, input, output, multiplier, model, provider_name, upstream_model, ProviderKind::Anthropic, &base_url, api_key.as_deref(), Some(trace.request_id.clone()), trace).await;
+        if stream_ok {
+            let tail = rw.finish();
+            if !tail.is_empty() {
+                yield Ok(Bytes::from(tail));
+            }
+        }
+        // 部分产出的 token 照实入账;失败流按失败收口(不虚记成功)并让熔断感知。
+        let charged = ((input as f64 + output as f64) * multiplier * user.bill_multiplier()).round() as i64;
+        user.deduct(charged);
+        user.record_tokens(input.saturating_add(output));
+        let status = if stream_ok { 200u16 } else { crate::state::METRIC_STATUS_UNAVAILABLE };
+        let _ = state.usage_tx.send(UsageEvent {
+            user_id: user.id, key_id, cost_usd: 0.0, model: model.clone(), provider: provider_name.clone(),
+            upstream_model: upstream_model.clone(), input_tokens: input, output_tokens: output,
+            charged_tokens: charged, status, request_id: Some(trace.request_id.clone()),
+        }).await;
+        let k = UpstreamKey::new(ProviderKind::Anthropic, &base_url, api_key.as_deref());
+        state.record_metrics_tokens(Some(&k), input as u64, output as u64).await;
+        if stream_ok {
+            trace.emit_success(&state, input, output, charged).await;
+        } else {
+            state.breaker_unavailable(&k).await;
+            trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
+        }
     };
     let mut resp = sse_response(s);
     apply_relay_headers(&mut resp, &hdrs);
@@ -1926,24 +1959,31 @@ fn stream_response(
         let _guard = guard;
         let _slot = slot;
         let mut upstream = resp.bytes_stream();
-        let mut buf: Vec<u8> = Vec::new();
+        // 行缓冲 + JSON 级改写:修复跨 chunk 边界漏改(模型名泄露 / reasoning 漏转换)与值内容误伤。
+        let mut rw = SseRewriter::new(SseFlavor::OpenaiChat);
         let mut input = 0u32;
         let mut output = 0u32;
+        let mut stream_ok = true;
 
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(bytes) => {
-                    scan_usage(&mut buf, &bytes, &mut input, &mut output);
-                    // 把 vLLM 的 reasoning 字段归一化为 reasoning_content（参考 one-api）。
-                    let bytes = normalize_reasoning(&bytes);
-                    // 把响应里的上游模型名透明改回用户请求的对外名。
-                    let out = rewrite_model(&bytes, &upstream_model, &model);
-                    yield Ok::<Bytes, std::io::Error>(out);
+                    let out = rw.feed(&bytes, &model, &mut input, &mut output);
+                    if !out.is_empty() {
+                        yield Ok::<Bytes, std::io::Error>(Bytes::from(out));
+                    }
                 }
                 Err(e) => {
+                    stream_ok = false;
                     yield Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
                     break;
                 }
+            }
+        }
+        if stream_ok {
+            let tail = rw.finish();
+            if !tail.is_empty() {
+                yield Ok(Bytes::from(tail));
             }
         }
 
@@ -1951,6 +1991,7 @@ fn stream_response(
         ((input as f64 + output as f64) * multiplier * user.bill_multiplier()).round() as i64;
         user.deduct(charged);
         user.record_tokens(input.saturating_add(output));
+        let status = if stream_ok { 200u16 } else { crate::state::METRIC_STATUS_UNAVAILABLE };
         let _ = state
             .usage_tx
             .send(UsageEvent {
@@ -1963,14 +2004,20 @@ fn stream_response(
                 input_tokens: input,
                 output_tokens: output,
                 charged_tokens: charged,
-                status: 200,
+                status,
                 request_id: Some(trace.request_id.clone()),
             })
             .await;
         // 补记指标 tokens(OpenAI stream)
         let k = UpstreamKey::new(ProviderKind::Openai, &base_url, api_key.as_deref());
         state.record_metrics_tokens(Some(&k), input as u64, output as u64).await;
-        trace.emit_success(&state, input, output, charged).await;
+        if stream_ok {
+            trace.emit_success(&state, input, output, charged).await;
+        } else {
+            // 中途断流:按失败收口并让熔断感知,不再虚记成功。
+            state.breaker_unavailable(&k).await;
+            trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
+        }
     };
 
     let mut resp = sse_response(s);
@@ -2041,22 +2088,104 @@ async fn non_stream_response(
     let mut trace = trace;
     trace.resp_preview = resp_preview_of(state, &payload);
     trace.emit_success(state, input, output, charged).await;
-
     let mut out = Json(payload).into_response();
     apply_relay_headers(&mut out, &hdrs);
     Ok(out)
 }
 
-/// 字节级把 vLLM 的 `"reasoning"` 字段名归一化为 `"reasoning_content"`（参考 one-api）。
-/// 仅替换 JSON key，不影响值内容。处理两种格式：`"reasoning":"xxx"` 和 `"reasoning": "xxx"`。
-fn normalize_reasoning(bytes: &Bytes) -> Bytes {
-    let mut data = bytes.to_vec();
-    for sep in ["\":\"", "\": \""] {
-        let from = format!("\"reasoning{sep}").into_bytes();
-        let to = format!("\"reasoning_content{sep}").into_bytes();
-        data = replace_all_bytes(&data, &from, &to);
+/// SSE 流改写模式。
+enum SseFlavor {
+    /// OpenAI 兼容上游 → OpenAI 客户端:改顶层 model + choices 内 reasoning 归一化 + 扫 usage。
+    OpenaiChat,
+    /// Anthropic 上游直通 → Anthropic 客户端:改 message.model + 扫 usage。
+    AnthropicPassthrough,
+}
+
+/// SSE 流改写器:跨 chunk 行缓冲,按「完整行」做 JSON 级改写与 usage 提取。
+/// 取代字节级替换,修复:① key 被 chunk 边界切开漏改(模型名泄露 / reasoning 漏转换);
+/// ② 值内容里同名 JSON 字面量被误改(只动字段名,不碰字符串值)。
+struct SseRewriter {
+    buf: Vec<u8>,
+    flavor: SseFlavor,
+}
+
+impl SseRewriter {
+    fn new(flavor: SseFlavor) -> Self {
+        Self { buf: Vec::new(), flavor }
     }
-    Bytes::from(data)
+
+    /// 喂入一个上游 chunk,返回改写后应下发的字节(可能为空)。
+    fn feed(&mut self, chunk: &[u8], public_model: &str, input: &mut u32, output: &mut u32) -> Vec<u8> {
+        self.buf.extend_from_slice(chunk);
+        let mut out = Vec::with_capacity(chunk.len());
+        while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=pos).collect();
+            out.extend_from_slice(&self.rewrite_line(&line, public_model, input, output));
+        }
+        out
+    }
+
+    /// 流正常结束:冲刷残尾(不完整行按原样下发)。
+    fn finish(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buf)
+    }
+
+    fn rewrite_line(&self, line: &[u8], public_model: &str, input: &mut u32, output: &mut u32) -> Vec<u8> {
+        let s = String::from_utf8_lossy(line);
+        let Some(payload) = s.trim_start().strip_prefix("data:") else {
+            return line.to_vec(); // 空行 / 注释 / event: 等原样透传
+        };
+        let payload = payload.trim();
+        if payload == "[DONE]" {
+            return line.to_vec();
+        }
+        let Ok(mut v) = serde_json::from_str::<Value>(payload) else {
+            return line.to_vec(); // 非 JSON 行原样透传,绝不静默丢数据
+        };
+        match self.flavor {
+            SseFlavor::OpenaiChat => {
+                if let Some(u) = v.get("usage") {
+                    if u.is_object() {
+                        if let Some(p) = u.get("prompt_tokens").and_then(|x| x.as_u64()) {
+                            *input = p as u32;
+                        }
+                        if let Some(c) = u.get("completion_tokens").and_then(|x| x.as_u64()) {
+                            *output = c as u32;
+                        }
+                    }
+                }
+                if v.get("model").is_some() {
+                    v["model"] = json!(public_model);
+                }
+                // vLLM reasoning → reasoning_content(仅 choices[].message/delta 的 key 重命名)。
+                if let Some(choices) = v.get_mut("choices").and_then(|c| c.as_array_mut()) {
+                    for choice in choices.iter_mut() {
+                        for key in ["message", "delta"] {
+                            if let Some(obj) = choice.get_mut(key).and_then(|x| x.as_object_mut()) {
+                                if obj.contains_key("reasoning") && !obj.contains_key("reasoning_content") {
+                                    if let Some(r) = obj.remove("reasoning") {
+                                        obj.insert("reasoning_content".into(), r);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            SseFlavor::AnthropicPassthrough => {
+                if let Some(i) = v.pointer("/message/usage/input_tokens").and_then(|x| x.as_u64()) {
+                    *input = i as u32;
+                }
+                if let Some(o) = v.pointer("/usage/output_tokens").and_then(|x| x.as_u64()) {
+                    *output = o as u32;
+                }
+                if v.pointer("/message/model").is_some() {
+                    v["message"]["model"] = json!(public_model);
+                }
+            }
+        }
+        format!("data: {v}\n").into_bytes()
+    }
 }
 
 /// JSON 级把 vLLM 的 `reasoning` 字段名归一化为 `reasoning_content`（非流式响应）。
@@ -2069,67 +2198,6 @@ fn normalize_reasoning_json(payload: &mut Value) {
             if obj.contains_key("reasoning") && !obj.contains_key("reasoning_content") {
                 if let Some(r) = obj.remove("reasoning") {
                     obj.insert("reasoning_content".into(), r);
-                }
-            }
-        }
-    }
-}
-
-/// 字节级把 `"model":"<upstream>"` 改写成对外名(ASCII 模式,避免 UTF-8 破坏)。
-fn rewrite_model(bytes: &Bytes, upstream: &str, public: &str) -> Bytes {
-    if upstream == public {
-        return bytes.clone();
-    }
-    let mut data = bytes.to_vec();
-    for sep in ["\":\"", "\": \""] {
-        let from = format!("\"model{sep}{upstream}\"").into_bytes();
-        let to = format!("\"model{sep}{public}\"").into_bytes();
-        data = replace_all_bytes(&data, &from, &to);
-    }
-    Bytes::from(data)
-}
-
-fn replace_all_bytes(haystack: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
-    if from.is_empty() || haystack.len() < from.len() {
-        return haystack.to_vec();
-    }
-    let mut out = Vec::with_capacity(haystack.len());
-    let mut i = 0;
-    while i < haystack.len() {
-        if i + from.len() <= haystack.len() && &haystack[i..i + from.len()] == from {
-            out.extend_from_slice(to);
-            i += from.len();
-        } else {
-            out.push(haystack[i]);
-            i += 1;
-        }
-    }
-    out
-}
-
-/// 从 SSE 字节流里增量提取 OpenAI 的 usage(出现在 include_usage 的末尾 chunk)。
-fn scan_usage(buf: &mut Vec<u8>, new: &[u8], input: &mut u32, output: &mut u32) {
-    buf.extend_from_slice(new);
-    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-        let line: Vec<u8> = buf.drain(..=pos).collect();
-        let line = String::from_utf8_lossy(&line);
-        let line = line.trim();
-        let Some(payload) = line.strip_prefix("data:") else {
-            continue;
-        };
-        let payload = payload.trim();
-        if payload.is_empty() || payload == "[DONE]" {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<Value>(payload) {
-            if let Some(u) = v.get("usage") {
-                if u.is_object() {
-                    if let Some(p) = u.get("prompt_tokens").and_then(|x| x.as_u64()) {
-                        *input = p as u32;
-                    }
-                    if let Some(c) = u.get("completion_tokens").and_then(|x| x.as_u64()) {
-                        *output = c as u32;
-                    }
                 }
             }
         }
@@ -2175,6 +2243,83 @@ pub async fn responses(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- SseRewriter:行缓冲 JSON 级改写 ----
+
+    /// 依次喂入多个 chunk 并冲刷残尾,返回(输出字节, input, output)。
+    fn feed_all(rw: &mut SseRewriter, public: &str, chunks: Vec<&[u8]>) -> (Vec<u8>, u32, u32) {
+        let mut out = Vec::new();
+        let (mut input, mut output) = (0u32, 0u32);
+        for c in chunks {
+            out.extend_from_slice(&rw.feed(c, public, &mut input, &mut output));
+        }
+        out.extend_from_slice(&rw.finish());
+        (out, input, output)
+    }
+
+    #[test]
+    fn sse_rewriter_key_split_across_chunks() {
+        // `"model":` 与 `"reasoning":` 恰好被 chunk 边界切开 → 仍必须完成改写(回归 A-1)。
+        let chunks: Vec<&[u8]> = vec![
+            b"data: {\"model\":\"vllm-home/qw",
+            b"q\",\"choices\":[{\"index\":0,\"delta\":{\"rea",
+            b"soning\":\"\xe6\x80\x9d\xe8\x80\x83\xe4\xb8\xad\",\"content\":\"\xe7\xad\x94\xe6\xa1\x88\"}}]}\n\n",
+            b"data: [DONE]\n\n",
+        ];
+        let mut rw = SseRewriter::new(SseFlavor::OpenaiChat);
+        let (out, _, _) = feed_all(&mut rw, "gpt-test", chunks);
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("\"model\":\"gpt-test\""), "model 必须改回对外名: {s}");
+        assert!(!s.contains("vllm-home"), "上游真名不得泄露: {s}");
+        assert!(s.contains("\"reasoning_content\":\"思考中\""), "reasoning 必须归一化: {s}");
+        assert!(!s.contains("\"reasoning\":"), "不得残留 reasoning key: {s}");
+        assert!(s.contains("\"content\":\"答案\""));
+        assert!(s.contains("data: [DONE]"), "[DONE] 必须原样透传");
+    }
+
+    #[test]
+    fn sse_rewriter_value_literals_untouched() {
+        // 值内容里含 `"model":"<上游名>"` 与 `"reasoning":"x"` 字面量 → 只改字段名,不碰字符串值。
+        let body: &[u8] = b"data: {\"model\":\"vllm-home/qq\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"json: {\\\"model\\\":\\\"vllm-home/qq\\\", \\\"reasoning\\\":\\\"x\\\"}\"}}]}\n\n";
+        let mut rw = SseRewriter::new(SseFlavor::OpenaiChat);
+        let (out, _, _) = feed_all(&mut rw, "public-name", vec![body]);
+        let s = String::from_utf8(out).unwrap();
+        let v: Value = serde_json::from_str(s.trim_start_matches("data: ").trim_end()).unwrap();
+        assert_eq!(v["model"], "public-name");
+        let content = v["choices"][0]["delta"]["content"].as_str().unwrap();
+        assert!(content.contains("\"model\":\"vllm-home/qq\""), "内容中的字面量不得被改写: {content}");
+        assert!(content.contains("\"reasoning\":\"x\""));
+    }
+
+    #[test]
+    fn sse_rewriter_usage_and_non_data_lines() {
+        // usage 提取 + 注释行原样透传 + 无法解析的残尾按原样冲刷。
+        let chunks: Vec<&[u8]> = vec![
+            b": keep-alive\n\n",
+            b"data: {\"id\":1,\"model\":\"up\",\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":22},\"choices\":[]}\n",
+            b"data: {\"bad json",
+        ];
+        let mut rw = SseRewriter::new(SseFlavor::OpenaiChat);
+        let (out, input, output) = feed_all(&mut rw, "pub", chunks);
+        assert_eq!((input, output), (11, 22));
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.starts_with(": keep-alive\n\n"), "注释行原样透传: {s}");
+        assert!(s.contains("data: {\"bad json"), "无法解析的残尾按原样冲刷");
+        assert!(s.contains("\"model\":\"pub\""));
+    }
+
+    #[test]
+    fn sse_rewriter_anthropic_passthrough_model() {
+        // Anthropic 直通:message_start 的 message.model 改名 + usage 提取,event: 行原样透传。
+        let body: &[u8] = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-internal\",\"usage\":{\"input_tokens\":7}}}\n\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":9}}\n\n";
+        let mut rw = SseRewriter::new(SseFlavor::AnthropicPassthrough);
+        let (out, input, output) = feed_all(&mut rw, "claude-public", vec![body]);
+        assert_eq!((input, output), (7, 9));
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("\"model\":\"claude-public\""));
+        assert!(!s.contains("claude-internal"));
+        assert!(s.contains("event: message_start\n"), "event: 行原样透传");
+    }
 
     fn skipped_attempt() -> RequestAttempt {
         RequestAttempt {

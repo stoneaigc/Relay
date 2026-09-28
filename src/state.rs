@@ -371,6 +371,8 @@ pub struct FailureRecord {
 /// 连续失败 N 次就熔断熔断窗这么久。
 const BREAKER_FAILS: u8 = 3;
 const BREAKER_WINDOW: Duration = Duration::from_secs(30);
+/// 半开探活在飞超时:超过则视为探活丢失,允许放新探活(兜底防标志卡死)。
+const BREAKER_PROBE_WINDOW: Duration = Duration::from_secs(30);
 
 /// 每个上游的熔断器状态(内部可变,AsyncMutex 保护避免竞态)。
 #[derive(Debug, Default)]
@@ -378,43 +380,59 @@ pub struct Breaker {
     fail_count: u8,
     /// 熔断结束时刻;None = 没在熔断。
     recover_at: Option<Instant>,
+    /// 半开探活放行时刻;Some = 已有一个探活请求在飞,其余请求继续跳过。
+    probing_since: Option<Instant>,
 }
 
 impl Breaker {
-    /// 当前是否可用(没熔断就算可用)。
-    pub fn is_available(&self) -> bool {
-        match self.recover_at {
-            None => true,
-            Some(t) => Instant::now() >= t,
+    /// 是否应跳过该上游(熔断 open 或探活在飞)。
+    /// 熔断窗到期自动转半开:只放行一个探活请求,其余请求继续跳过;
+    /// 探活失败立即重新熔断(计数已放到阈值-1),探活超时则换新探活。
+    pub fn should_skip(&mut self) -> bool {
+        let now = Instant::now();
+        if let Some(t) = self.recover_at {
+            if now < t {
+                return true; // open:熔断窗内
+            }
+            // 窗口到期 → 半开:本次调用即探活请求,直接放行;
+            // 失败计数放到阈值-1,探活一失败立即重新熔断
+            self.fail_count = BREAKER_FAILS - 1;
+            self.recover_at = None;
+            self.probing_since = Some(now);
+            return false;
         }
+        if let Some(ps) = self.probing_since {
+            if now.duration_since(ps) < BREAKER_PROBE_WINDOW {
+                return true; // 探活在飞,其余请求跳过
+            }
+            // 探活超时(如流式请求迟迟无响应):本次调用即新探活,直接放行
+            self.fail_count = BREAKER_FAILS - 1;
+            self.probing_since = Some(now);
+            return false;
+        }
+        false // closed
     }
 
-    /// 调用成功:清零失败计数。
+    /// 调用成功:清零失败计数,回到 closed。
     pub fn record_success(&mut self) {
         self.fail_count = 0;
         self.recover_at = None;
+        self.probing_since = None;
     }
 
     /// 遇到一次 Unavailable 级错误:计数+1,达到阈值就进入熔断窗。
     pub fn record_unavailable(&mut self) {
+        self.probing_since = None; // 探活(若在飞)已结束
         self.fail_count = self.fail_count.saturating_add(1);
         if self.fail_count >= BREAKER_FAILS {
             self.recover_at = Some(Instant::now() + BREAKER_WINDOW);
         }
     }
 
-    /// 探活:若熔断窗已过,重置计数为 1,允许放行一个请求(=半开)。
-    /// 返回 true 表示本次应放行(半开),false 表示仍在熔断中。
-    pub fn maybe_half_open(&mut self) -> bool {
-        match self.recover_at {
-            Some(t) if Instant::now() >= t => {
-                self.fail_count = 1; // 保持警戒:再 2 次失败就又熔断
-                self.recover_at = None;
-                true
-            }
-            Some(_) => false,
-            None => true,
-        }
+    /// 一次尝试以「非成功也非不可用」结束(如 4xx 参数错):
+    /// 不作为健康信号,但要结束半开探活占用,避免探活标志卡满整个超时窗。
+    pub fn record_neutral(&mut self) {
+        self.probing_since = None;
     }
 
     /// 给管理后台看的状态快照(纯数据)。
@@ -534,11 +552,7 @@ impl AppState {
             .or_insert_with(|| Arc::new(AsyncMutex::new(Breaker::default())))
             .clone();
         let mut b = breaker.lock().await;
-        if b.is_available() {
-            return false;
-        }
-        // 熔断窗中?但可能时间到了,试试半开
-        !b.maybe_half_open()
+        b.should_skip()
     }
 
     /// 该上游调用成功:熔断器清零。
@@ -561,6 +575,17 @@ impl AppState {
         let mut g = breaker.lock().await;
         g.record_unavailable();
         g.fail_count
+    }
+
+    /// 一次尝试以「非成功也非不可用」结束(如 4xx 参数错):
+    /// 不影响健康计数,但要结束半开探活占用,避免探活标志卡满超时窗。
+    pub async fn breaker_neutral(&self, key: &UpstreamKey) {
+        let breaker = self
+            .upstream_breakers
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(Breaker::default())))
+            .clone();
+        breaker.lock().await.record_neutral();
     }
 
     // ======================== 管理:上游治理快照 ========================
@@ -1458,9 +1483,9 @@ mod tests {
     // ---- Breaker 熔断器 ----
 
     #[test]
-    fn breaker_available_by_default() {
-        let b = Breaker::default();
-        assert!(b.is_available());
+    fn breaker_closed_by_default() {
+        let mut b = Breaker::default();
+        assert!(!b.should_skip());
     }
 
     #[test]
@@ -1469,7 +1494,7 @@ mod tests {
         for _ in 0..BREAKER_FAILS {
             b.record_unavailable();
         }
-        assert!(!b.is_available());
+        assert!(b.should_skip());
     }
 
     #[test]
@@ -1478,20 +1503,65 @@ mod tests {
         for _ in 0..BREAKER_FAILS {
             b.record_unavailable();
         }
-        assert!(!b.is_available());
+        assert!(b.should_skip());
         b.record_success();
-        assert!(b.is_available());
+        assert!(!b.should_skip());
     }
 
     #[test]
-    fn breaker_half_open_after_window() {
+    fn breaker_half_open_single_probe() {
+        let mut b = Breaker::default();
+        for _ in 0..BREAKER_FAILS {
+            b.record_unavailable();
+        }
+        // 窗口到期(把 recover_at 拨回过去)
+        b.recover_at = Some(Instant::now() - std::time::Duration::from_secs(1));
+        // 第一个调用获得探活资格,后续请求继续跳过(单探活,不再全量放行)
+        assert!(!b.should_skip());
+        assert!(b.should_skip());
+        assert!(b.should_skip());
+        // 探活成功 → closed
+        b.record_success();
+        assert!(!b.should_skip());
+    }
+
+    #[test]
+    fn breaker_probe_failure_rearms() {
         let mut b = Breaker::default();
         for _ in 0..BREAKER_FAILS {
             b.record_unavailable();
         }
         b.recover_at = Some(Instant::now() - std::time::Duration::from_secs(1));
-        assert!(b.maybe_half_open());
-        assert!(b.is_available());
+        assert!(!b.should_skip()); // 探活放行
+        b.record_unavailable();    // 探活失败 → 立即重新熔断
+        assert!(b.should_skip());
+        assert!(b.recover_at.is_some());
+    }
+
+    #[test]
+    fn breaker_probe_timeout_reprobes() {
+        let mut b = Breaker::default();
+        for _ in 0..BREAKER_FAILS {
+            b.record_unavailable();
+        }
+        b.recover_at = Some(Instant::now() - std::time::Duration::from_secs(1));
+        assert!(!b.should_skip()); // 获得探活
+        // 探活标志卡死(模拟超时)→ 允许放新探活
+        b.probing_since = Some(Instant::now() - BREAKER_PROBE_WINDOW - std::time::Duration::from_secs(1));
+        assert!(!b.should_skip());
+    }
+
+    #[test]
+    fn breaker_neutral_clears_probe_flag() {
+        let mut b = Breaker::default();
+        for _ in 0..BREAKER_FAILS {
+            b.record_unavailable();
+        }
+        b.recover_at = Some(Instant::now() - std::time::Duration::from_secs(1));
+        assert!(!b.should_skip()); // 探活放行
+        b.record_neutral();        // 探活以 4xx 结束:上游可达,不重新熔断,但清探活标志
+        assert_eq!(b.fail_count, BREAKER_FAILS - 1);
+        assert!(!b.should_skip()); // 下一个请求直接放行(fail_count 保留警戒)
     }
 
     // ---- provider_health 状态机推导 + 排序 ----
