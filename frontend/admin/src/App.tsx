@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen } from "lucide-react";
-import { api, getToken, setToken, clearToken, healthz, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint } from "./api";
+import { api, getToken, setToken, clearToken, healthz, SITE_PREFIX, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -186,6 +186,17 @@ function Console({ onLogout }: { onLogout: () => void }) {
         ))}
       </nav>
       <div className="px-2 py-3">
+        {/* 一键切换门户:有同名门户用户则带登录态直达,否则回落门户登录页 */}
+        <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground"
+          onClick={async () => {
+            try {
+              const r = await api.portalSso();
+              if (r.token) localStorage.setItem("relay_portal_token", r.token);
+            } catch { /* 无同名门户用户:回落门户登录页 */ }
+            window.location.href = SITE_PREFIX + "/portal/";
+          }}>
+          <ExternalLink className="h-4 w-4" />进入用户门户
+        </Button>
         <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground" onClick={onLogout}>
           <LogOut className="h-4 w-4" />退出登录
         </Button>

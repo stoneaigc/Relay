@@ -2,7 +2,7 @@ const TOKEN_KEY = "relay_portal_token";
 
 // 子路径反代兼容:部署在 https://host/relay/portal/ 这类前缀下时,从地址栏探测出 "/relay"。
 // 根路径部署(路径以 /portal 开头)时为空串,fetch 行为与从前完全一致。
-const SITE_PREFIX = (() => {
+export const SITE_PREFIX = (() => {
   const m = window.location.pathname.match(/^(.+?)\/portal(?=\/|$)/);
   return m?.[1] ?? "";
 })();

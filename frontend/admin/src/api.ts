@@ -2,7 +2,7 @@ const TOKEN_KEY = "relay_admin_token";
 
 // 子路径反代兼容:部署在 https://host/relay/admin/ 这类前缀下时,从地址栏探测出 "/relay"。
 // 根路径部署(路径以 /admin 开头)时为空串,fetch 行为与从前完全一致。
-const SITE_PREFIX = (() => {
+export const SITE_PREFIX = (() => {
   const m = window.location.pathname.match(/^(.+?)\/admin(?=\/|$)/);
   return m?.[1] ?? "";
 })();
@@ -191,6 +191,9 @@ export interface ImportPreviewResp {
 export const api = {
   login: (username: string, password: string) =>
     req("/admin/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
+  // 管理员一键切换门户:按管理员用户名查找同名门户用户并签发 portal 令牌(无同名用户时 404)
+  portalSso: (): Promise<{ role: string; token: string; username: string }> =>
+    req("/admin/api/portal-sso", { method: "POST" }),
 
   overview: (): Promise<OverviewResp> => req("/admin/api/overview"),
   overviewSeries: (granularity: "day" | "week" | "month"): Promise<{ granularity: string; data: OverviewSeriesPoint[] }> =>

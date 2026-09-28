@@ -20,6 +20,7 @@ mod settings;
 mod state;
 mod storage;
 mod translate;
+mod unified;
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -304,6 +305,8 @@ async fn main() -> anyhow::Result<()> {
     // ---- 管理 API(挂到 /admin/api)----
     let admin_api = Router::new()
         .route("/auth/login", post(admin::login))
+        // 管理员一键切换门户:按管理员用户名签发同名门户用户的 portal 令牌
+        .route("/portal-sso", post(admin::portal_sso))
         .route("/overview", get(admin::overview))
         .route("/overview/series", get(admin::overview_series))
         .route("/users", get(admin::list_users).post(admin::create_user))
@@ -400,11 +403,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/embeddings", post(handlers::embeddings))
         .nest("/portal/api", portal_api)
         .nest("/admin/api", admin_api)
+        // 统一登录:按账号身份签发 admin / portal 令牌(防爆破 key 前缀 uni:)
+        .route("/api/auth/login", post(crate::unified::login))
         .with_state(Arc::clone(&state))
         // ---- 静态前端 ----
         .nest_service("/portal", spa("portal"))
         .nest_service("/admin", spa("admin"))
-        .route("/", get(|| async { axum::response::Redirect::to("portal/") }));
+        .route("/", get(crate::unified::login_page))
+        .route("/login", get(crate::unified::login_page));
     // 子路径反代兼容:URI 改写必须在路由匹配之前生效,故包在 Router 外层
     // (Router::layer 的中间件在匹配后才执行,改 URI 无效)。
     let app = axum::middleware::from_fn(strip_web_prefix).layer(app);

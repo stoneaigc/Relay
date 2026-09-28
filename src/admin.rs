@@ -119,6 +119,32 @@ pub async fn login(
     Ok(resp)
 }
 
+/// POST /admin/api/portal-sso —— 管理员一键切换门户:
+/// 按管理员用户名查找同名门户用户并签发 portal 令牌;无同名用户时 404(前端回落门户登录页)。
+/// 只能取得「同名用户」的令牌,无法越权到其他用户。
+pub async fn portal_sso(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let cfg = state.config();
+    let claims = jwt::from_headers(&cfg.auth.jwt_secret, &headers, "admin")?;
+    let username = claims.sub.trim();
+    let Some((id, _)) = storage::find_user_by_username(&state.db, username)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+    else {
+        return Err(ApiError::NoTarget(format!("门户无同名用户 {username}")));
+    };
+    let token = jwt::issue(
+        &cfg.auth.jwt_secret.clone(),
+        &id.to_string(),
+        "portal",
+        cfg.auth.session_ttl_secs,
+    )?;
+    Ok(Json(json!({ "role": "user", "token": token, "username": username })))
+}
+
 /// GET /admin/overview —— 概览统计(累计)。
 pub async fn overview(
     State(state): State<Arc<AppState>>,
