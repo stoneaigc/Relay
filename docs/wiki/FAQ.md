@@ -9,7 +9,7 @@
 相似度命中存在轻微误差风险，因此按路由 opt-in，且仅缓存确定性请求（temperature=0 或带 seed）；确认业务可接受后再开启。
 
 **需要多实例 / 更高并发怎么办？**
-多个 Relay 实例共享 PostgreSQL（数据）与 Redis（缓存）即可横向扩展；链路日志建议切换 PostgreSQL 或 Elasticsearch 后端。
+多个 Relay 实例共享 PostgreSQL（数据）与 Redis（缓存）即可横向扩展；链路日志建议切换 Elasticsearch 后端。
 
 **用户的可见模型是怎么隔离的？**
 用户在后台绑定模型组，`/v1/models` 只返回该组内的对外模型名；组外模型对用户完全不可见（调用会被拒）。

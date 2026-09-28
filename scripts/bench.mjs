@@ -13,6 +13,8 @@
 // 用法:
 //   node scripts/bench.mjs --key rk_live_xxx [--base http://localhost:8080]
 //        [--duration 10] [--concurrency 16] [--model bench] [--mock-port 9999] [--skip-chat]
+//        [--mock-external]  不内嵌 mock(用独立进程的 mock_upstream.mjs 等),
+//                           排除「压测客户端与上游同进程 GC 互相干扰」的 P99 毛刺来源。
 //
 // 注意:压测用户并发上限需 ≥ --concurrency(默认 16,即全局默认限额),否则 429。
 
@@ -30,6 +32,7 @@ const CONC = Number(args.concurrency ?? 16);
 const MODEL = args.model ?? "bench";
 const MOCK_PORT = Number(args["mock-port"] ?? 9999);
 const SKIP_CHAT = !!args["skip-chat"];
+const MOCK_EXTERNAL = !!args["mock-external"];
 
 const MOCK_RESP = JSON.stringify({
   id: "chatcmpl-bench",
@@ -104,9 +107,11 @@ const scenarios = [
 
 console.log(`relay bench → ${BASE}  duration=${DURATION}s  concurrency=${CONC}`);
 let mock;
-if (!SKIP_CHAT) {
+if (!SKIP_CHAT && !MOCK_EXTERNAL) {
   mock = await startMockUpstream();
   console.log(`mock upstream listening on 127.0.0.1:${MOCK_PORT}`);
+} else if (MOCK_EXTERNAL) {
+  console.log(`using external mock upstream at 127.0.0.1:${MOCK_PORT}`);
 }
 if (!KEY) console.log("(!) 未提供 --key,跳过鉴权场景\n");
 

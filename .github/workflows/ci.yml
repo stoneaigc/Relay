@@ -14,7 +14,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: cargo test(178 项,含双迁移/路由/计费/校验)
+      - name: cargo test(199 项,含双迁移/路由/计费/校验)
         run: cargo test --locked
 
   frontend:

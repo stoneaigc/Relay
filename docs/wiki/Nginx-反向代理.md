@@ -30,7 +30,8 @@ location /relay/ {
     proxy_set_header X-Forwarded-Port  $server_port;
     proxy_set_header REMOTE-HOST       $remote_addr;
 
-    # ---- WebSocket / 流式(SSE)必需:逐字透传,不缓冲 ----
+    # ---- 流式(SSE)必需:逐字透传,不缓冲 ----
+    # Upgrade/Connection 头为通用兼容写法(Relay 当前未使用 WebSocket,保留无副作用)
     proxy_http_version 1.1;
     proxy_set_header Upgrade    $http_upgrade;
     proxy_set_header Connection $http_connection;

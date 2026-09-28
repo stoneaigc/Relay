@@ -40,7 +40,7 @@
 
 - 🔍 **请求链路追踪**：每次请求的候选顺序、failover 链、tokens、请求/响应体预览全留痕，失败标红
 - 📈 **指标**：ECharts 仪表盘 + Prometheus `/metrics` 导出
-- 🔐 **安全**：登录防爆破、入站校验、上游错误脱敏；链路日志支持 SQLite / PostgreSQL / Elasticsearch
+- 🔐 **安全**：登录防爆破、入站校验、上游错误脱敏；链路日志支持 SQLite / Elasticsearch 存储（主数据库另可选 PostgreSQL）
 
 ---
 
@@ -109,6 +109,7 @@ curl http://localhost:8080/v1/chat/completions \
 
 | 入口 | 地址 | 给谁用 |
 |---|---|---|
+| 统一登录 | `/`（或 `/login`） | 所有人：登录一次，按账号身份自动进入门户或后台 |
 | 数据面 API | `/v1/chat/completions` `/v1/messages` `/v1/models` `/v1/embeddings` `/v1/responses` | 客户端 SDK / 应用 |
 | 用户门户 | `/portal/` | 终端用户：注册、Key、对话、账单 |
 | 运营后台 | `/admin/` | 运营者：用户、模型、路由、观测、审计 |
@@ -169,6 +170,9 @@ node scripts/bench.mjs --key rk_live_xxx [--duration 10] [--concurrency 16]
 | `POST /v1/chat/completions`（全链路重路径） | ~720 | 4.4ms | 7.7ms |
 
 持续 4 万+ 请求后进程内存 ≈ 29MB。
+
+> [!NOTE]
+> P99 对测量环境敏感：在带包过滤层的宿主上（Hyper-V 虚拟交换机、Tailscale 等 VPN 适配器），客户端测得的 chat P99 会出现与网关无关的数百毫秒尖刺——TCP 包在过滤层滞留后重传所致，网关内部延迟不受影响（服务端链路日志 `latency_ms` 同场景实测 P99 ≤ 4ms）。复测建议加 `--mock-external` 将 mock 上游独立成进程，并以服务端 `latency_ms` 为准。
 
 ---
 

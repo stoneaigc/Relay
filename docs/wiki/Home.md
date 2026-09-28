@@ -34,7 +34,7 @@
 
 ### 可观测与安全
 
-- **请求链路追踪**：每次请求完整记录候选顺序、failover 链、熔断跳过、tokens 与请求/响应体预览；链路日志支持 SQLite / PostgreSQL / Elasticsearch 三后端，保留期自动清理。
+- **请求链路追踪**：每次请求完整记录候选顺序、failover 链、熔断跳过、tokens 与请求/响应体预览；链路日志支持 SQLite / Elasticsearch 双后端，保留期自动清理。
 - **指标**：仪表盘（ECharts）+ Prometheus `GET /metrics` 导出，可直接接入 Grafana。
 - **安全**：登录防爆破（三入口滑动窗口）、入站 payload 校验、上游错误统一脱敏、全局 401 踢回登录。
 
@@ -42,6 +42,7 @@
 
 | 入口 | 地址 | 给谁用 | 功能文档 |
 |---|---|---|---|
+| 统一登录 | `/` 或 `/login` | 所有人：登录一次按身份分流；后台左下角可一键切换门户 | [架构与配置 · 请求生命周期](https://github.com/stoneaigc/Relay/wiki/架构与配置#一次请求的生命周期) |
 | 数据面 API | `/v1/...` | 客户端 SDK / 应用 | [架构与配置 · 数据面接口](https://github.com/stoneaigc/Relay/wiki/架构与配置#数据面接口) |
 | 用户门户 | `/portal/` | 终端用户 | [用户门户功能介绍](https://github.com/stoneaigc/Relay/wiki/功能介绍-用户门户) |
 | 管理后台 | `/admin/` | 运营者 | [管理后台功能介绍](https://github.com/stoneaigc/Relay/wiki/功能介绍-管理后台) |
@@ -52,8 +53,8 @@
 |---|---|
 | [项目总览](https://github.com/stoneaigc/Relay/wiki/Home) | 定位 / 核心能力 / 三个入口（本页） |
 | [安装与升级](https://github.com/stoneaigc/Relay/wiki/安装与升级) | 在线一键安装（1Panel 风格）、离线安装、Docker Compose、升级与回滚、卸载 |
-| [Nginx 反向代理](https://github.com/stoneaigc/Relay/wiki/Nginx-反向代理) | 子路径（`/relay/`）对外暴露完整配置、兜底规则、SSE 与 WebSocket 注意事项 |
-| [管理后台功能介绍](https://github.com/stoneaigc/Relay/wiki/功能介绍-管理后台) | 概览 / 用户管理 / 上游模型 / 模型组 / 监控六页 / 设置，逐页说明 |
+| [Nginx 反向代理](https://github.com/stoneaigc/Relay/wiki/Nginx-反向代理) | 子路径（`/relay/`）对外暴露完整配置、兜底规则与 SSE 注意事项 |
+| [管理后台功能介绍](https://github.com/stoneaigc/Relay/wiki/功能介绍-管理后台) | 概览 / 运营（用户 / 奖励） / 模型与上游 / 监控六页 / 系统（API 文档 / 设置），逐页说明 |
 | [用户门户功能介绍](https://github.com/stoneaigc/Relay/wiki/功能介绍-用户门户) | 概览 / 模型广场 / 对话 / 奖励 / 对话日志 / API 文档，逐页说明 |
 | [架构与配置](https://github.com/stoneaigc/Relay/wiki/架构与配置) | 技术架构 / 请求生命周期 / 数据面接口 / 配置项 / 部署形态 / 性能基准 |
 | [FAQ](https://github.com/stoneaigc/Relay/wiki/FAQ) | 常见问题与安全披露 |

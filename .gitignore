@@ -18,6 +18,7 @@ frontend/*/dist/
 # 打包产物
 /dist
 *.tar.gz
+*.zip
 
 # 本地敏感配置(如把密钥写进了 default.toml,改用环境变量或本地覆盖文件)
 config/local.toml
@@ -28,3 +29,4 @@ config/local.toml
 # 工具元数据
 .omc/
 .trae/
+.ai-memory/
