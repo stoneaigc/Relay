@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
   charged_tokens BIGINT,
   key_id         TEXT,
   cost_usd       DOUBLE PRECISION,
+  bill_multiplier DOUBLE PRECISION,              -- 最终生效计费倍率(路由×时段×用户)
   status         BIGINT,
   ts             BIGINT NOT NULL DEFAULT 0,
   created_at     TEXT NOT NULL,

@@ -99,8 +99,13 @@ pub async fn login(
     }
     let (ok, secret, ttl) = {
         let cfg = state.config();
+        // 口令校验:后台改过密(settings.admin.password_hash,argon2)则优先;否则用 env/config 明文。
+        let pass_ok = match cfg.admin.password_hash.as_deref() {
+            Some(hash) => crate::storage::verify_password(hash, &body.password).0,
+            None => body.password == cfg.admin.password,
+        };
         (
-            body.username == cfg.admin.username && body.password == cfg.admin.password,
+            body.username == cfg.admin.username && pass_ok,
             cfg.auth.jwt_secret.clone(),
             cfg.auth.session_ttl_secs,
         )
@@ -117,6 +122,53 @@ pub async fn login(
         resp.headers_mut().insert(crate::audit::AUDIT_ACTOR_HEADER, v);
     }
     Ok(resp)
+}
+
+#[derive(Deserialize)]
+pub struct ChangeAdminPassword {
+    pub old_password: String,
+    pub new_password: String,
+}
+
+/// POST /admin/api/auth/change-password —— 后台修改管理员密码。
+/// 新口令以 argon2 哈希存 settings.admin.*,刷新内存 Config 即时生效;
+/// env/config 中的明文口令此后仅作「哈希被清掉时」的兜底。操作经审计中间件留痕(不落请求体)。
+pub async fn change_admin_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ChangeAdminPassword>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if body.new_password.len() < 8 {
+        return Err(ApiError::BadRequest("新密码至少 8 位".into()));
+    }
+    // 旧密码校验:与登录同口径(哈希优先,否则 env/config 明文)。
+    let (cur_hash, cur_pass) = {
+        let cfg = state.config();
+        (cfg.admin.password_hash.clone(), cfg.admin.password.clone())
+    };
+    let old_ok = match cur_hash.as_deref() {
+        Some(hash) => crate::storage::verify_password(hash, &body.old_password).0,
+        None => body.old_password == cur_pass,
+    };
+    if !old_ok {
+        return Err(ApiError::InvalidCredentials);
+    }
+    let new_hash = crate::storage::hash_password(&body.new_password);
+    storage::set_settings(
+        &state.db,
+        &[(crate::settings::K_ADMIN_PASSWORD_HASH.to_string(), new_hash)],
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // 刷新内存 Config:重读 admin.* 覆盖当前快照。
+    let kv = storage::load_settings(&state.db, crate::settings::ADMIN_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut new_cfg = (**state.config()).clone();
+    crate::settings::apply_admin_settings(&mut new_cfg, &kv);
+    state.config.store(Arc::new(new_cfg));
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// POST /admin/api/portal-sso —— 管理员一键切换门户:
@@ -1348,11 +1400,12 @@ pub async fn delete_group(
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
-    storage::delete_group(&state.db, id)
+    // 事务级联:删路由+时段规则,并解绑该组用户(group_id=0)。
+    let unbound = storage::delete_group(&state.db, id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(json!({ "ok": true, "unbound_users": unbound })))
 }
 
 // ---- 高峰/低谷时段规则 ----

@@ -502,7 +502,9 @@ pub async fn run_chat(
                 user.deduct(charged);
                 user.record_tokens(input.saturating_add(output));
                 let _ = state.usage_tx.send(UsageEvent {
-                    user_id: user.id, key_id, cost_usd: 0.0, model: model.clone(),
+                    user_id: user.id, key_id, cost_usd: 0.0,
+                    bill_multiplier: multiplier * user.bill_multiplier(),
+                    model: model.clone(),
                     provider: provider_name.clone(), upstream_model: upstream_model.clone(),
                     input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200,
                     request_id: Some(request_id.clone()),
@@ -553,7 +555,9 @@ pub async fn run_chat(
                         user.deduct(charged);
                         user.record_tokens(input.saturating_add(output));
                         let _ = state.usage_tx.send(UsageEvent {
-                            user_id: user.id, key_id, cost_usd: 0.0, model: model.clone(),
+                            user_id: user.id, key_id, cost_usd: 0.0,
+                            bill_multiplier: multiplier * user.bill_multiplier(),
+                            model: model.clone(),
                             provider: provider_name.clone(), upstream_model: upstream_model.clone(),
                             input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200,
                             request_id: Some(request_id.clone()),
@@ -898,7 +902,8 @@ async fn anthropic_nonstream_response(
     let mut trace = trace;
     trace.resp_preview = resp_preview_of(state, &payload);
     let _ = state.usage_tx.send(UsageEvent {
-        user_id: user.id, key_id, cost_usd: 0.0, model: model.clone(), provider: provider_name, upstream_model,
+        user_id: user.id, key_id, cost_usd: 0.0, bill_multiplier: multiplier * user.bill_multiplier(),
+        model: model.clone(), provider: provider_name, upstream_model,
         input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200,
         request_id: Some(trace.request_id.clone()),
     }).await;
@@ -1028,7 +1033,8 @@ fn anthropic_stream_response(
         user.record_tokens(input.saturating_add(output));
         let status = if stream_ok { 200u16 } else { crate::state::METRIC_STATUS_UNAVAILABLE };
         let _ = state.usage_tx.send(UsageEvent {
-            user_id, key_id, cost_usd: 0.0, model, provider: provider_name, upstream_model,
+            user_id, key_id, cost_usd: 0.0, bill_multiplier: multiplier * user.bill_multiplier(),
+            model, provider: provider_name, upstream_model,
             input_tokens: input, output_tokens: output, charged_tokens: charged, status,
             request_id: Some(trace.request_id.clone()),
         }).await;
@@ -1202,7 +1208,9 @@ pub async fn run_messages(
                 user.deduct(charged);
                 user.record_tokens(input.saturating_add(output));
                 let _ = state.usage_tx.send(UsageEvent {
-                    user_id: user.id, key_id, cost_usd: 0.0, model: model.clone(),
+                    user_id: user.id, key_id, cost_usd: 0.0,
+                    bill_multiplier: multiplier * user.bill_multiplier(),
+                    model: model.clone(),
                     provider: provider_name.clone(), upstream_model: upstream_model.clone(),
                     input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200,
                     request_id: Some(request_id.clone()),
@@ -1253,7 +1261,9 @@ pub async fn run_messages(
                         user.deduct(charged);
                         user.record_tokens(input.saturating_add(output));
                         let _ = state.usage_tx.send(UsageEvent {
-                            user_id: user.id, key_id, cost_usd: 0.0, model: model.clone(),
+                            user_id: user.id, key_id, cost_usd: 0.0,
+                            bill_multiplier: multiplier * user.bill_multiplier(),
+                            model: model.clone(),
                             provider: provider_name.clone(), upstream_model: upstream_model.clone(),
                             input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200,
                             request_id: Some(request_id.clone()),
@@ -1543,7 +1553,7 @@ async fn anth_charge(
     user.deduct(charged);
     user.record_tokens(input.saturating_add(output));
     let tx = state.usage_tx.clone();
-    let ev = UsageEvent { user_id: user.id, key_id, cost_usd: 0.0, model, provider, upstream_model: upstream, input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200, request_id };
+    let ev = UsageEvent { user_id: user.id, key_id, cost_usd: 0.0, bill_multiplier: multiplier * user.bill_multiplier(), model, provider, upstream_model: upstream, input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200, request_id };
     tokio::spawn(async move { let _ = tx.send(ev).await; });
     // 补记 token 指标:上游分桶 + 全局
     let k = UpstreamKey::new(kind, base_url, api_key);
@@ -1621,7 +1631,8 @@ fn anthropic_passthrough_stream(
         user.record_tokens(input.saturating_add(output));
         let status = if stream_ok { 200u16 } else { crate::state::METRIC_STATUS_UNAVAILABLE };
         let _ = state.usage_tx.send(UsageEvent {
-            user_id: user.id, key_id, cost_usd: 0.0, model: model.clone(), provider: provider_name.clone(),
+            user_id: user.id, key_id, cost_usd: 0.0, bill_multiplier: multiplier * user.bill_multiplier(),
+            model: model.clone(), provider: provider_name.clone(),
             upstream_model: upstream_model.clone(), input_tokens: input, output_tokens: output,
             charged_tokens: charged, status, request_id: Some(trace.request_id.clone()),
         }).await;
@@ -1998,6 +2009,7 @@ fn stream_response(
                 user_id,
                 key_id,
                 cost_usd: 0.0,
+                bill_multiplier: multiplier * user.bill_multiplier(),
                 model,
                 provider: provider_name,
                 upstream_model,
@@ -2072,6 +2084,7 @@ async fn non_stream_response(
             user_id: user.id,
             key_id,
             cost_usd: 0.0,
+            bill_multiplier: multiplier * user.bill_multiplier(),
             model,
             provider: provider_name,
             upstream_model,

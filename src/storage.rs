@@ -26,6 +26,56 @@ pub fn backend() -> Backend {
     *BACKEND.get().unwrap_or(&Backend::Sqlite)
 }
 
+/// 供应商密钥静态加密密钥(main 启动时由 auth.jwt_secret 注入;未注入=测试态,跳过加密)。
+static PROVIDER_SECRET: OnceLock<String> = OnceLock::new();
+
+/// 密文前缀:标识 providers.api_key 列里的是 AES-256-GCM 密文(base64),否则为旧版明文。
+const PROVIDER_KEY_ENC_PREFIX: &str = "enc:v1:";
+
+/// 注入供应商密钥加密用的主密钥(auth.jwt_secret)。必须在首次读写 providers 之前调用。
+pub fn init_provider_secret(secret: &str) {
+    let _ = PROVIDER_SECRET.set(secret.to_string());
+}
+
+/// 加密待入库的上游供应商 api_key(空值原样返回 None;已带密文前缀则不二次包裹;
+/// 未注入密钥(测试态)或加密失败时回退明文,保证功能可用)。
+fn enc_provider_key(plain: Option<&str>) -> Option<String> {
+    let k = plain?.trim();
+    if k.is_empty() {
+        return None;
+    }
+    if k.starts_with(PROVIDER_KEY_ENC_PREFIX) {
+        return Some(k.to_string());
+    }
+    match PROVIDER_SECRET.get().map(|s| crate::settings::encrypt(s, k)) {
+        Some(Ok(ct)) => Some(format!("{PROVIDER_KEY_ENC_PREFIX}{ct}")),
+        Some(Err(e)) => {
+            tracing::warn!("provider api_key 加密失败,回退明文入库: {e}");
+            Some(k.to_string())
+        }
+        None => Some(k.to_string()),
+    }
+}
+
+/// 解密出库的上游供应商 api_key(旧版明文原样返回;jwt_secret 变更导致解密失败时返回 None 并告警)。
+fn dec_provider_key(stored: Option<String>) -> Option<String> {
+    let v = stored?;
+    if v.is_empty() {
+        return None;
+    }
+    let Some(ct) = v.strip_prefix(PROVIDER_KEY_ENC_PREFIX) else {
+        return Some(v); // 旧版明文兼容
+    };
+    match PROVIDER_SECRET.get().map(|s| crate::settings::decrypt(s, ct)) {
+        Some(Ok(p)) => Some(p),
+        Some(Err(e)) => {
+            tracing::warn!("provider api_key 解密失败(auth.jwt_secret 可能已变更),该供应商需在后台重新保存密钥: {e}");
+            None
+        }
+        None => None,
+    }
+}
+
 /// 占位符适配:Postgres 需 `$1..$n`,SQLite/其余保持 `?`。
 /// 仅替换 SQL 文本之外的 `?`(跳过单引号字符串字面量内的)。
 pub fn pq(sql: &str) -> String {
@@ -57,6 +107,35 @@ macro_rules! q {
     ($sql:expr $(,)?) => {
         sqlx::query(&pq($sql))
     };
+}
+
+/// 启动迁移:把历史明文 api_key 一次性加密回写(幂等;已加密的行跳过)。
+pub async fn migrate_provider_keys(pool: &Db) -> anyhow::Result<u64> {
+    if PROVIDER_SECRET.get().is_none() {
+        return Ok(0);
+    }
+    let rows = q!("SELECT name, api_key FROM providers").fetch_all(pool).await?;
+    let mut n = 0u64;
+    for r in rows {
+        let name: String = r.get("name");
+        let k: Option<String> = r.get("api_key");
+        let Some(k) = k.filter(|k| !k.is_empty()) else { continue };
+        if k.starts_with(PROVIDER_KEY_ENC_PREFIX) {
+            continue;
+        }
+        if let Some(enc) = enc_provider_key(Some(&k)) {
+            q!("UPDATE providers SET api_key = ? WHERE name = ?")
+                .bind(enc)
+                .bind(&name)
+                .execute(pool)
+                .await?;
+            n += 1;
+        }
+    }
+    if n > 0 {
+        tracing::info!("provider api_key 静态加密迁移: {n} 条");
+    }
+    Ok(n)
 }
 
 /// sha256(明文) 的十六进制串,用于 Key 校验与存储(明文绝不落库)。
@@ -229,6 +308,10 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION")
             .execute(pool)
             .await;
+        // 最终生效计费倍率(路由×时段×用户),账单明细解释用。
+        let _ = q!("ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS bill_multiplier DOUBLE PRECISION")
+            .execute(pool)
+            .await;
     } else {
         let _ = q!("ALTER TABLE reward_claims ADD COLUMN task_id INTEGER").execute(pool).await;
         let _ = q!("ALTER TABLE users ADD COLUMN bill_multiplier REAL NOT NULL DEFAULT 1.0")
@@ -273,6 +356,8 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         // 用量日志:密钥归因 + 计费口径成本(USD)。
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN key_id TEXT").execute(pool).await;
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN cost_usd REAL").execute(pool).await;
+        // 最终生效计费倍率(路由×时段×用户),账单明细解释用。
+        let _ = q!("ALTER TABLE usage_logs ADD COLUMN bill_multiplier REAL").execute(pool).await;
         // 请求链路:请求/响应体内容预览(跟随存储后端)。
         let _ = q!("ALTER TABLE request_logs ADD COLUMN req_body TEXT")
             .execute(pool)
@@ -292,12 +377,52 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
             .execute(pool)
             .await;
     }
+    // Key 明文清空:认证只依赖 key_hash,明文仅在创建/刷新响应中返回一次。
+    // 启动时把历史明文置空(幂等),防止库文件泄露即等于泄露全部用户 Key。
+    let _ = q!("UPDATE api_keys SET key_plain = NULL WHERE key_plain IS NOT NULL")
+        .execute(pool)
+        .await;
     Ok(())
 }
 
-/// 口令哈希(开发版:sha256;生产建议换 argon2)。
+/// 口令哈希:argon2id(随机盐,PHC 格式串)。
+/// 旧版无盐 sha256 hex 哈希由 verify_password 兼容校验,登录成功后透明升级(见 upgrade_password_hash)。
 pub fn hash_password(pw: &str) -> String {
-    hash_key(pw)
+    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+    let salt = SaltString::generate(&mut OsRng);
+    argon2::Argon2::default()
+        .hash_password(pw.as_bytes(), &salt)
+        .expect("argon2 hash password")
+        .to_string()
+}
+
+/// 校验口令:自动识别 argon2 PHC 串与旧版无盐 sha256 hex 串(历史数据)。
+/// 返回 (是否匹配, 是否为旧哈希需升级为 argon2)。
+pub fn verify_password(stored: &str, provided: &str) -> (bool, bool) {
+    if stored.starts_with("$argon2") {
+        use argon2::password_hash::{PasswordHash, PasswordVerifier};
+        let Ok(parsed) = PasswordHash::new(stored) else {
+            return (false, false);
+        };
+        let ok = argon2::Argon2::default()
+            .verify_password(provided.as_bytes(), &parsed)
+            .is_ok();
+        (ok, false)
+    } else {
+        // 旧版:无盐 sha256 hex。匹配即需要升级。
+        let ok = hash_key(provided) == stored;
+        (ok, ok)
+    }
+}
+
+/// 登录成功后把旧版 sha256 哈希升级为 argon2(透明迁移;调用方失败仅记日志,不阻断登录)。
+pub async fn upgrade_password_hash(pool: &Db, user_id: Uuid, new_hash: &str) -> anyhow::Result<()> {
+    q!("UPDATE users SET password_hash = ? WHERE id = ?")
+        .bind(new_hash)
+        .bind(user_id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// 冷启动:把 users 与未吊销的 api_keys 全量加载进内存 Map。
@@ -377,7 +502,7 @@ pub async fn upsert_provider(
          ON CONFLICT(name) DO UPDATE SET
            kind = excluded.kind, base_url = excluded.base_url, api_key = excluded.api_key",
     )
-    .bind(name).bind(kind).bind(base_url).bind(api_key).bind(now_iso())
+    .bind(name).bind(kind).bind(base_url).bind(enc_provider_key(api_key)).bind(now_iso())
     .execute(pool).await?;
     Ok(())
 }
@@ -385,16 +510,20 @@ pub async fn upsert_provider(
 /// 按 base_url + api_key 查找已有 provider;不存在则创建。返回 provider name。
 ///
 /// 同一个 base_url 用不同 API key 视为不同供应商（可持有不同模型集）。
+/// api_key 库内为密文(AES-GCM 随机 nonce,不可按密文比对),故按 base_url 取回后解密比对。
 pub async fn find_or_create_provider(
     pool: &Db,
     kind: &str,
     base_url: &str,
     api_key: Option<&str>,
 ) -> anyhow::Result<(String, bool)> {
-    // 按 base_url + api_key 精确匹配已有 provider
-    let existing: Option<String> = q!("SELECT name FROM providers WHERE base_url = ? AND api_key IS NOT DISTINCT FROM ?")
-        .bind(base_url).bind(api_key.filter(|k| !k.is_empty()))
-        .fetch_optional(pool).await?.map(|r| r.get("name"));
+    let want = api_key.filter(|k| !k.is_empty());
+    let rows = q!("SELECT name, api_key FROM providers WHERE base_url = ?")
+        .bind(base_url).fetch_all(pool).await?;
+    let existing: Option<String> = rows.iter()
+        .map(|r| (r.get::<String, _>("name"), r.get::<Option<String>, _>("api_key")))
+        .find(|(_, k)| dec_provider_key(k.clone()).as_deref() == want)
+        .map(|(n, _)| n);
     if let Some(name) = existing {
         return Ok((name, false));
     }
@@ -427,16 +556,19 @@ pub async fn find_or_create_provider_named(
     Ok((name, created))
 }
 
-/// 按 base_url + api_key 精确查找已有 provider。
+/// 按 base_url + api_key 精确查找已有 provider(密文列,取回解密比对)。
 pub async fn find_provider_by_credentials(
     pool: &Db,
     base_url: &str,
     api_key: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
-    let name: Option<String> = q!("SELECT name FROM providers WHERE base_url = ? AND api_key IS NOT DISTINCT FROM ?")
-        .bind(base_url).bind(api_key.filter(|k| !k.is_empty()))
-        .fetch_optional(pool).await?.map(|r| r.get("name"));
-    Ok(name)
+    let want = api_key.filter(|k| !k.is_empty());
+    let rows = q!("SELECT name, api_key FROM providers WHERE base_url = ?")
+        .bind(base_url).fetch_all(pool).await?;
+    Ok(rows.iter()
+        .map(|r| (r.get::<String, _>("name"), r.get::<Option<String>, _>("api_key")))
+        .find(|(_, k)| dec_provider_key(k.clone()).as_deref() == want)
+        .map(|(n, _)| n))
 }
 
 /// 判断供应商名是否存在。
@@ -445,11 +577,11 @@ pub async fn provider_name_exists(pool: &Db, name: &str) -> anyhow::Result<bool>
         .bind(name).fetch_optional(pool).await?.is_some())
 }
 
-/// 读取供应商存储的 API key(空视为无)。
+/// 读取供应商存储的 API key(密文列解密;空视为无)。
 pub async fn provider_api_key(pool: &Db, name: &str) -> anyhow::Result<Option<String>> {
     let row = q!("SELECT api_key FROM providers WHERE name = ?")
         .bind(name).fetch_optional(pool).await?;
-    Ok(row.and_then(|r| r.get::<Option<String>, _>("api_key")).filter(|k| !k.is_empty()))
+    Ok(dec_provider_key(row.and_then(|r| r.get::<Option<String>, _>("api_key")).filter(|k| !k.is_empty())))
 }
 
 /// 列出所有 provider，附带模型数量。支持分页。
@@ -500,11 +632,11 @@ pub async fn update_provider(
     match (key, dn) {
         (Some(k), Some(d)) => {
             q!("UPDATE providers SET base_url = ?, api_key = ?, display_name = ? WHERE name = ?")
-                .bind(base_url).bind(k).bind(d).bind(name).execute(pool).await?;
+                .bind(base_url).bind(enc_provider_key(Some(k))).bind(d).bind(name).execute(pool).await?;
         }
         (Some(k), None) => {
             q!("UPDATE providers SET base_url = ?, api_key = ? WHERE name = ?")
-                .bind(base_url).bind(k).bind(name).execute(pool).await?;
+                .bind(base_url).bind(enc_provider_key(Some(k))).bind(name).execute(pool).await?;
         }
         (None, Some(d)) => {
             q!("UPDATE providers SET base_url = ?, display_name = ? WHERE name = ?")
@@ -600,7 +732,7 @@ pub async fn update_model(
             .bind(kind).bind(base_url).bind(&p).execute(pool).await?;
         if let Some(k) = api_key.filter(|k| !k.is_empty()) {
             q!("UPDATE providers SET api_key = ? WHERE name = ?")
-                .bind(k).bind(&p).execute(pool).await?;
+                .bind(enc_provider_key(Some(k))).bind(&p).execute(pool).await?;
         }
     }
     q!("UPDATE models SET upstream_model = ?, label = ? WHERE id = ?")
@@ -654,7 +786,8 @@ pub async fn list_models(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
         "provider": r.get::<Option<String>,_>("provider_name"),
         "kind": r.get::<Option<String>,_>("kind"),
         "base_url": r.get::<Option<String>,_>("base_url"),
-        "api_key": r.get::<Option<String>,_>("api_key"),
+        // 密文列解密后返回(仅管理端可见,与旧行为一致)。
+        "api_key": dec_provider_key(r.get::<Option<String>,_>("api_key")),
     })).collect())
 }
 
@@ -671,10 +804,20 @@ pub async fn add_group(pool: &Db, name: &str) -> anyhow::Result<i64> {
     Ok(r.get::<i64, _>("id"))
 }
 
-pub async fn delete_group(pool: &Db, id: i64) -> anyhow::Result<()> {
-    q!("DELETE FROM group_routes WHERE group_id = ?").bind(id).execute(pool).await?;
-    q!("DELETE FROM model_groups WHERE id = ?").bind(id).execute(pool).await?;
-    Ok(())
+/// 删除模型组(事务):连带删除组内路由与时段规则,绑定该组的用户解绑(group_id=0)。
+/// 返回受影响(被解绑)的用户数,供管理端提示。
+pub async fn delete_group(pool: &Db, id: i64) -> anyhow::Result<u64> {
+    let mut tx = pool.begin().await?;
+    q!("DELETE FROM time_rules WHERE group_id = ?").bind(id).execute(&mut *tx).await?;
+    q!("DELETE FROM group_routes WHERE group_id = ?").bind(id).execute(&mut *tx).await?;
+    let unbound = q!("UPDATE users SET group_id = 0 WHERE group_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    q!("DELETE FROM model_groups WHERE id = ?").bind(id).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(unbound)
 }
 
 /// 重命名模型组。返回 Ok(false) 表示目标组名已被其他组占用。
@@ -935,7 +1078,7 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
             _ => ProviderKind::Openai,
         };
         routing.providers.insert(r.get::<String, _>("name"), ProviderConn {
-            kind, base_url: r.get("base_url"), api_key: r.get("api_key"), concurrency: None,
+            kind, base_url: r.get("base_url"), api_key: dec_provider_key(r.get("api_key")), concurrency: None,
         });
     }
     for r in q!("SELECT id, provider, upstream_model, label, input_price, output_price, context_length, tags FROM models").fetch_all(pool).await? {
@@ -1721,12 +1864,12 @@ pub struct KeyRow {
     pub id: Uuid,
     pub interface_kind: String,
     pub key_prefix: String,
-    pub key_plain: Option<String>,
     pub revoked: i64,
     pub created_at: String,
 }
 
-/// 创建一把 Key,写库;返回 (明文, 哈希, KeyRow)。明文同时落 key_plain 列,门户端可随时查看/复制。
+/// 创建一把 Key,写库;返回 (明文, 哈希, KeyRow)。
+/// 明文**不落库**:仅经创建/刷新响应返回一次,门户端当场复制;库内只存 key_hash(认证)与 key_prefix(掩码展示)。
 pub async fn create_key(
     pool: &Db,
     user_id: Uuid,
@@ -1736,15 +1879,14 @@ pub async fn create_key(
     let id = Uuid::new_v4();
     let created = now_iso();
     q!(
-        "INSERT INTO api_keys (id, user_id, interface_kind, key_hash, key_prefix, key_plain, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO api_keys (id, user_id, interface_kind, key_hash, key_prefix, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(user_id.to_string())
     .bind(interface_kind)
     .bind(&hash)
     .bind(&prefix)
-    .bind(&plaintext)
     .bind(&created)
     .execute(pool)
     .await?;
@@ -1752,7 +1894,6 @@ pub async fn create_key(
         id,
         interface_kind: interface_kind.to_string(),
         key_prefix: prefix,
-        key_plain: Some(plaintext.clone()),
         revoked: 0,
         created_at: created,
     };
@@ -1783,7 +1924,7 @@ pub async fn revoke_active_keys(
 
 pub async fn list_keys(pool: &Db, user_id: Uuid) -> anyhow::Result<Vec<KeyRow>> {
     let rows = q!(
-        "SELECT id, interface_kind, key_prefix, key_plain, revoked, created_at
+        "SELECT id, interface_kind, key_prefix, revoked, created_at
          FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
     )
     .bind(user_id.to_string())
@@ -1795,7 +1936,6 @@ pub async fn list_keys(pool: &Db, user_id: Uuid) -> anyhow::Result<Vec<KeyRow>> 
                 id: Uuid::parse_str(r.get::<String, _>("id").as_str())?,
                 interface_kind: r.get("interface_kind"),
                 key_prefix: r.get("key_prefix"),
-                key_plain: r.try_get::<Option<String>, _>("key_plain").unwrap_or(None),
                 revoked: r.get("revoked"),
                 created_at: r.get("created_at"),
             })
@@ -1869,7 +2009,7 @@ pub async fn usage_rows_page(
     };
     let rows = if let Some(uid) = user_id {
         q!(
-            "SELECT u.user_id, u.model, u.provider, u.input_tokens, u.output_tokens, u.charged_tokens, u.cost_usd, u.status, u.created_at, rl.final_kind AS kind, rl.latency_ms AS latency_ms
+            "SELECT u.user_id, u.model, u.provider, u.input_tokens, u.output_tokens, u.charged_tokens, u.cost_usd, u.bill_multiplier, u.status, u.created_at, rl.final_kind AS kind, rl.latency_ms AS latency_ms
              FROM usage_logs u LEFT JOIN request_logs rl ON rl.request_id = u.request_id
              WHERE u.user_id = ? ORDER BY u.id DESC LIMIT ? OFFSET ?",
         )
@@ -1880,7 +2020,7 @@ pub async fn usage_rows_page(
         .await?
     } else {
         q!(
-            "SELECT u.user_id, u.model, u.provider, u.input_tokens, u.output_tokens, u.charged_tokens, u.cost_usd, u.status, u.created_at, rl.final_kind AS kind, rl.latency_ms AS latency_ms
+            "SELECT u.user_id, u.model, u.provider, u.input_tokens, u.output_tokens, u.charged_tokens, u.cost_usd, u.bill_multiplier, u.status, u.created_at, rl.final_kind AS kind, rl.latency_ms AS latency_ms
              FROM usage_logs u LEFT JOIN request_logs rl ON rl.request_id = u.request_id
              ORDER BY u.id DESC LIMIT ? OFFSET ?",
         )
@@ -1900,6 +2040,7 @@ pub async fn usage_rows_page(
                     "output_tokens": r.get::<Option<i64>, _>("output_tokens"),
                     "charged_tokens": r.get::<Option<i64>, _>("charged_tokens"),
                     "cost_usd": r.try_get::<Option<f64>, _>("cost_usd").ok().flatten(),
+                    "bill_multiplier": r.try_get::<Option<f64>, _>("bill_multiplier").ok().flatten(),
                     "status": r.get::<Option<i64>, _>("status"),
                     "created_at": r.get::<String, _>("created_at"),
                     "kind": r.try_get::<Option<String>, _>("kind").ok().flatten(),
@@ -2073,8 +2214,8 @@ pub async fn insert_usage_batch(
     for ev in evs {
         let result = q!(
             "INSERT INTO usage_logs
-             (user_id, key_id, model, provider, upstream_model, input_tokens, output_tokens, charged_tokens, cost_usd, status, ts, created_at, request_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (user_id, key_id, model, provider, upstream_model, input_tokens, output_tokens, charged_tokens, cost_usd, bill_multiplier, status, ts, created_at, request_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(ev.user_id.to_string())
         .bind(ev.key_id.map(|k| k.to_string()))
@@ -2085,6 +2226,7 @@ pub async fn insert_usage_batch(
         .bind(ev.output_tokens as i64)
         .bind(ev.charged_tokens)
         .bind(ev.cost_usd)
+        .bind(ev.bill_multiplier)
         .bind(ev.status as i64)
         .bind(now_secs())
         .bind(now_iso())

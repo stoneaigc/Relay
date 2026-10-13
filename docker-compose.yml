@@ -24,7 +24,7 @@ services:
       # RELAY_DATABASE__USER: relay
       # RELAY_DATABASE__PASSWORD: relay-pg
       # RELAY_DATABASE__DBNAME: relay
-      # 生产部署务必覆盖以下三项(首次启动前设置;已建库后改管理员账号需在后台改):
+      # 生产部署务必覆盖以下三项(首次启动前设置;管理员凭据以 RELAY_ADMIN__* 环境变量为准,修改后重启生效)：
       # RELAY_AUTH__JWT_SECRET: "换成足够长的随机串"
       # RELAY_ADMIN__USERNAME: admin
       # RELAY_ADMIN__PASSWORD: "换成强密码"

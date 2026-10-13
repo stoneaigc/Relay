@@ -130,8 +130,33 @@ async fn main() -> anyhow::Result<()> {
 
     let mut cfg = Config::load()?;
 
+    // 弱 JWT 密钥防线:密钥泄露 = 任何人可伪造 admin/portal 令牌。
+    // release 构建遇弱值(空/默认/长度 < 16)直接拒绝启动;debug 构建仅警告,方便本地开发。
+    {
+        const DEV_SECRET: &str = "dev-secret-change-me";
+        let secret = cfg.auth.jwt_secret.trim();
+        if secret.is_empty() || secret == DEV_SECRET || secret.chars().count() < 16 {
+            if cfg!(debug_assertions) {
+                tracing::warn!(
+                    "auth.jwt_secret 为弱值(空/默认/过短):仅供本地开发使用;release 构建将拒绝启动。\
+                     生产请设置 RELAY_AUTH__JWT_SECRET(可用 `openssl rand -hex 32` 生成)"
+                );
+            } else {
+                anyhow::bail!(
+                    "auth.jwt_secret 为弱值(空/默认 \"dev-secret-change-me\"/长度 < 16)。\
+                     生产环境必须设置强随机密钥:RELAY_AUTH__JWT_SECRET(可用 `openssl rand -hex 32` 生成)"
+                );
+            }
+        }
+    }
+
+    // 供应商密钥静态加密:用 auth.jwt_secret 派生 AES-256-GCM 密钥(先注入,后续 providers 读写依赖)。
+    storage::init_provider_secret(&cfg.auth.jwt_secret);
+
     let db = storage::init_pool(&cfg.database).await?;
     storage::init_schema(&db).await?;
+    // 历史明文供应商密钥一次性加密回写(幂等)。
+    storage::migrate_provider_keys(&db).await?;
 
     // 从 DB 构建内存路由图(供应商/模型/模型组/路由)。
     let routing = storage::load_routing(&db).await?;
@@ -146,6 +171,15 @@ async fn main() -> anyhow::Result<()> {
     storage::seed_reward_tasks_if_empty(&db).await?;
 
     // 从 DB 加载系统配置(目前 email.* 与 fallback.*),覆盖到内存 Config(DB 优先于配置文件)。
+    {
+        let kv = storage::load_settings(&db, settings::ADMIN_PREFIX)
+            .await
+            .map_err(|e| anyhow::anyhow!("load settings: {e}"))?;
+        if !kv.is_empty() {
+            settings::apply_admin_settings(&mut cfg, &kv);
+            tracing::info!("loaded {} admin settings from DB", kv.len());
+        }
+    }
     {
         let kv = storage::load_settings(&db, settings::EMAIL_PREFIX)
             .await
@@ -305,6 +339,8 @@ async fn main() -> anyhow::Result<()> {
     // ---- 管理 API(挂到 /admin/api)----
     let admin_api = Router::new()
         .route("/auth/login", post(admin::login))
+        // 后台修改管理员密码(旧密码校验 + argon2 入库,即时生效)
+        .route("/auth/change-password", post(admin::change_admin_password))
         // 管理员一键切换门户:按管理员用户名签发同名门户用户的 portal 令牌
         .route("/portal-sso", post(admin::portal_sso))
         .route("/overview", get(admin::overview))

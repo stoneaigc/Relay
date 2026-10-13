@@ -53,10 +53,15 @@ pub async fn login(
     };
     let username = body.username.trim();
 
-    // ① 配置管理员(default.toml / RELAY_ADMIN__*)
+    // ① 配置管理员(default.toml / RELAY_ADMIN__* / 后台改密后的 settings.admin.*)
     let admin_hit = {
         let cfg = state.config();
-        username == cfg.admin.username && body.password == cfg.admin.password
+        // 口令校验:后台改过密(argon2 哈希)优先;否则 env/config 明文。
+        let pass_ok = match cfg.admin.password_hash.as_deref() {
+            Some(hash) => crate::storage::verify_password(hash, &body.password).0,
+            None => body.password == cfg.admin.password,
+        };
+        username == cfg.admin.username && pass_ok
     };
     if admin_hit {
         state.login_guard.clear(&ip_key);
@@ -75,9 +80,21 @@ pub async fn login(
             return Err(ApiError::InvalidCredentials);
         }
     };
-    if pwhash.as_deref() != Some(crate::storage::hash_password(&body.password).as_str()) {
+    let Some(stored) = pwhash.as_deref() else {
         fail(&state);
         return Err(ApiError::InvalidCredentials);
+    };
+    let (ok, legacy) = crate::storage::verify_password(stored, &body.password);
+    if !ok {
+        fail(&state);
+        return Err(ApiError::InvalidCredentials);
+    }
+    // 旧版无盐 sha256 哈希登录成功后透明升级为 argon2(失败仅记日志,不阻断登录)。
+    if legacy {
+        let new_hash = crate::storage::hash_password(&body.password);
+        if let Err(e) = crate::storage::upgrade_password_hash(&state.db, id, &new_hash).await {
+            tracing::warn!("密码哈希升级失败(user {id}): {e}");
+        }
     }
     if let Some(u) = state.user(&id) {
         if !u.is_active() {

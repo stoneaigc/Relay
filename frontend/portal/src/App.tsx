@@ -3,7 +3,7 @@ import { BrowserRouter, NavLink, useLocation, useNavigate } from "react-router-d
 import {
   Wallet, KeyRound, Copy, RefreshCw, Plus, LogOut, Check,
   LayoutDashboard, Receipt, MessageSquare, Menu, X, SendHorizontal, Boxes,
-  Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen, AlertTriangle, ShieldCheck,
+  Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen, ShieldCheck,
 } from "lucide-react";
 import { api, getToken, setToken, clearToken, healthz, SITE_PREFIX, KeyInfo, ModelCard, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType } from "./api";
 import { copyText } from "./clipboard";
@@ -599,6 +599,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                             <TableHead className="text-right">输入 (tokens)</TableHead>
                             <TableHead className="text-right">输出 (tokens)</TableHead>
                             <TableHead className="text-right">计费 (tokens)</TableHead>
+                            <TableHead className="text-right" title="最终生效计费倍率 = 模型倍率 × 时段倍率 × 用户倍率">倍率</TableHead>
                             <TableHead className="text-right">耗时</TableHead>
                             <TableHead className="text-right">费用</TableHead>
                             <TableHead>缓存 / 状态</TableHead>
@@ -616,6 +617,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                             const ms = r.latency_ms;
                             const latency = ms != null ? (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`) : "—";
                             const cost = r.cost_usd != null ? `$${r.cost_usd.toFixed(4)}` : "—";
+                            const bm = r.bill_multiplier;
+                            const mult = bm != null ? `×${Number.isInteger(bm) ? bm : bm.toFixed(2)}` : "—";
                             const ok = r.status != null && r.status >= 200 && r.status < 400;
                             return (
                               <TableRow key={i}>
@@ -627,6 +630,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                                 <TableCell className="mono text-right tabular-nums">{(r.input_tokens ?? 0).toLocaleString()}</TableCell>
                                 <TableCell className="mono text-right tabular-nums">{(r.output_tokens ?? 0).toLocaleString()}</TableCell>
                                 <TableCell className="mono text-right tabular-nums">{(r.charged_tokens ?? 0).toLocaleString()}</TableCell>
+                                <TableCell className="mono text-right tabular-nums" title="模型倍率 × 时段倍率 × 用户倍率的最终值">{mult}</TableCell>
                                 <TableCell className="mono text-right tabular-nums">{latency}</TableCell>
                                 <TableCell className="mono text-right tabular-nums">{cost}</TableCell>
                                 <TableCell>
@@ -1038,25 +1042,12 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
         </div>
         <div>
           <div className="mb-1 text-xs text-muted-foreground">API Key</div>
-          {active?.key_plain ? (
-            <div className="flex items-center gap-2">
-              <div className="mono flex-1 rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active.key_prefix}</div>
-              <CopyButton value={active.key_plain} label="复制 API Key" />
-            </div>
-          ) : (
-            <div className="space-y-1">
-              <div className="mono rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active ? active.key_prefix : "—"}</div>
-              {active && (
-                <p className="flex items-start gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs leading-5 text-amber-700 dark:text-amber-400">
-                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  <span>
-                    旧版本创建的 Key 不保存明文，无法直接复制。点击下方「刷新 Key」重新生成一把：新 Key 立即可复制，旧 Key 随即失效。
-                  </span>
-                </p>
-              )}
-            </div>
+          <div className="mono rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active ? active.key_prefix : "—"}</div>
+          {active && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Key 仅在创建/刷新时完整展示一次,库里只存掩码与哈希。丢失或泄露请「刷新 Key」重新生成(旧 Key 立即失效)。
+            </p>
           )}
-          {active && active.key_plain && <p className="mt-1 text-xs text-muted-foreground">Key 以掩码显示,点右侧按钮复制完整值;「刷新 Key」可重新生成(旧 Key 立即失效)。</p>}
         </div>
         {active
           ? <Button variant="outline" disabled={busy} onClick={() => setConfirmOpen(true)}><RefreshCw className="h-4 w-4" />刷新 Key</Button>
@@ -1108,7 +1099,7 @@ function RevealContent({ kind, apiKey }: { kind: string; apiKey: string }) {
     <DialogContent>
       <DialogHeader>
         <DialogTitle>你的新 {kind === "openai" ? "OpenAI" : "Anthropic"} Key</DialogTitle>
-        <DialogDescription>请立即复制保存;之后也可在密钥页随时查看和复制,「刷新 Key」可重新生成。</DialogDescription>
+        <DialogDescription>请立即复制保存;关闭后将无法再次查看完整 Key(库里只存掩码与哈希),如丢失请「刷新 Key」重新生成。</DialogDescription>
       </DialogHeader>
       <div ref={keyRef} className="mono select-all rounded-lg border bg-muted/50 px-3 py-3 text-sm break-all" title="点击可全选">{apiKey}</div>
       <Button onClick={copy} variant={state === "ok" ? "secondary" : "default"}>
@@ -1116,7 +1107,7 @@ function RevealContent({ kind, apiKey }: { kind: string; apiKey: string }) {
         {state === "sel" && <><Check className="h-4 w-4" />已全选,请按 Ctrl+C 复制</>}
         {state === "idle" && <><Copy className="h-4 w-4" />复制</>}
       </Button>
-      {state === "sel" && <p className="text-xs text-muted-foreground">若 Ctrl+C 无效,请长按(手机)或双击 Key 文本手动选中复制;关闭后也可在密钥页随时查看。</p>}
+      {state === "sel" && <p className="text-xs text-muted-foreground">若 Ctrl+C 无效,请长按(手机)或双击 Key 文本手动选中复制;关闭后只能「刷新 Key」重新生成。</p>}
     </DialogContent>
   );
 }

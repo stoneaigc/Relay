@@ -67,7 +67,7 @@ pub async fn send_email_code(
         use rand::Rng;
         format!("{:06}", rand::thread_rng().gen_range(0..1_000_000))
     };
-    let val = format!("{}:{}", now_secs(), storage::hash_password(&code));
+    let val = format!("{}:{}", now_secs(), storage::hash_key(&code));
     state
         .cache
         .set_ex(&code_key, &val, 300)
@@ -109,7 +109,7 @@ pub async fn register(
     // 校验验证码。过期由缓存 TTL 负责;值格式 "{发送时刻}:{code哈希}"。
     let code_key = format!("email_code:{email}");
     match state.cache.get(&code_key).await.map_err(|e| ApiError::Internal(e.to_string()))? {
-        Some(v) if v.split_once(':').map(|(_, h)| h) == Some(storage::hash_password(&body.code).as_str()) => {
+        Some(v) if v.split_once(':').map(|(_, h)| h) == Some(storage::hash_key(&body.code).as_str()) => {
             let _ = state.cache.del(&code_key).await;
         }
         _ => return Err(ApiError::BadRequest("验证码错误或已过期".into())),
@@ -156,7 +156,7 @@ pub async fn reset_password(
     // 校验验证码(复用注册的邮箱验证码机制;值格式 "{发送时刻}:{code哈希}")。
     let code_key = format!("email_code:{email}");
     match state.cache.get(&code_key).await.map_err(|e| ApiError::Internal(e.to_string()))? {
-        Some(v) if v.split_once(':').map(|(_, h)| h) == Some(storage::hash_password(&body.code).as_str()) => {
+        Some(v) if v.split_once(':').map(|(_, h)| h) == Some(storage::hash_key(&body.code).as_str()) => {
             let _ = state.cache.del(&code_key).await;
         }
         _ => return Err(ApiError::BadRequest("验证码错误或已过期".into())),
@@ -217,9 +217,21 @@ pub async fn password_login(
             return Err(ApiError::InvalidCredentials);
         }
     };
-    if pwhash.as_deref() != Some(storage::hash_password(&body.password).as_str()) {
+    let Some(stored) = pwhash.as_deref() else {
         fail(&state);
         return Err(ApiError::InvalidCredentials);
+    };
+    let (ok, legacy) = storage::verify_password(stored, &body.password);
+    if !ok {
+        fail(&state);
+        return Err(ApiError::InvalidCredentials);
+    }
+    // 旧版无盐 sha256 哈希登录成功后透明升级为 argon2(失败仅记日志,不阻断登录)。
+    if legacy {
+        let new_hash = storage::hash_password(&body.password);
+        if let Err(e) = storage::upgrade_password_hash(&state.db, id, &new_hash).await {
+            tracing::warn!("密码哈希升级失败(user {id}): {e}");
+        }
     }
     if let Some(u) = state.user(&id) {
         if !u.is_active() {
@@ -304,8 +316,7 @@ pub async fn list_keys(
                 "id": k.id,
                 "interface_kind": k.interface_kind,
                 "key_prefix": k.key_prefix,
-                // 完整 Key 明文:仅返回给 Key 属主本人,门户端随时查看/复制。
-                "key_plain": k.key_plain,
+                // 明文不返回:仅创建/刷新时一次性下发,列表只给掩码。
                 "revoked": k.revoked != 0,
                 "created_at": k.created_at,
             })

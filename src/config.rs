@@ -309,6 +309,10 @@ pub struct AdminConfig {
     pub username: String,
     #[serde(default = "default_admin_pass")]
     pub password: String,
+    /// 后台改密后的口令哈希(argon2 PHC,存 settings.admin.*)。存在时登录校验以它为准,
+    /// env/config 明文 password 仅作首次引导;不参与序列化输出。
+    #[serde(default, skip_serializing)]
+    pub password_hash: Option<String>,
 }
 
 impl Default for AdminConfig {
@@ -316,6 +320,7 @@ impl Default for AdminConfig {
         Self {
             username: default_admin_user(),
             password: default_admin_pass(),
+            password_hash: None,
         }
     }
 }
@@ -437,7 +442,7 @@ fn default_concurrency() -> u32 {
     16
 }
 fn default_grant() -> i64 {
-    10_000_000
+    1_000_000
 }
 
 /// 上游供应商的协议类型。

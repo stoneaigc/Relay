@@ -57,6 +57,8 @@
 
 ### 2.1 Workspace 结构(Cargo workspace)
 
+> **实现现状说明**：下述多 crate workspace 为早期规划；当前实际为**单 crate 平铺**（`src/` 下按职责分模块：`handlers` / `routing` / `storage` / `admin` / `portal` / `providers` / `translate` 等），由 `src/main.rs` 装配路由。功能等价，拆分可在模块边界稳定后再做。
+
 ```
 relay/
 ├── Cargo.toml                # workspace

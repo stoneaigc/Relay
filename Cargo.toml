@@ -1,6 +1,6 @@
 [package]
 name = "relay"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 
 [dependencies]
@@ -33,6 +33,7 @@ tower-http = { version = "0.5", features = ["fs"] }
 redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
+argon2 = "0.5"
 base64 = "0.22"
 
 [profile.release]

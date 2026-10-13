@@ -56,7 +56,7 @@ from = ""
 # 全局默认限额(用户未单独设置时生效)
 [defaults]
 concurrency_limit = 16
-signup_grant_tokens = 10_000_000   # 新用户赠送 1000 万 token
+signup_grant_tokens = 1_000_000   # 新用户赠送 100 万 token(生产可按商业策略调整:RELAY_DEFAULTS__SIGNUP_GRANT_TOKENS)
 
 # 请求链路日志存储后端。
 # store: sqlite(默认,写 request_logs 表)| elasticsearch(按日索引 <prefix>-YYYY.MM.DD 写入 ES)。

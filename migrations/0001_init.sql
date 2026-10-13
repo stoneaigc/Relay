@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
   charged_tokens INTEGER,
   key_id         TEXT,                         -- 发起调用的 API Key(api_keys.id),门户调用为 NULL
   cost_usd       REAL,                         -- 计费口径成本(USD),消费端折算
+  bill_multiplier REAL,                        -- 最终生效计费倍率(路由×时段×用户)
   status         INTEGER,
   ts             INTEGER NOT NULL DEFAULT 0,   -- unix 秒,便于按时间聚合
   created_at     TEXT NOT NULL,

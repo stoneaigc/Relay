@@ -1586,7 +1586,7 @@ function GroupsPanel() {
   const setActive = async (g: GroupRow) => { if (!g.is_active) { await api.activateGroup(g.id); loadGroups(); } };
   const delGroup = (g: GroupRow) => setConfirm({
     title: `删除模型组「${g.name}」?`,
-    desc: "组内路由会一并删除,绑定该组的用户将无可用模型。",
+    desc: "组内路由与时段规则会一并删除;绑定该组的用户将被解绑(group_id 置空),需重新绑定模型组后才能调用。",
     action: async () => { await api.deleteGroup(g.id); setSel(null); loadGroups(); },
   });
   const delRoute = (id: number) => setConfirm({
@@ -2954,6 +2954,7 @@ function UsagePanel() {
                   <TableHead className="text-right">输入 (tokens)</TableHead>
                   <TableHead className="text-right">输出 (tokens)</TableHead>
                   <TableHead className="text-right">计费 (tokens)</TableHead>
+                  <TableHead className="text-right" title="最终生效计费倍率 = 模型倍率 × 时段倍率 × 用户倍率">倍率</TableHead>
                   <TableHead className="text-right">耗时</TableHead>
                   <TableHead className="text-right">费用</TableHead>
                   <TableHead>状态</TableHead>
@@ -2970,6 +2971,8 @@ function UsagePanel() {
                     : "—";
                   const ms = r.latency_ms;
                   const latency = ms != null ? (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`) : "—";
+                  const bm = r.bill_multiplier;
+                  const mult = bm != null ? `×${Number.isInteger(bm) ? bm : bm.toFixed(2)}` : "—";
                   const ok = r.status != null && r.status >= 200 && r.status < 400;
                   return (
                     <TableRow key={i}>
@@ -2979,6 +2982,7 @@ function UsagePanel() {
                       <TableCell className="mono text-right tabular-nums">{(r.input_tokens ?? 0).toLocaleString()}</TableCell>
                       <TableCell className="mono text-right tabular-nums">{(r.output_tokens ?? 0).toLocaleString()}</TableCell>
                       <TableCell className="mono text-right tabular-nums">{(r.charged_tokens ?? 0).toLocaleString()}</TableCell>
+                      <TableCell className="mono text-right tabular-nums" title="模型倍率 × 时段倍率 × 用户倍率的最终值">{mult}</TableCell>
                       <TableCell className="mono text-right tabular-nums">{latency}</TableCell>
                       <TableCell className="mono text-right tabular-nums">{r.cost_usd == null ? "—" : fmtCost(r.cost_usd)}</TableCell>
                       <TableCell>{r.status != null && (ok
@@ -3252,6 +3256,24 @@ function SettingsPanel() {
   const [portalSaving, setPortalSaving] = useState(false);
   const [portalNote, setPortalNote] = useState("");
   const [portalErr, setPortalErr] = useState("");
+  // 管理员账号(后台改密,即时生效)
+  const [admOld, setAdmOld] = useState("");
+  const [admNew, setAdmNew] = useState("");
+  const [admConfirm, setAdmConfirm] = useState("");
+  const [admSaving, setAdmSaving] = useState(false);
+  const [admNote, setAdmNote] = useState("");
+  const [admErr, setAdmErr] = useState("");
+  const saveAdminPassword = async () => {
+    setAdmErr(""); setAdmNote("");
+    if (admNew.length < 8) { setAdmErr("新密码至少 8 位"); return; }
+    if (admNew !== admConfirm) { setAdmErr("两次输入的新密码不一致"); return; }
+    setAdmSaving(true);
+    try {
+      await api.changeAdminPassword(admOld, admNew);
+      setAdmOld(""); setAdmNew(""); setAdmConfirm("");
+      setAdmNote("已修改,即时生效;下次登录请使用新密码。");
+    } catch (e: any) { setAdmErr(e.message); } finally { setAdmSaving(false); }
+  };
   // 软件更新
   const [version, setVersion] = useState("");
   const [updateInfo, setUpdateInfo] = useState<{ current: string; latest: string | null; has_update: boolean; release_url?: string; error?: string } | null>(null);
@@ -3669,6 +3691,34 @@ function SettingsPanel() {
             <Button onClick={savePortal} disabled={portalSaving}>{portalSaving ? "保存中…" : "保存配置"}</Button>
             {portalNote && <span className="text-xs text-success">{portalNote}</span>}
             {portalErr && <span className="text-xs text-destructive">{portalErr}</span>}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">管理员账号</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div>
+              <label className="mb-1 block text-xs text-muted-foreground">当前密码</label>
+              <input type="password" autoComplete="current-password" className={sel} value={admOld} onChange={(e) => setAdmOld(e.target.value)} placeholder="验证身份" />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-muted-foreground">新密码</label>
+              <input type="password" autoComplete="new-password" className={sel} value={admNew} onChange={(e) => setAdmNew(e.target.value)} placeholder="至少 8 位" />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-muted-foreground">确认新密码</label>
+              <input type="password" autoComplete="new-password" className={sel} value={admConfirm} onChange={(e) => setAdmConfirm(e.target.value)} placeholder="再输入一次" />
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+            <Button onClick={saveAdminPassword} disabled={admSaving || !admOld || !admNew || !admConfirm}>{admSaving ? "保存中…" : "修改密码"}</Button>
+            <span className="text-xs text-muted-foreground">修改即时生效;环境变量口令此后仅作兜底。</span>
+            {admNote && <span className="text-xs text-success">{admNote}</span>}
+            {admErr && <span className="text-xs text-destructive">{admErr}</span>}
           </div>
         </CardContent>
       </Card>

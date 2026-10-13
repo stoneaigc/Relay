@@ -150,6 +150,19 @@ pub const FALLBACK_PREFIX: &str = "fallback.";
 pub const K_FB_ENABLED: &str = "fallback.enabled";
 pub const K_FB_MAX_RETRIES: &str = "fallback.max_retries";
 
+/// settings 表里管理员账号相关 key 的前缀。
+pub const ADMIN_PREFIX: &str = "admin.";
+/// 后台修改后的管理员口令哈希(argon2 PHC)。存在时登录校验以它为准;
+/// env/config 明文仅作首次引导,改密后即被架空。
+pub const K_ADMIN_PASSWORD_HASH: &str = "admin.password_hash";
+
+/// 把 DB 里的 admin.* 覆盖到内存 Config.admin。
+pub fn apply_admin_settings(cfg: &mut Config, kv: &HashMap<String, String>) {
+    if let Some(v) = kv.get(K_ADMIN_PASSWORD_HASH).filter(|s| !s.is_empty()) {
+        cfg.admin.password_hash = Some(v.clone());
+    }
+}
+
 /// 把 DB 里的 fallback.* 覆盖到内存 Config.defaults(DB 优先于配置文件)。
 /// 解析失败时静默保持原值,与 email.* 行为一致。
 pub fn apply_fallback_settings(cfg: &mut Config, kv: &HashMap<String, String>) {

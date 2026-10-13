@@ -300,6 +300,8 @@ pub struct UsageEvent {
     pub charged_tokens: i64,
     /// 计费口径成本(USD),由消费端按上游单价×总倍率折算后覆写;发送侧恒填 0.0。
     pub cost_usd: f64,
+    /// 最终生效计费倍率 = 路由倍率 × 时段倍率 × 用户倍率(供账单明细解释"为什么扣这么多")。
+    pub bill_multiplier: f64,
     pub status: u16,
     /// 关联的请求链路 ID(request_logs.request_id)。
     pub request_id: Option<String>,

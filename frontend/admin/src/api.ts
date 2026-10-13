@@ -318,6 +318,9 @@ export const api = {
     req(`/admin/api/reward-tasks/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteRewardTask: (id: number) => req(`/admin/api/reward-tasks/${id}`, { method: "DELETE" }),
 
+  changeAdminPassword: (old_password: string, new_password: string) =>
+    req("/admin/api/auth/change-password", { method: "POST", body: JSON.stringify({ old_password, new_password }) }),
+
   emailSettings: (): Promise<EmailSettingsResp> => req("/admin/api/settings/email"),
   saveEmailSettings: (body: EmailSettingsBody) =>
     req("/admin/api/settings/email", { method: "POST", body: JSON.stringify(body) }),

@@ -318,7 +318,7 @@ export default function DocsView() {
           </div>
         </div>
         <ul className="list-disc space-y-1 pl-5 text-sm text-muted-foreground">
-          <li>Key 在「概览」的接口卡片创建,可随时点击复制;如泄露可在门户一键「刷新」重置,旧 Key 立即失效。</li>
+          <li>Key 在「概览」的接口卡片创建,完整 Key 仅在创建/刷新时展示一次,请当场复制保存;如泄露可在门户一键「刷新」重置,旧 Key 立即失效。</li>
           <li>两个接口(OpenAI / Anthropic)共用同一额度与同一把 Key。</li>
           <li>鉴权失败返回 <K>401 authentication_error</K>;token 余额不足返回 <K>402 insufficient_quota</K>。</li>
         </ul>
