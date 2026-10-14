@@ -3,7 +3,7 @@ import { BrowserRouter, NavLink, useLocation, useNavigate } from "react-router-d
 import {
   Wallet, KeyRound, Copy, RefreshCw, Plus, LogOut, Check,
   LayoutDashboard, Receipt, MessageSquare, Menu, X, SendHorizontal, Boxes,
-  Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen, ShieldCheck,
+  Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen,
 } from "lucide-react";
 import { api, getToken, clearToken, healthz, SITE_PREFIX, KeyInfo, ModelCard, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType } from "./api";
 import { copyText } from "./clipboard";
@@ -371,9 +371,6 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       </nav>
       <div className="px-2 py-3">
         <div className="px-3 pb-2 text-xs text-muted-foreground">{phone}</div>
-        <a href={SITE_PREFIX + "/admin/"} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-accent">
-          <ShieldCheck className="h-4 w-4 shrink-0" />管理后台
-        </a>
         <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground" onClick={onLogout}>
           <LogOut className="h-4 w-4" />退出登录
         </Button>
