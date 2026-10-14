@@ -1,4 +1,4 @@
-mod admin;
+﻿mod admin;
 mod audit;
 mod auth;
 mod cache;
@@ -46,12 +46,13 @@ use crate::state::{AppState, AUDIT_FAILURE_CAP, UsageEvent};
 use chrono::{Datelike, Timelike};
 
 /// 子路径反代兼容:nginx 若不剥离前缀(如 location /relay/ 直接转发),
-/// 请求会以 /relay/admin/... 到达网关;此中间件把 admin/portal 之前的前缀剥掉,
-/// 使网关在"域名+端口+任意路径"代理下均可工作。已挂在根路径(/admin、/portal)的请求原样通过。
-/// 无结尾斜杠的入口(如 /relay/admin)301 重定向到带斜杠的原始路径,保证相对资源引用正确解析。
+/// 请求会以 /relay/admin/... /relay/v1/... /relay/login 到达网关;此中间件把这些应用段
+/// 之前的前缀剥掉,使网关在"域名+端口+任意路径"代理下均可工作——数据面 /v1 与统一登录页 /login 同样支持。
+/// 已挂在根路径(/admin、/portal、/v1、/login)的请求原样通过。
+/// 无结尾斜杠的 SPA 入口(如 /relay/admin)301 重定向到带斜杠的原始路径,保证相对资源引用正确解析。
 async fn strip_web_prefix(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
-    let stripped = ["admin", "portal"].iter().find_map(|app| {
+    let stripped = ["admin", "portal", "v1", "login"].iter().find_map(|app| {
         let pat = format!("/{app}");
         let idx = path.find(&pat)?;
         // idx==0 说明请求本就挂在根路径(如 /admin/...),无前缀可剥;
@@ -66,7 +67,7 @@ async fn strip_web_prefix(req: Request, next: Next) -> Response {
         Some(format!("{pat}{rest}"))
     });
     match stripped {
-        // 入口无结尾斜杠:301 到原始路径+斜杠(保留反代前缀),相对资源才能落在正确目录。
+        // SPA 入口无结尾斜杠:301 到原始路径+斜杠(保留反代前缀),相对资源才能落在正确目录。
         Some(p) if p == "/admin" || p == "/portal" => {
             Redirect::permanent(&format!("{path}/")).into_response()
         }
@@ -155,7 +156,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 供应商密钥静态加密:用 auth.jwt_secret 派生 AES-256-GCM 密钥(先注入,后续 providers 读写依赖)。
-    storage::init_provider_secret(&cfg.auth.jwt_secret);
+    storage::init_field_secret(&cfg.auth.jwt_secret);
     // 历史明文供应商密钥一次性加密回写(幂等)。
     storage::migrate_provider_keys(&db).await?;
 

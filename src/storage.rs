@@ -26,50 +26,50 @@ pub fn backend() -> Backend {
     *BACKEND.get().unwrap_or(&Backend::Sqlite)
 }
 
-/// 供应商密钥静态加密密钥(main 启动时由 auth.jwt_secret 注入;未注入=测试态,跳过加密)。
-static PROVIDER_SECRET: OnceLock<String> = OnceLock::new();
+/// 字段级静态加密主密钥(main 启动时由 auth.jwt_secret 注入;未注入=测试态,跳过加密)。
+static FIELD_SECRET: OnceLock<String> = OnceLock::new();
 
-/// 密文前缀:标识 providers.api_key 列里的是 AES-256-GCM 密文(base64),否则为旧版明文。
-const PROVIDER_KEY_ENC_PREFIX: &str = "enc:v1:";
+/// 密文前缀:标识库里存的是 AES-256-GCM 密文(base64),否则为旧版明文。
+const FIELD_ENC_PREFIX: &str = "enc:v1:";
 
-/// 注入供应商密钥加密用的主密钥(auth.jwt_secret)。必须在首次读写 providers 之前调用。
-pub fn init_provider_secret(secret: &str) {
-    let _ = PROVIDER_SECRET.set(secret.to_string());
+/// 注入字段级加密主密钥(auth.jwt_secret 派生)。必须在首次读写敏感字段之前调用。
+pub fn init_field_secret(secret: &str) {
+    let _ = FIELD_SECRET.set(secret.to_string());
 }
 
-/// 加密待入库的上游供应商 api_key(空值原样返回 None;已带密文前缀则不二次包裹;
+/// 加密待入库的敏感字段(空值原样返回 None;已带密文前缀则不二次包裹;
 /// 未注入密钥(测试态)或加密失败时回退明文,保证功能可用)。
-fn enc_provider_key(plain: Option<&str>) -> Option<String> {
+fn enc_field(plain: Option<&str>) -> Option<String> {
     let k = plain?.trim();
     if k.is_empty() {
         return None;
     }
-    if k.starts_with(PROVIDER_KEY_ENC_PREFIX) {
+    if k.starts_with(FIELD_ENC_PREFIX) {
         return Some(k.to_string());
     }
-    match PROVIDER_SECRET.get().map(|s| crate::settings::encrypt(s, k)) {
-        Some(Ok(ct)) => Some(format!("{PROVIDER_KEY_ENC_PREFIX}{ct}")),
+    match FIELD_SECRET.get().map(|s| crate::settings::encrypt(s, k)) {
+        Some(Ok(ct)) => Some(format!("{FIELD_ENC_PREFIX}{ct}")),
         Some(Err(e)) => {
-            tracing::warn!("provider api_key 加密失败,回退明文入库: {e}");
+            tracing::warn!("敏感字段加密失败,回退明文入库: {e}");
             Some(k.to_string())
         }
         None => Some(k.to_string()),
     }
 }
 
-/// 解密出库的上游供应商 api_key(旧版明文原样返回;jwt_secret 变更导致解密失败时返回 None 并告警)。
-fn dec_provider_key(stored: Option<String>) -> Option<String> {
+/// 解密出库的敏感字段(旧版明文原样返回;jwt_secret 变更导致解密失败时返回 None 并告警)。
+fn dec_field(stored: Option<String>) -> Option<String> {
     let v = stored?;
     if v.is_empty() {
         return None;
     }
-    let Some(ct) = v.strip_prefix(PROVIDER_KEY_ENC_PREFIX) else {
+    let Some(ct) = v.strip_prefix(FIELD_ENC_PREFIX) else {
         return Some(v); // 旧版明文兼容
     };
-    match PROVIDER_SECRET.get().map(|s| crate::settings::decrypt(s, ct)) {
+    match FIELD_SECRET.get().map(|s| crate::settings::decrypt(s, ct)) {
         Some(Ok(p)) => Some(p),
         Some(Err(e)) => {
-            tracing::warn!("provider api_key 解密失败(auth.jwt_secret 可能已变更),该供应商需在后台重新保存密钥: {e}");
+            tracing::warn!("敏感字段解密失败(auth.jwt_secret 可能已变更): {e}");
             None
         }
         None => None,
@@ -111,7 +111,7 @@ macro_rules! q {
 
 /// 启动迁移:把历史明文 api_key 一次性加密回写(幂等;已加密的行跳过)。
 pub async fn migrate_provider_keys(pool: &Db) -> anyhow::Result<u64> {
-    if PROVIDER_SECRET.get().is_none() {
+    if FIELD_SECRET.get().is_none() {
         return Ok(0);
     }
     let rows = q!("SELECT name, api_key FROM providers").fetch_all(pool).await?;
@@ -120,10 +120,10 @@ pub async fn migrate_provider_keys(pool: &Db) -> anyhow::Result<u64> {
         let name: String = r.get("name");
         let k: Option<String> = r.get("api_key");
         let Some(k) = k.filter(|k| !k.is_empty()) else { continue };
-        if k.starts_with(PROVIDER_KEY_ENC_PREFIX) {
+        if k.starts_with(FIELD_ENC_PREFIX) {
             continue;
         }
-        if let Some(enc) = enc_provider_key(Some(&k)) {
+        if let Some(enc) = enc_field(Some(&k)) {
             q!("UPDATE providers SET api_key = ? WHERE name = ?")
                 .bind(enc)
                 .bind(&name)
@@ -385,11 +385,26 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
             .execute(pool)
             .await;
     }
-    // Key 明文清空:认证只依赖 key_hash,明文仅在创建/刷新响应中返回一次。
-    // 启动时把历史明文置空(幂等),防止库文件泄露即等于泄露全部用户 Key。
-    let _ = q!("UPDATE api_keys SET key_plain = NULL WHERE key_plain IS NOT NULL")
-        .execute(pool)
-        .await;
+    // api_keys.key_plain 旧明文迁移:统一加密为字段密文(幂等;已加密/NULL 行跳过)。
+    // 0.3.4 之前为明文或 NULL;NULL(0.3.4 清空过)无法恢复,门户端以掩码+「刷新 Key」兜底。
+    let legacy = q!("SELECT id, key_plain FROM api_keys WHERE key_plain IS NOT NULL")
+        .fetch_all(pool)
+        .await?;
+    for r in legacy {
+        let id: String = r.get("id");
+        let k: Option<String> = r.get("key_plain");
+        let Some(k) = k.filter(|k| !k.is_empty()) else { continue };
+        if k.starts_with(FIELD_ENC_PREFIX) {
+            continue;
+        }
+        if let Some(enc) = enc_field(Some(&k)) {
+            let _ = q!("UPDATE api_keys SET key_plain = ? WHERE id = ?")
+                .bind(enc)
+                .bind(&id)
+                .execute(pool)
+                .await;
+        }
+    }
     Ok(())
 }
 
@@ -510,7 +525,7 @@ pub async fn upsert_provider(
          ON CONFLICT(name) DO UPDATE SET
            kind = excluded.kind, base_url = excluded.base_url, api_key = excluded.api_key",
     )
-    .bind(name).bind(kind).bind(base_url).bind(enc_provider_key(api_key)).bind(now_iso())
+    .bind(name).bind(kind).bind(base_url).bind(enc_field(api_key)).bind(now_iso())
     .execute(pool).await?;
     Ok(())
 }
@@ -530,7 +545,7 @@ pub async fn find_or_create_provider(
         .bind(base_url).fetch_all(pool).await?;
     let existing: Option<String> = rows.iter()
         .map(|r| (r.get::<String, _>("name"), r.get::<Option<String>, _>("api_key")))
-        .find(|(_, k)| dec_provider_key(k.clone()).as_deref() == want)
+        .find(|(_, k)| dec_field(k.clone()).as_deref() == want)
         .map(|(n, _)| n);
     if let Some(name) = existing {
         return Ok((name, false));
@@ -575,7 +590,7 @@ pub async fn find_provider_by_credentials(
         .bind(base_url).fetch_all(pool).await?;
     Ok(rows.iter()
         .map(|r| (r.get::<String, _>("name"), r.get::<Option<String>, _>("api_key")))
-        .find(|(_, k)| dec_provider_key(k.clone()).as_deref() == want)
+        .find(|(_, k)| dec_field(k.clone()).as_deref() == want)
         .map(|(n, _)| n))
 }
 
@@ -589,7 +604,7 @@ pub async fn provider_name_exists(pool: &Db, name: &str) -> anyhow::Result<bool>
 pub async fn provider_api_key(pool: &Db, name: &str) -> anyhow::Result<Option<String>> {
     let row = q!("SELECT api_key FROM providers WHERE name = ?")
         .bind(name).fetch_optional(pool).await?;
-    Ok(dec_provider_key(row.and_then(|r| r.get::<Option<String>, _>("api_key")).filter(|k| !k.is_empty())))
+    Ok(dec_field(row.and_then(|r| r.get::<Option<String>, _>("api_key")).filter(|k| !k.is_empty())))
 }
 
 /// 列出所有 provider，附带模型数量。支持分页。
@@ -640,11 +655,11 @@ pub async fn update_provider(
     match (key, dn) {
         (Some(k), Some(d)) => {
             q!("UPDATE providers SET base_url = ?, api_key = ?, display_name = ? WHERE name = ?")
-                .bind(base_url).bind(enc_provider_key(Some(k))).bind(d).bind(name).execute(pool).await?;
+                .bind(base_url).bind(enc_field(Some(k))).bind(d).bind(name).execute(pool).await?;
         }
         (Some(k), None) => {
             q!("UPDATE providers SET base_url = ?, api_key = ? WHERE name = ?")
-                .bind(base_url).bind(enc_provider_key(Some(k))).bind(name).execute(pool).await?;
+                .bind(base_url).bind(enc_field(Some(k))).bind(name).execute(pool).await?;
         }
         (None, Some(d)) => {
             q!("UPDATE providers SET base_url = ?, display_name = ? WHERE name = ?")
@@ -740,7 +755,7 @@ pub async fn update_model(
             .bind(kind).bind(base_url).bind(&p).execute(pool).await?;
         if let Some(k) = api_key.filter(|k| !k.is_empty()) {
             q!("UPDATE providers SET api_key = ? WHERE name = ?")
-                .bind(enc_provider_key(Some(k))).bind(&p).execute(pool).await?;
+                .bind(enc_field(Some(k))).bind(&p).execute(pool).await?;
         }
     }
     q!("UPDATE models SET upstream_model = ?, label = ? WHERE id = ?")
@@ -795,7 +810,7 @@ pub async fn list_models(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
         "kind": r.get::<Option<String>,_>("kind"),
         "base_url": r.get::<Option<String>,_>("base_url"),
         // 密文列解密后返回(仅管理端可见,与旧行为一致)。
-        "api_key": dec_provider_key(r.get::<Option<String>,_>("api_key")),
+        "api_key": dec_field(r.get::<Option<String>,_>("api_key")),
     })).collect())
 }
 
@@ -1086,7 +1101,7 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
             _ => ProviderKind::Openai,
         };
         routing.providers.insert(r.get::<String, _>("name"), ProviderConn {
-            kind, base_url: r.get("base_url"), api_key: dec_provider_key(r.get("api_key")), concurrency: None,
+            kind, base_url: r.get("base_url"), api_key: dec_field(r.get("api_key")), concurrency: None,
         });
     }
     for r in q!("SELECT id, provider, upstream_model, label, input_price, output_price, context_length, tags FROM models").fetch_all(pool).await? {
@@ -1872,12 +1887,15 @@ pub struct KeyRow {
     pub id: Uuid,
     pub interface_kind: String,
     pub key_prefix: String,
+    /// 完整 Key 明文(AES-256-GCM 静态加密存储;解密后仅返回给 Key 属主,门户端随时复制)。
+    pub key_plain: Option<String>,
     pub revoked: i64,
     pub created_at: String,
 }
 
 /// 创建一把 Key,写库;返回 (明文, 哈希, KeyRow)。
-/// 明文**不落库**:仅经创建/刷新响应返回一次,门户端当场复制;库内只存 key_hash(认证)与 key_prefix(掩码展示)。
+/// 明文以字段级加密(AES-256-GCM,jwt_secret 派生)存入 key_plain:支持门户端随时复制,
+/// 同时保证拖库不等于 Key 泄露;库内认证仍走 key_hash。
 pub async fn create_key(
     pool: &Db,
     user_id: Uuid,
@@ -1886,15 +1904,17 @@ pub async fn create_key(
     let (plaintext, hash, prefix) = generate_key();
     let id = Uuid::new_v4();
     let created = now_iso();
+    let enc_plain = enc_field(Some(&plaintext));
     q!(
-        "INSERT INTO api_keys (id, user_id, interface_kind, key_hash, key_prefix, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO api_keys (id, user_id, interface_kind, key_hash, key_prefix, key_plain, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(user_id.to_string())
     .bind(interface_kind)
     .bind(&hash)
     .bind(&prefix)
+    .bind(enc_plain)
     .bind(&created)
     .execute(pool)
     .await?;
@@ -1902,6 +1922,7 @@ pub async fn create_key(
         id,
         interface_kind: interface_kind.to_string(),
         key_prefix: prefix,
+        key_plain: Some(plaintext.clone()),
         revoked: 0,
         created_at: created,
     };
@@ -1932,7 +1953,7 @@ pub async fn revoke_active_keys(
 
 pub async fn list_keys(pool: &Db, user_id: Uuid) -> anyhow::Result<Vec<KeyRow>> {
     let rows = q!(
-        "SELECT id, interface_kind, key_prefix, revoked, created_at
+        "SELECT id, interface_kind, key_prefix, key_plain, revoked, created_at
          FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
     )
     .bind(user_id.to_string())
@@ -1944,6 +1965,8 @@ pub async fn list_keys(pool: &Db, user_id: Uuid) -> anyhow::Result<Vec<KeyRow>> 
                 id: Uuid::parse_str(r.get::<String, _>("id").as_str())?,
                 interface_kind: r.get("interface_kind"),
                 key_prefix: r.get("key_prefix"),
+                // 密文解密后仅返回给 Key 属主;解密失败(换过 jwt_secret)为 None,前端以「刷新 Key」兜底。
+                key_plain: dec_field(r.try_get::<Option<String>, _>("key_plain").unwrap_or(None)),
                 revoked: r.get("revoked"),
                 created_at: r.get("created_at"),
             })

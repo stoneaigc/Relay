@@ -443,8 +443,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                     </CardContent>
                   </Card>
                   <div className="grid gap-5 md:grid-cols-2">
-                    <InterfaceCard kind="openai" label="OpenAI 接口" baseUrl={`${window.location.origin}/v1`} keys={keys} onReveal={setReveal} onChanged={refresh} />
-                    <InterfaceCard kind="anthropic" label="Anthropic 接口" baseUrl={`${window.location.origin}/v1`} keys={keys} onReveal={setReveal} onChanged={refresh} />
+                    <InterfaceCard kind="openai" label="OpenAI 接口" baseUrl={`${window.location.origin}${SITE_PREFIX}/v1`} keys={keys} onReveal={setReveal} onChanged={refresh} />
+                    <InterfaceCard kind="anthropic" label="Anthropic 接口" baseUrl={`${window.location.origin}${SITE_PREFIX}/v1`} keys={keys} onReveal={setReveal} onChanged={refresh} />
                   </div>
                   <Card>
                     <CardHeader>
@@ -932,12 +932,19 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
         </div>
         <div>
           <div className="mb-1 text-xs text-muted-foreground">API Key</div>
-          <div className="mono rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active ? active.key_prefix : "—"}</div>
-          {active && (
-            <p className="mt-1 text-xs text-muted-foreground">
-              Key 仅在创建/刷新时完整展示一次,库里只存掩码与哈希。丢失或泄露请「刷新 Key」重新生成(旧 Key 立即失效)。
-            </p>
+          {active?.key_plain ? (
+            <div className="flex items-center gap-2">
+              <div className="mono flex-1 rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active.key_prefix}</div>
+              <CopyButton value={active.key_plain} label="复制 API Key" />
+            </div>
+          ) : (
+            <div className="mono rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active ? active.key_prefix : "—"}</div>
           )}
+          <p className="mt-1 text-xs text-muted-foreground">
+            {active?.key_plain
+              ? "Key 以掩码显示、加密存储且仅你可见,点右侧按钮随时复制;泄露请「刷新 Key」重新生成(旧 Key 立即失效)。"
+              : "旧版本创建的 Key 无法直接复制。点击下方「刷新 Key」重新生成一把:新 Key 可随时复制,旧 Key 立即失效。"}
+          </p>
         </div>
         {active
           ? <Button variant="outline" disabled={busy} onClick={() => setConfirmOpen(true)}><RefreshCw className="h-4 w-4" />刷新 Key</Button>

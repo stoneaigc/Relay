@@ -316,7 +316,8 @@ pub async fn list_keys(
                 "id": k.id,
                 "interface_kind": k.interface_kind,
                 "key_prefix": k.key_prefix,
-                // 明文不返回:仅创建/刷新时一次性下发,列表只给掩码。
+                // 完整 Key(解密后)仅返回给 Key 属主本人,门户端随时复制;换过 jwt_secret 的旧 Key 为 null。
+                "key_plain": k.key_plain,
                 "revoked": k.revoked != 0,
                 "created_at": k.created_at,
             })
