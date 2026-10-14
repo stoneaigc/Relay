@@ -30,7 +30,9 @@ type = "memory"
 # url = "redis://:password@127.0.0.1:6379/0"
 
 [auth]
-# 生产务必通过环境变量 RELAY_AUTH__JWT_SECRET 覆盖
+# 留空或保持默认值时,首次启动自动生成 64 位强随机密钥并持久化到数据库,零配置可用。
+# 显式设置(如 RELAY_AUTH__JWT_SECRET)优先于自动生成。
+# 注意:该密钥兼任供应商 api_key 的静态加密主密钥——定稿后请勿更换,否则需在后台重存供应商密钥。
 jwt_secret = "dev-secret-change-me"
 session_ttl_secs = 604800
 

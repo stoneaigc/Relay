@@ -130,31 +130,32 @@ async fn main() -> anyhow::Result<()> {
 
     let mut cfg = Config::load()?;
 
-    // 弱 JWT 密钥防线:密钥泄露 = 任何人可伪造 admin/portal 令牌。
-    // release 构建遇弱值(空/默认/长度 < 16)直接拒绝启动;debug 构建仅警告,方便本地开发。
+    let db = storage::init_pool(&cfg.database).await?;
+    storage::init_schema(&db).await?;
+
+    // JWT 密钥解析:DB settings.auth.* 优先;缺失/弱值时自动生成强随机密钥并持久化,
+    // 实现「零配置安全启动」——每个部署各得一把唯一密钥,跨重启稳定,不再拒绝启动。
     {
-        const DEV_SECRET: &str = "dev-secret-change-me";
+        let kv = storage::load_settings(&db, settings::AUTH_PREFIX)
+            .await
+            .map_err(|e| anyhow::anyhow!("load settings: {e}"))?;
+        settings::apply_auth_settings(&mut cfg, &kv);
         let secret = cfg.auth.jwt_secret.trim();
-        if secret.is_empty() || secret == DEV_SECRET || secret.chars().count() < 16 {
-            if cfg!(debug_assertions) {
-                tracing::warn!(
-                    "auth.jwt_secret 为弱值(空/默认/过短):仅供本地开发使用;release 构建将拒绝启动。\
-                     生产请设置 RELAY_AUTH__JWT_SECRET(可用 `openssl rand -hex 32` 生成)"
-                );
-            } else {
-                anyhow::bail!(
-                    "auth.jwt_secret 为弱值(空/默认 \"dev-secret-change-me\"/长度 < 16)。\
-                     生产环境必须设置强随机密钥:RELAY_AUTH__JWT_SECRET(可用 `openssl rand -hex 32` 生成)"
-                );
-            }
+        if secret.is_empty() || secret == "dev-secret-change-me" || secret.chars().count() < 16 {
+            let generated = storage::generate_jwt_secret();
+            storage::set_settings(&db, &[(settings::K_AUTH_JWT_SECRET.to_string(), generated.clone())])
+                .await
+                .map_err(|e| anyhow::anyhow!("persist jwt secret: {e}"))?;
+            cfg.auth.jwt_secret = generated;
+            tracing::info!(
+                "auth.jwt_secret 未配置或为弱值:已自动生成强随机密钥并持久化到数据库\
+                 (请勿更换——供应商密钥以其加密;更换会使全部会话失效)"
+            );
         }
     }
 
     // 供应商密钥静态加密:用 auth.jwt_secret 派生 AES-256-GCM 密钥(先注入,后续 providers 读写依赖)。
     storage::init_provider_secret(&cfg.auth.jwt_secret);
-
-    let db = storage::init_pool(&cfg.database).await?;
-    storage::init_schema(&db).await?;
     // 历史明文供应商密钥一次性加密回写(幂等)。
     storage::migrate_provider_keys(&db).await?;
 

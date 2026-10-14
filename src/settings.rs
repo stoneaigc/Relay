@@ -150,6 +150,19 @@ pub const FALLBACK_PREFIX: &str = "fallback.";
 pub const K_FB_ENABLED: &str = "fallback.enabled";
 pub const K_FB_MAX_RETRIES: &str = "fallback.max_retries";
 
+/// settings 表里鉴权相关 key 的前缀。
+pub const AUTH_PREFIX: &str = "auth.";
+/// 自动生成的 JWT 签名密钥:首次启动弱值时生成并持久化,跨重启稳定。
+/// 兼任供应商密钥静态加密主密钥,生成后请勿更换。
+pub const K_AUTH_JWT_SECRET: &str = "auth.jwt_secret";
+
+/// 把 DB 里的 auth.* 覆盖到内存 Config.auth。
+pub fn apply_auth_settings(cfg: &mut Config, kv: &HashMap<String, String>) {
+    if let Some(v) = kv.get(K_AUTH_JWT_SECRET).filter(|s| !s.is_empty()) {
+        cfg.auth.jwt_secret = v.clone();
+    }
+}
+
 /// settings 表里管理员账号相关 key 的前缀。
 pub const ADMIN_PREFIX: &str = "admin.";
 /// 后台修改后的管理员口令哈希(argon2 PHC)。存在时登录校验以它为准;

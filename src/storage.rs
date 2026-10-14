@@ -156,6 +156,14 @@ pub fn generate_key() -> (String, String, String) {
     (plaintext, hash, prefix)
 }
 
+/// 生成 64 位十六进制强随机密钥(32 字节熵),用于 JWT 签名(零配置启动时自动生成并持久化)。
+pub fn generate_jwt_secret() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
 pub fn now_secs() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64
