@@ -4,6 +4,7 @@
 # 可用环境变量:INSTALL_DIR=/opt/relay   # 安装目录(与 install.sh 一致)
 #              REPO=stoneaigc/Relay    # GitHub 仓库(自 fork 时覆盖)
 #              HEALTH_URL=...          # 升级后健康检查地址(缺省自动从已安装配置识别端口)
+#              DL_PREFIX=...           # GitHub 下载加速前缀(如 https://ghproxy.com/https://github.com)
 # 流程:查询版本 → 下载校验 → 备份当前二进制 → 调 install.sh 原地升级(保留配置与数据) → 健康检查
 set -euo pipefail
 
@@ -64,7 +65,10 @@ case "$ARCH" in
   *) echo "不支持的架构:$ARCH" >&2; exit 1 ;;
 esac
 PKG="relay-v${VER}-linux-${A}"
-URL="https://github.com/$REPO/releases/download/v${VER}/${PKG}.tar.gz"
+DL_BASE="https://github.com"
+# 下载包支持加速前缀(内网/网络受限环境可用镜像代理 GitHub 下载);版本查询仍走 GitHub API。
+if [ -n "${DL_PREFIX:-}" ]; then DL_BASE="${DL_PREFIX%/}"; fi
+URL="${DL_BASE}/$REPO/releases/download/v${VER}/${PKG}.tar.gz"
 
 echo "==> 下载 $URL"
 curl -fSL --retry 3 -o "$TMP/$PKG.tar.gz" "$URL"
