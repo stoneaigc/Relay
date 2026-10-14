@@ -29,6 +29,10 @@ export default defineConfig(({ command }) => ({
   },
   server: {
     port: 5173,
-    proxy: { "/portal/api": "http://localhost:9000" },
+    proxy: {
+      "/portal/api": "http://localhost:9000",
+      "/login": "http://localhost:9000",
+      "/api/auth": "http://localhost:9000",
+    },
   },
 }));

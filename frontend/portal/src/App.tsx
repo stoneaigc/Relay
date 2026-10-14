@@ -5,12 +5,11 @@ import {
   LayoutDashboard, Receipt, MessageSquare, Menu, X, SendHorizontal, Boxes,
   Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen, ShieldCheck,
 } from "lucide-react";
-import { api, getToken, setToken, clearToken, healthz, SITE_PREFIX, KeyInfo, ModelCard, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType } from "./api";
+import { api, getToken, clearToken, healthz, SITE_PREFIX, KeyInfo, ModelCard, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType } from "./api";
 import { copyText } from "./clipboard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { PasswordInput } from "@/components/ui/password-input";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -263,127 +262,21 @@ function LineChart({ points }: { points: { ts: number; tokens: number; calls: nu
 
 export default function App() {
   const [authed, setAuthed] = useState(!!getToken());
-  // 全局 401:api 层广播 relay:auth-expired,这里统一清 token 回登录页。
+  // 全局 401:api 层广播 relay:auth-expired,这里清 token 并跳回统一登录页。
   useEffect(() => {
     const onExpired = () => { clearToken(); setAuthed(false); };
     window.addEventListener("relay:auth-expired", onExpired);
     return () => window.removeEventListener("relay:auth-expired", onExpired);
   }, []);
-  if (!authed) return <Login onSuccess={() => setAuthed(true)} />;
+  // 无登录态:一律跳转统一登录页(登录/注册/重置都集中在那里,本应用不再内置认证页)。
+  useEffect(() => {
+    if (!authed) window.location.replace(SITE_PREFIX + "/login");
+  }, [authed]);
+  if (!authed) return null;
   return (
     <BrowserRouter basename={APP_BASE}>
       <Dashboard onLogout={() => { clearToken(); setAuthed(false); }} />
     </BrowserRouter>
-  );
-}
-
-function Login({ onSuccess }: { onSuccess: () => void }) {
-  const [mode, setMode] = useState<"login" | "register" | "reset">("login");
-  const [account, setAccount] = useState("");
-  const [code, setCode] = useState("");
-  const [password, setPassword] = useState("");
-  const [confirm, setConfirm] = useState("");
-  const [err, setErr] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [cooldown, setCooldown] = useState(0);
-
-  useEffect(() => {
-    if (cooldown <= 0) return;
-    const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
-    return () => clearTimeout(t);
-  }, [cooldown]);
-
-  const needCode = mode === "register" || mode === "reset";
-  const switchMode = (m: typeof mode) => { setMode(m); setErr(""); setCode(""); setPassword(""); setConfirm(""); };
-
-  const sendCode = async () => {
-    if (!account.trim() || cooldown > 0) return;
-    setErr("");
-    try {
-      const r = await api.sendEmailCode(account.trim());
-      setCooldown(60);
-      if (r.dev_code) { setCode(r.dev_code); setErr("开发模式:验证码已自动填入"); }
-    } catch (e: any) { setErr(e.message); }
-  };
-
-  const canSubmit = mode === "login"
-    ? account.trim() && password
-    : account.trim() && code.trim() && password && confirm;
-  const submit = async () => {
-    if (!canSubmit) return;
-    if (needCode && password !== confirm) { setErr("两次输入的密码不一致"); return; }
-    setErr(""); setLoading(true);
-    try {
-      const r = mode === "login" ? await api.login(account.trim(), password)
-        : mode === "register" ? await api.register(account.trim(), code.trim(), password)
-        : await api.resetPassword(account.trim(), code.trim(), password);
-      setToken(r.token); onSuccess();
-    } catch (e: any) {
-      // 登录模式:401 显示通用文案;429 等其它错误透出后端提示(如防爆破锁定)。
-      setErr(mode === "login" && e?.status !== 429 ? "用户名 / 邮箱或密码错误" : e.message);
-    } finally { setLoading(false); }
-  };
-
-  const subtitle = mode === "login" ? "账号登录" : mode === "register" ? "邮箱注册 · 注册即送额度" : "重置密码 · 邮箱验证";
-  const submitLabel = mode === "login" ? "登录" : mode === "register" ? "注册" : "重置密码";
-  const pwPlaceholder = mode === "login" ? "密码" : mode === "register" ? "设置密码(至少 6 位)" : "设置新密码(至少 6 位)";
-
-  return (
-    <div className="flex min-h-screen items-center justify-center p-4">
-      <Card className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-xl">
-            <svg viewBox="0 0 64 64" className="h-7 w-7 shrink-0">
-              <defs><linearGradient id="lg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style={{stopColor:'#6366f1'}}/><stop offset="100%" style={{stopColor:'#8b5cf6'}}/></linearGradient></defs>
-              <rect width="64" height="64" rx="14" fill="url(#lg)"/>
-              <path d="M10 32 L24 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
-              <path d="M18 25 L10 32 L18 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-              <polygon points="32,16 44,24 44,40 32,48 20,40 20,24" fill="none" stroke="white" strokeWidth="3" strokeLinejoin="round"/>
-              <path d="M35 22 L28 33 L34 33 L29 44" stroke="white" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-              <path d="M40 32 L54 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
-              <path d="M46 25 L54 32 L46 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-            </svg>
-            <span>Rel<span className="text-primary">ay</span> 控制台</span>
-          </CardTitle>
-          <p className="text-sm text-muted-foreground">{subtitle}</p>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <Input
-            type={needCode ? "email" : "text"}
-            placeholder={mode === "login" ? "用户名 / 邮箱" : "邮箱"}
-            value={account}
-            onChange={(e) => setAccount(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
-          {needCode && (
-            <div className="flex gap-2">
-              <Input placeholder="邮箱验证码" value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))} maxLength={6} />
-              <Button variant="outline" className="shrink-0" disabled={!account.trim() || cooldown > 0} onClick={sendCode}>
-                {cooldown > 0 ? `${cooldown}s` : "发送验证码"}
-              </Button>
-            </div>
-          )}
-          <PasswordInput placeholder={pwPlaceholder} value={password}
-            onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
-          {needCode && (
-            <Input type="password" placeholder="确认密码" value={confirm}
-              onChange={(e) => setConfirm(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
-          )}
-          <Button className="w-full" disabled={loading || !canSubmit} onClick={submit}>
-            {loading ? "请稍候…" : submitLabel}
-          </Button>
-          <div className="flex items-center justify-between text-xs text-muted-foreground">
-            {mode === "login" ? (
-              <>
-                <button className="hover:text-foreground" onClick={() => switchMode("register")}>没有账号?邮箱注册</button>
-                <button className="hover:text-foreground" onClick={() => switchMode("reset")}>忘记密码?</button>
-              </>
-            ) : (
-              <button className="hover:text-foreground" onClick={() => switchMode("login")}>← 返回登录</button>
-            )}
-          </div>
-          {err && <p className="text-sm text-destructive">{err}</p>}
-        </CardContent>
-      </Card>
-    </div>
   );
 }
 

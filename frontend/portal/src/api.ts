@@ -60,14 +60,6 @@ export interface ModelCard {
 }
 
 export const api = {
-  login: (username: string, password: string) =>
-    req("/portal/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
-  sendEmailCode: (email: string): Promise<{ sent: boolean; dev_code?: string }> =>
-    req("/portal/api/auth/email/send_code", { method: "POST", body: JSON.stringify({ email }) }),
-  register: (email: string, code: string, password: string) =>
-    req("/portal/api/auth/register", { method: "POST", body: JSON.stringify({ email, code, password }) }),
-  resetPassword: (email: string, code: string, password: string) =>
-    req("/portal/api/auth/reset_password", { method: "POST", body: JSON.stringify({ email, code, password }) }),
   me: () => req("/portal/api/me"),
   balance: () => req("/portal/api/balance"),
   keys: (): Promise<{ data: KeyInfo[] }> => req("/portal/api/keys"),

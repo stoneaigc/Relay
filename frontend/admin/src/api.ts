@@ -189,8 +189,6 @@ export interface ImportPreviewResp {
 }
 
 export const api = {
-  login: (username: string, password: string) =>
-    req("/admin/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
   // 管理员一键切换门户:按管理员用户名查找同名门户用户并签发 portal 令牌(无同名用户时 404)
   portalSso: (): Promise<{ role: string; token: string; username: string }> =>
     req("/admin/api/portal-sso", { method: "POST" }),

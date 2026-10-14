@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen } from "lucide-react";
-import { api, getToken, setToken, clearToken, healthz, SITE_PREFIX, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint } from "./api";
+import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -14,7 +14,6 @@ import EChart, { cssVar } from "@/components/EChart";
 import type { EChartsCoreOption } from "echarts/core";
 import PaginationBar from "./PaginationBar";
 import ApiDocsPanel from "./ApiDocs";
-import { PasswordInput } from "@/components/ui/password-input";
 import { Toaster } from "sonner";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
@@ -24,66 +23,32 @@ const APP_BASE = (() => {
   const m = window.location.pathname.match(/^(.*)\/admin(?=\/|$)/);
   return (m?.[1] ?? "") + "/admin";
 })();
+// 统一登录页(与 /admin 同前缀):无登录态时跳转过去,本应用不再内置登录卡。
+const LOGIN_URL = (() => {
+  const m = window.location.pathname.match(/^(.*)\/admin(?=\/|$)/);
+  return (m?.[1] ?? "") + "/login";
+})();
 
 export default function App() {
   const [authed, setAuthed] = useState(!!getToken());
-  // 401 凭证失效统一登出:api 层清除 token 后广播此事件,这里切回登录页。
+  // 401 凭证失效统一登出:api 层清除 token 后广播此事件,这里跳回统一登录页。
   useEffect(() => {
     const onExpired = () => setAuthed(false);
     window.addEventListener("relay:auth-expired", onExpired);
     return () => window.removeEventListener("relay:auth-expired", onExpired);
   }, []);
+  // 无登录态:一律跳转统一登录页(按身份分流,本应用不再内置第二张登录卡)。
+  useEffect(() => {
+    if (!authed) window.location.replace(LOGIN_URL);
+  }, [authed]);
+  if (!authed) return null;
   return (
     <>
       <Toaster position="top-center" richColors />
-      {!authed ? (
-        <Login onSuccess={() => setAuthed(true)} />
-      ) : (
-        <BrowserRouter basename={APP_BASE}>
-          <Console onLogout={() => { clearToken(); setAuthed(false); }} />
-        </BrowserRouter>
-      )}
+      <BrowserRouter basename={APP_BASE}>
+        <Console onLogout={() => { clearToken(); setAuthed(false); }} />
+      </BrowserRouter>
     </>
-  );
-}
-
-function Login({ onSuccess }: { onSuccess: () => void }) {
-  const [u, setU] = useState("admin");
-  const [p, setP] = useState("");
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
-  const submit = async () => {
-    if (busy) return;
-    setErr("");
-    setBusy(true);
-    try { const r = await api.login(u, p); setToken(r.token); onSuccess(); } catch (e: any) { setErr(e?.status === 429 ? e.message : "用户名或密码错误"); } finally { setBusy(false); }
-  };
-  return (
-    <div className="flex min-h-screen items-center justify-center p-4">
-      <Card className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-xl">
-            <svg viewBox="0 0 64 64" className="h-7 w-7 shrink-0">
-              <defs><linearGradient id="alg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style={{stopColor:'#6366f1'}}/><stop offset="100%" style={{stopColor:'#8b5cf6'}}/></linearGradient></defs>
-              <rect width="64" height="64" rx="14" fill="url(#alg)"/>
-              <path d="M10 32 L24 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
-              <path d="M18 25 L10 32 L18 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-              <polygon points="32,16 44,24 44,40 32,48 20,40 20,24" fill="none" stroke="white" strokeWidth="3" strokeLinejoin="round"/>
-              <path d="M35 22 L28 33 L34 33 L29 44" stroke="white" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-              <path d="M40 32 L54 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
-              <path d="M46 25 L54 32 L46 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
-            </svg>
-            <span>Rel<span className="text-primary">ay</span> 管理后台</span>
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <Input placeholder="用户名" value={u} onChange={(e) => setU(e.target.value)} />
-          <PasswordInput placeholder="密码" value={p} onChange={(e) => setP(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
-          <Button className="w-full" disabled={busy || !u.trim() || !p} onClick={submit}>登录</Button>
-          {err && <p className="text-sm text-destructive">{err}</p>}
-        </CardContent>
-      </Card>
-    </div>
   );
 }
 
