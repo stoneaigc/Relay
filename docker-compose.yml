@@ -9,7 +9,7 @@ services:
     image: relay:latest
     container_name: relay
     ports:
-      - "8080:8080"
+      - "9000:9000"
     depends_on:
       # pg profile 未启用时跳过依赖(compose v2.20+ 支持 required: false)
       postgres:

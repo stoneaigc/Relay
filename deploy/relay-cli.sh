@@ -30,7 +30,7 @@ run() {
 # 去掉值两侧的引号与空白
 clean() { sed -e 's/^[[:space:]"]*//' -e 's/[[:space:]"]*$//'; }
 
-# 当前生效端口:relay.env 的 RELAY_SERVER__BIND → config 的 bind → 默认 8080
+# 当前生效端口:relay.env 的 RELAY_SERVER__BIND → config 的 bind → 默认 9000
 detect_port() {
   local p=""
   if [ -f "$ENV_FILE" ]; then
@@ -39,7 +39,7 @@ detect_port() {
   if [ -z "$p" ] && [ -f "$CONFIG_FILE" ]; then
     p="$(grep -E '^[[:space:]]*bind[[:space:]]*=' "$CONFIG_FILE" 2>/dev/null | head -n1 | cut -d= -f2- | clean | awk -F: '{print $NF}')"
   fi
-  echo "${p:-8080}"
+  echo "${p:-9000}"
 }
 
 healthz() {

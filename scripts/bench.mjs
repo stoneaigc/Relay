@@ -11,7 +11,7 @@
 // 每请求 messages 携带随机 nonce,语义缓存 L1 永不命中,测的是最重的未命中路径。
 //
 // 用法:
-//   node scripts/bench.mjs --key rk_live_xxx [--base http://localhost:8080]
+//   node scripts/bench.mjs --key rk_live_xxx [--base http://localhost:9000]
 //        [--duration 10] [--concurrency 16] [--model bench] [--mock-port 9999] [--skip-chat]
 //        [--mock-external]  不内嵌 mock(用独立进程的 mock_upstream.mjs 等),
 //                           排除「压测客户端与上游同进程 GC 互相干扰」的 P99 毛刺来源。
@@ -25,7 +25,7 @@ for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
   if (a.startsWith("--")) args[a.slice(2)] = process.argv[i + 1] ?? true, i++;
 }
-const BASE = (args.base ?? "http://localhost:8080").replace(/\/$/, "");
+const BASE = (args.base ?? "http://localhost:9000").replace(/\/$/, "");
 const KEY = args.key ?? "";
 const DURATION = Number(args.duration ?? 10);
 const CONC = Number(args.concurrency ?? 16);

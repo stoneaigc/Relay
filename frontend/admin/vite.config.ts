@@ -29,6 +29,6 @@ export default defineConfig(({ command }) => ({
   },
   server: {
     port: 5174,
-    proxy: { "/admin/api": "http://localhost:8080" },
+    proxy: { "/admin/api": "http://localhost:9000" },
   },
 }));

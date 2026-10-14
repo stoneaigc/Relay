@@ -76,7 +76,7 @@
 ## 七、部署形态
 
 - [ ] 部署方式二选一并演练：`install-online.sh`（systemd）或 Docker Compose
-- [ ] 健康检查通：`curl http://127.0.0.1:8080/healthz` 返回版本号；Docker 镜像内置 HEALTHCHECK
+- [ ] 健康检查通：`curl http://127.0.0.1:9000/healthz` 返回版本号；Docker 镜像内置 HEALTHCHECK
 - [ ] nginx：SSE 透传（`proxy_buffering off`）+ SPA `index.html` no-cache 已按 Wiki 配置
 - [ ] 升级路径确认：`/opt/relay/upgrade.sh` 或后台「软件更新」可检查到 Release
 - [ ] Prometheus 已抓 `/metrics`（带 token 或 admin JWT），核心指标入监控

@@ -2,7 +2,7 @@
 # 示例:RELAY_SERVER__BIND=0.0.0.0:9000
 
 [server]
-bind = "0.0.0.0:8080"
+bind = "0.0.0.0:9000"
 
 [database]
 # type: sqlite(默认) | postgres

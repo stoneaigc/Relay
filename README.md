@@ -62,7 +62,7 @@ curl -fsSL https://raw.githubusercontent.com/stoneaigc/Relay/main/deploy/install
 ```bash
 tar xzf relay-*.tar.gz && cd relay-*/
 sudo ./install.sh                     # 默认装 /opt/relay,自动注册 systemd
-curl http://localhost:8080/healthz    # 探活
+curl http://localhost:9000/healthz    # 探活
 ```
 
 > ⚠️ 离线安装默认管理员 `admin / Relay@123`，生产环境启动前务必编辑 `/opt/relay/relay.env` 覆盖密码与 JWT 密钥（在线安装会自动生成）。
@@ -71,13 +71,13 @@ curl http://localhost:8080/healthz    # 探活
 
 ```bash
 docker compose up -d --build
-curl http://localhost:8080/healthz
+curl http://localhost:9000/healthz
 ```
 
 ### 方式四：本地开发
 
 ```bash
-cargo run                                            # 后端 :8080,首次启动自动建表
+cargo run                                            # 后端 :9000,首次启动自动建表
 cd frontend/portal && npm install && npm run dev     # 用户门户 :5173
 cd frontend/admin  && npm install && npm run dev     # 管理后台 :5174
 ```
@@ -95,7 +95,7 @@ cd frontend/admin  && npm install && npm run dev     # 管理后台 :5174
 5. 用 Key 调用网关：
 
 ```bash
-curl http://localhost:8080/v1/chat/completions \
+curl http://localhost:9000/v1/chat/completions \
   -H "Authorization: Bearer rk_live_..." \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'

@@ -89,4 +89,4 @@ echo
 echo "==> 完成。运维命令(推荐):"
 echo "    relay status / relay logs -f / relay info / relay help"
 echo "    也可用底层命令:systemctl status $SERVICE ; journalctl -u $SERVICE -f"
-echo "    监听 :8080 → 门户 /portal/ ,后台 /admin/"
+echo "    监听 :9000 → 门户 /portal/ ,后台 /admin/"

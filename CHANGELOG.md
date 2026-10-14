@@ -3,6 +3,13 @@
 本文件记录 Relay 每个版本的变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.3] - 2026-10-14
+
+### 变更
+
+- **默认端口 8080 → 9000**：`config/default.toml`、Docker（EXPOSE/HEALTHCHECK/端口映射）、安装/升级脚本、双前端文档示例与开发代理全量同步。⚠️ 升级说明：systemd 存量部署的 `config/default.toml` 升级不覆盖，端口保持不变，无影响；Docker 用户拉新镜像时注意同步调整 compose 端口映射；新装部署直接用 9000
+- **upgrade.sh 健康检查端口自动识别**：未显式指定 `HEALTH_URL` 时从已安装配置（relay.env → config/default.toml）读取端口，旧部署（8080）与新部署（9000/自定义）升级后都能正确探活，不再依赖硬编码
+
 ## [0.3.2] - 2026-10-14
 
 ### 新增

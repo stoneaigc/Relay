@@ -15,7 +15,7 @@
 # 可用环境变量:
 #   RELAY_VERSION         指定版本(如 0.2.1),缺省 = 最新 Release
 #   INSTALL_DIR           安装目录(默认 /opt/relay)
-#   RELAY_PORT            服务端口(默认 8080;升级时缺省自动从已安装配置识别)
+#   RELAY_PORT            服务端口(默认 9000;升级时缺省自动从已安装配置识别)
 #   RELAY_ADMIN_USERNAME  管理后台用户名(默认 admin,仅首次)
 #   RELAY_ADMIN_PASSWORD  管理后台密码(缺省自动随机生成,仅首次)
 #   REPO                  GitHub 仓库(默认 stoneaigc/Relay)
@@ -28,7 +28,7 @@ REPO="${REPO:-stoneaigc/Relay}"
 INSTALL_DIR_SET="${INSTALL_DIR:+1}"   # 调用方是否显式指定安装目录
 RELAY_PORT_SET="${RELAY_PORT:+1}"     # 调用方是否显式指定端口
 INSTALL_DIR="${INSTALL_DIR:-/opt/relay}"
-RELAY_PORT="${RELAY_PORT:-8080}"
+RELAY_PORT="${RELAY_PORT:-9000}"
 RELAY_ADMIN_USERNAME="${RELAY_ADMIN_USERNAME:-admin}"
 RELAY_ADMIN_PASSWORD="${RELAY_ADMIN_PASSWORD:-}"
 RELAY_VERSION="${RELAY_VERSION:-}"

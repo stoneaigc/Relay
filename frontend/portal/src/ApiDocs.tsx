@@ -7,8 +7,8 @@ import { cn } from "@/lib/utils";
 import { copyText } from "./clipboard";
 
 const BASE = typeof window !== "undefined"
-  ? `${window.location.protocol}//${window.location.hostname}:8080`
-  : "http://localhost:8080";
+  ? `${window.location.protocol}//${window.location.hostname}:9000`
+  : "http://localhost:9000";
 
 const OPENAI_CURL = `curl ${BASE}/v1/chat/completions \\
   -H "Authorization: Bearer rk_live_xxx" \\

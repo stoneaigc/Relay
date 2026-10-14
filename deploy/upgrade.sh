@@ -3,19 +3,32 @@
 # 用法:sudo ./upgrade.sh [版本号]        # 缺省 = 最新 Release;版本号如 0.3.0 或 v0.3.0
 # 可用环境变量:INSTALL_DIR=/opt/relay   # 安装目录(与 install.sh 一致)
 #              REPO=stoneaigc/Relay    # GitHub 仓库(自 fork 时覆盖)
-#              HEALTH_URL=http://127.0.0.1:8080/healthz  # 升级后健康检查地址
+#              HEALTH_URL=...          # 升级后健康检查地址(缺省自动从已安装配置识别端口)
 # 流程:查询版本 → 下载校验 → 备份当前二进制 → 调 install.sh 原地升级(保留配置与数据) → 健康检查
 set -euo pipefail
 
 INSTALL_DIR="${INSTALL_DIR:-/opt/relay}"
 REPO="${REPO:-stoneaigc/Relay}"
-HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8080/healthz}"
 VER="${1:-}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "需要 root 权限。请用 sudo 运行:sudo ./upgrade.sh" >&2
   exit 1
 fi
+
+# 健康检查地址:未显式指定时,从已安装配置自动识别端口(relay.env → config/default.toml → 默认 9000)
+# 这样旧部署(8080)与新部署(9000 或自定义)升级后都能正确探活。
+detect_port() {
+  local p=""
+  if [ -f "$INSTALL_DIR/relay.env" ]; then
+    p="$(grep -E '^[[:space:]]*RELAY_SERVER__BIND=' "$INSTALL_DIR/relay.env" 2>/dev/null | tail -n1 | cut -d= -f2- | sed 's/^[[:space:]"]*//; s/[[:space:]"]*$//' | awk -F: '{print $NF}')"
+  fi
+  if [ -z "$p" ] && [ -f "$INSTALL_DIR/config/default.toml" ]; then
+    p="$(grep -E '^[[:space:]]*bind[[:space:]]*=' "$INSTALL_DIR/config/default.toml" 2>/dev/null | head -n1 | cut -d= -f2- | sed 's/^[[:space:]"]*//; s/[[:space:]"]*$//' | awk -F: '{print $NF}')"
+  fi
+  echo "${p:-9000}"
+}
+HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:$(detect_port)/healthz}"
 
 command -v curl >/dev/null 2>&1 || { echo "缺少 curl,请先安装:apt install curl / yum install curl" >&2; exit 1; }
 

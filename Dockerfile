@@ -47,7 +47,7 @@ USER nobody:nogroup
 ENV RUST_LOG=info
 # 默认库落数据卷:/app 以 root 属主只读,nobody 只能写 /app/data;裸 docker run 不传参也可用
 ENV RELAY_DATABASE__URL=sqlite:///app/data/relay.db
-EXPOSE 8080
+EXPOSE 9000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -sf http://127.0.0.1:8080/healthz || exit 1
+    CMD curl -sf http://127.0.0.1:9000/healthz || exit 1
 ENTRYPOINT ["/app/relay"]

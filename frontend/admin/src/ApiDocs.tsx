@@ -6,7 +6,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { cn } from "@/lib/utils";
 import { copyText } from "./clipboard";
 
-const BASE = "http://localhost:8080";
+const BASE = "http://localhost:9000";
 
 const OPENAI_CURL = `curl ${BASE}/v1/chat/completions \\
   -H "Authorization: Bearer rk_live_xxx" \\
@@ -204,7 +204,7 @@ scrape_configs:
     scrape_interval: 15s
     scheme: http
     static_configs:
-      - targets: ["relay.example.com:8080"]
+      - targets: ["relay.example.com:9000"]
     authorization:
       type: Bearer
       credentials: "<metrics.export_token>"`;
