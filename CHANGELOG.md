@@ -3,6 +3,12 @@
 本文件记录 Relay 每个版本的变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 新增
+
+- **运维命令 `relay`**：安装/升级时自动装到 `/usr/local/bin/relay`，一条命令覆盖日常运维——`status` / `start` / `stop` / `restart` / `logs [-f]` / `health`（探活含版本）/ `port [n]`（查看或修改端口并自动重启，写 relay.env）/ `info`（版本/目录/端口/数据库一览）/ `backup`（SQLite 在线热备，默认 /var/backups/relay）/ `upgrade`（一键升级）。非 root 执行时控制类命令自动加 sudo；无 systemd 环境（Alpine 等）自动跳过安装
+
 ## [0.3.1] - 2026-10-14
 
 ### 修复

@@ -59,6 +59,14 @@ EOF
   echo "==> 已创建 $INSTALL_DIR/relay.env(可写入授权码等敏感变量)"
 fi
 
+# 运维 CLI:/usr/local/bin/relay(status/logs/restart/port/backup 等,模板渲染安装目录)
+if [ -f "$SRC/relay-cli.sh" ]; then
+  sed "s#@INSTALL_DIR@#${INSTALL_DIR}#g; s#@SERVICE@#${SERVICE}#g" "$SRC/relay-cli.sh" \
+    > /usr/local/bin/relay
+  chmod 0755 /usr/local/bin/relay
+  echo "==> 已安装运维命令:relay(试下 relay status / relay help)"
+fi
+
 # 属主交给服务用户:SQLite 库写在安装目录(User=relay 需要写权限)
 chown -R relay:relay "$INSTALL_DIR"
 
@@ -78,7 +86,7 @@ else
 fi
 
 echo
-echo "==> 完成。状态/日志:"
-echo "    systemctl status $SERVICE"
-echo "    journalctl -u $SERVICE -f"
+echo "==> 完成。运维命令(推荐):"
+echo "    relay status / relay logs -f / relay info / relay help"
+echo "    也可用底层命令:systemctl status $SERVICE ; journalctl -u $SERVICE -f"
 echo "    监听 :8080 → 门户 /portal/ ,后台 /admin/"
