@@ -29,6 +29,29 @@
 **请求失败了怎么排查？**
 管理后台「请求链路」展开该请求：候选顺序、实际尝试链（每一跳的状态/延迟/错误、熔断跳过标记）全部留痕，失败请求标红。
 
+## 日志查看与端口修改（运维速查）
+
+**看日志**（systemd 部署）：
+
+```bash
+sudo systemctl status relay                    # 状态 + 最后几行
+sudo journalctl -u relay -n 100 --no-pager     # 最近 100 行
+sudo journalctl -u relay -f                    # 实时滚动
+sudo journalctl -u relay --since "10 min ago"  # 按时间窗
+```
+
+服务配了 `Restart=always, RestartSec=3`：进程挂掉会每 3 秒自动重启，日志会刷屏。排查启动失败时先 `sudo systemctl stop relay` 止血，看清报错改完再 `start`。**成功启动的标志**是最后一行 `Relay vX.Y.Z listening on <地址:端口>`，其前有 routing / loaded users 等自检日志。
+
+**改端口等配置**：配置在启动时读取（`config/default.toml` + `RELAY_*` 环境变量覆盖），改完必须 `sudo systemctl restart relay`：
+
+```bash
+# 推荐:写 relay.env(变量名双层下划线,写单下划线不生效)
+echo 'RELAY_SERVER__BIND=0.0.0.0:9000' | sudo tee -a /opt/relay/relay.env
+sudo systemctl restart relay
+```
+
+**确认生效**：启动日志最后一行 `listening on` 打的就是实际生效的绑定地址；再用 `curl http://127.0.0.1:9000/healthz` 与 `ss -tlnp | grep relay` 复核，防火墙/安全组同步放行。
+
 ## 不适合的场景（诚实边界）
 
 - 需要**多租户 / 组织架构 / RBAC / SSO** 的平台型 SaaS——产品形态固定为「一个运营者 + N 个用户」两级，刻意不做团队体系。
