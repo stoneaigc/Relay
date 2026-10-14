@@ -3,7 +3,7 @@
 本文件记录 Relay 每个版本的变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.3.2] - 2026-10-14
 
 ### 新增
 
