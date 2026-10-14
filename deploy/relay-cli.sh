@@ -139,6 +139,57 @@ cmd_backup() {
 
 cmd_upgrade() { run bash "$INSTALL_DIR/upgrade.sh" "$@"; }
 
+# 卸载:停服务 → 删单元 → 自动备份 SQLite/relay.env → 删安装目录 → 自删除 CLI。
+# 需交互确认;--yes/-y 跳过(脚本场景)。
+cmd_uninstall() {
+  local confirm="${1:-}"
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "未检测到 systemd(Docker 等环境请用对应方式卸载,如 docker compose down)。"
+    return 1
+  fi
+  echo "即将卸载 Relay,将删除:"
+  echo "  - systemd 服务 : $SERVICE(disable --now + 单元文件)"
+  echo "  - 安装目录     : $INSTALL_DIR(含数据库/配置/前端)"
+  echo "  - 运维命令     : /usr/local/bin/relay"
+  echo
+  # 尽力自动备份:数据库(SQLite)与 relay.env,落在 $BACKUP_DIR
+  local ts; ts="$(date +%F_%H%M%S)"
+  local db_url db
+  db_url="$(grep -E '^[[:space:]]*url[[:space:]]*=' "$CONFIG_FILE" 2>/dev/null | head -n1 | cut -d= -f2- | clean)"
+  db="${db_url#sqlite://}"
+  case "$db" in /*) ;; *) db="$INSTALL_DIR/$db" ;; esac
+  if [ -f "$db" ] && command -v sqlite3 >/dev/null 2>&1; then
+    run mkdir -p "$BACKUP_DIR"
+    if run sqlite3 "$db" ".backup '$BACKUP_DIR/relay-uninstall-$ts.db'"; then
+      echo "  ✓ 数据库已自动备份: $BACKUP_DIR/relay-uninstall-$ts.db"
+    fi
+  fi
+  if [ -f "$ENV_FILE" ]; then
+    run mkdir -p "$BACKUP_DIR"
+    if run cp "$ENV_FILE" "$BACKUP_DIR/relay-env-uninstall-$ts.bak"; then
+      echo "  ✓ relay.env 已自动备份: $BACKUP_DIR/relay-env-uninstall-$ts.bak"
+    fi
+  fi
+  if [ "$confirm" != "--yes" ] && [ "$confirm" != "-y" ]; then
+    local ans
+    read -r -p "确认卸载?数据库/账号/配置将随安装目录删除(已有上方备份)。输入 yes 继续: " ans
+    [ "$ans" = "yes" ] || { echo "已取消。"; return 1; }
+  fi
+  run systemctl disable --now "$SERVICE" 2>/dev/null || true
+  run rm -f "/etc/systemd/system/$SERVICE.service"
+  run systemctl daemon-reload 2>/dev/null || true
+  run rm -rf "$INSTALL_DIR"
+  echo "==> 服务与安装目录已删除。"
+  echo "如需删除专用系统用户: sudo userdel relay(可选,不影响系统)"
+  echo "==> 卸载完成,本命令(/usr/local/bin/relay)一并移除,再见。"
+  # 自删除:exec 确保脚本文件被删后不再有后续读取
+  if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+    exec sudo rm -f /usr/local/bin/relay
+  else
+    exec rm -f /usr/local/bin/relay
+  fi
+}
+
 usage() {
   cat <<'EOF'
 Relay 运维命令
@@ -151,6 +202,7 @@ Relay 运维命令
   relay info                 版本/路径/端口/数据库一览
   relay backup [目录]        SQLite 在线热备(默认 /var/backups/relay)
   relay upgrade [版本]       升级(默认拉最新 Release)
+  relay uninstall [--yes]    卸载(自动备份数据库与 relay.env;--yes 跳过确认)
 EOF
 }
 
@@ -165,5 +217,6 @@ case "${1:-help}" in
   info)    cmd_info ;;
   backup)  shift; cmd_backup "$@" ;;
   upgrade) shift; cmd_upgrade "$@" ;;
+  uninstall) shift; cmd_uninstall "$@" ;;
   help|--help|-h|*) usage ;;
 esac
