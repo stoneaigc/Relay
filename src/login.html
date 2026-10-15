@@ -333,7 +333,9 @@ $("f-login").addEventListener("submit", async (ev) => {
   const btn = $("b");
   btn.disabled = true; $("e").textContent = "";
   try {
-    const res = await fetch("api/auth/login", {
+    // 登录端点 = 页面路径本身(POST /login):相对路径 "login" 在根(/login)与任意
+    // 反代子前缀(/relay/login)下都解析回同一 URL,由后端统一改写分发,规避 /api 路径前缀剥离问题。
+    const res = await fetch("login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username: $("u").value.trim(), password: $("p").value }),

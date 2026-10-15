@@ -449,14 +449,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/embeddings", post(handlers::embeddings))
         .nest("/portal/api", portal_api)
         .nest("/admin/api", admin_api)
-        // 统一登录:按账号身份签发 admin / portal 令牌(防爆破 key 前缀 uni:)
-        .route("/api/auth/login", post(crate::unified::login))
+        // 统一登录:GET /login 是登录页,POST /login 是登录端点(按账号身份签发 admin/portal 令牌)。
+        // 挂在 /login 本身是刻意的:strip_web_prefix 能把任意反代前缀下的 /relay/login 正确改写为
+        // /login(根与子路径部署通吃);而 /api/auth/* 这类独立路径在子形态下前缀剥不掉(且以 /login
+        // 结尾的路径会被误改写成 SPA 入口 → 405,v0.3.5~0.4.1 线上 bug)。
+        .route(
+            "/login",
+            get(crate::unified::login_page).post(crate::unified::login),
+        )
         .with_state(Arc::clone(&state))
         // ---- 静态前端 ----
         .nest_service("/portal", spa("portal"))
         .nest_service("/admin", spa("admin"))
-        .route("/", get(crate::unified::login_page))
-        .route("/login", get(crate::unified::login_page));
+        .route("/", get(crate::unified::login_page));
     // 子路径反代兼容:URI 改写必须在路由匹配之前生效,故包在 Router 外层
     // (Router::layer 的中间件在匹配后才执行,改 URI 无效)。
     let app = axum::middleware::from_fn(strip_web_prefix).layer(app);
