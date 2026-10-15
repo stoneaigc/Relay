@@ -345,7 +345,7 @@ function Avatar({ name }: { name: string }) {
   );
 }
 
-function UserDialog({ dlg, groups, userGroups, onClose, onSaved }: { dlg: { edit: UserRow | null } | null; groups: GroupRow[]; userGroups: UserGroupRow[]; onClose: () => void; onSaved: () => void }) {
+function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { dlg: { edit: UserRow | null } | null; groups: GroupRow[]; userGroups: UserGroupRow[]; defaults: { concurrency_limit: number; rpm_limit: number; tpm_limit: number }; onClose: () => void; onSaved: () => void }) {
   const open = !!dlg;
   const edit = dlg?.edit ?? null;
   const [username, setUsername] = useState("");
@@ -354,41 +354,51 @@ function UserDialog({ dlg, groups, userGroups, onClose, onSaved }: { dlg: { edit
   const [userGroupId, setUserGroupId] = useState(0);
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
-  const [conc, setConc] = useState("16");
+  // 空串 = 继承用户组/全局(不写显式值);数字 = 显式限额,0 = 显式不限。
+  const [conc, setConc] = useState("");
   const [amount, setAmount] = useState("");
   const [budgetDaily, setBudgetDaily] = useState("");
   const [budgetMonthly, setBudgetMonthly] = useState("");
   const [err, setErr] = useState("");
   const [created, setCreated] = useState<{ username: string; password: string } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedHint, setCopiedHint] = useState(false);
   useEffect(() => {
     if (open) {
       setUsername(edit?.username ?? ""); setPassword(""); setGroupId(edit?.group_id ?? 0);
       setUserGroupId(edit?.user_group_id ?? 0);
       setEmail(edit?.email ?? ""); setPhone(edit?.phone ?? "");
-      setConc(String(edit?.concurrency_limit ?? 16));
+      // null(继承)回显为空串,避免保存时把继承静默写成显式值;0(显式不限)必须原样回显。
+      setConc(edit?.concurrency_limit == null ? "" : String(edit.concurrency_limit));
       setAmount(edit ? "0" : "10000000"); setErr("");
-      setBudgetDaily(edit?.budget_daily_tokens ? String(edit.budget_daily_tokens) : "");
-      setBudgetMonthly(edit?.budget_monthly_tokens ? String(edit.budget_monthly_tokens) : "");
-      setCreated(null); setCopied(false);
+      setBudgetDaily(edit?.budget_daily_tokens == null ? "" : String(edit.budget_daily_tokens));
+      setBudgetMonthly(edit?.budget_monthly_tokens == null ? "" : String(edit.budget_monthly_tokens));
+      setCreated(null); setCopied(false); setCopiedHint(false);
     }
   }, [dlg]);
 
   const submit = async () => {
     setErr("");
-    const bd = budgetDaily.trim() === "" ? 0 : Number(budgetDaily);
-    const bm = budgetMonthly.trim() === "" ? 0 : Number(budgetMonthly);
-    if (!Number.isFinite(bd) || bd < 0 || !Number.isFinite(bm) || bm < 0) {
-      setErr("预算需为非负数字,留空或 0 表示不限");
+    const numOrUndef = (s: string) => {
+      const t = s.trim();
+      if (t === "") return undefined;
+      const n = Number(t);
+      if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return NaN;
+      return n;
+    };
+    const cl = numOrUndef(conc), bd = numOrUndef(budgetDaily), bm = numOrUndef(budgetMonthly);
+    if (Number.isNaN(cl) || Number.isNaN(bd) || Number.isNaN(bm)) {
+      setErr("并发/预算需为非负整数,留空 = 继承用户组/全局,0 = 显式不限");
       return;
     }
     try {
       if (edit) {
         const body: any = {
           email: email.trim(), phone: phone.trim(),
-          group_id: groupId, user_group_id: userGroupId, concurrency_limit: Number(conc),
+          group_id: groupId, user_group_id: userGroupId,
           budget_daily_tokens: bd, budget_monthly_tokens: bm,
         };
+        if (cl !== undefined) body.concurrency_limit = cl;
         if (password) body.password = password;
         if (Number(amount)) body.add_tokens = Number(amount);
         await api.patchUser(edit.id, body);
@@ -397,8 +407,8 @@ function UserDialog({ dlg, groups, userGroups, onClose, onSaved }: { dlg: { edit
           username: username.trim(), password,
           email: email.trim() || undefined, phone: phone.trim() || undefined,
           group_id: groupId || undefined, user_group_id: userGroupId || undefined, grant_tokens: Number(amount) || 0,
-          concurrency_limit: Number(conc),
-          budget_daily_tokens: bd || undefined, budget_monthly_tokens: bm || undefined,
+          concurrency_limit: cl,
+          budget_daily_tokens: bd, budget_monthly_tokens: bm,
         });
         if (r?.initial_password) setCreated({ username: username.trim(), password: r.initial_password });
       }
@@ -406,7 +416,7 @@ function UserDialog({ dlg, groups, userGroups, onClose, onSaved }: { dlg: { edit
     } catch (e: any) { setErr(e.message); }
   };
   const sel = "h-9 w-full rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
-  const limitHint = "留空或 0 = 不限;未设置时继承用户组,再回落全局默认";
+  const limitHint = "留空 = 继承用户组/全局默认,0 = 显式不限";
 
   return (
     <>
@@ -422,8 +432,8 @@ function UserDialog({ dlg, groups, userGroups, onClose, onSaved }: { dlg: { edit
                 <span>该用户仍在使用初始密码:</span>
                 <span className="mono font-semibold text-indigo-700">{edit.initial_password}</span>
                 <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-indigo-600"
-                  onClick={async () => { if (await copyText(edit.initial_password!)) { setCopied(true); setTimeout(() => setCopied(false), 1500); } }}>
-                  {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}{copied ? "已复制" : "复制"}
+                  onClick={async () => { if (await copyText(edit.initial_password!)) { setCopiedHint(true); setTimeout(() => setCopiedHint(false), 1500); } }}>
+                  {copiedHint ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}{copiedHint ? "已复制" : "复制"}
                 </Button>
               </div>
             )}
@@ -445,7 +455,7 @@ function UserDialog({ dlg, groups, userGroups, onClose, onSaved }: { dlg: { edit
                   {userGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
                 </select></div>
               <div><label className="mb-1 block text-xs text-muted-foreground">并发上限</label>
-                <Input value={conc} onChange={(e) => setConc(e.target.value)} /></div>
+                <Input placeholder={`继承全局(${defaults.concurrency_limit})`} value={conc} onChange={(e) => setConc(e.target.value)} /></div>
             </div>
             <p className="-mt-2 text-xs text-muted-foreground">{limitHint}</p>
             <div className="grid grid-cols-2 gap-3">
@@ -467,7 +477,9 @@ function UserDialog({ dlg, groups, userGroups, onClose, onSaved }: { dlg: { edit
           </div>
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={onClose}>取消</Button>
-            <Button onClick={submit} disabled={!username.trim()}><Plus className="h-4 w-4" />{edit ? "保存" : "创建"}</Button>
+            <Button onClick={submit} disabled={!username.trim()}>
+              {edit ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}{edit ? "保存" : "创建"}
+            </Button>
           </div>
         </DialogContent>
       </Dialog>
@@ -738,6 +750,7 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
   const [rows, setRows] = useState<UserRow[]>([]);
   const [groups, setGroups] = useState<GroupRow[]>([]);
   const [userGroups, setUserGroups] = useState<UserGroupRow[]>([]);
+  const [defaults, setDefaults] = useState<{ concurrency_limit: number; rpm_limit: number; tpm_limit: number }>({ concurrency_limit: 16, rpm_limit: 0, tpm_limit: 0 });
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
@@ -752,7 +765,7 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
   const load = async () => {
     try {
       const [u, g, ug] = await Promise.all([api.users(page, pageSize, qRef.current || undefined), api.groups(), api.userGroups()]);
-      setRows(u.data); setGroups(g.data); setUserGroups(ug.data); setTotal(u.total);
+      setRows(u.data); setGroups(g.data); setUserGroups(ug.data); setDefaults(ug.defaults); setTotal(u.total);
     } catch (e: any) { if (String(e.message).includes("auth")) onAuthErr(); }
   };
   useEffect(() => { load(); }, [page, pageSize]);
@@ -826,7 +839,13 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
                     </div>
                   </TableCell>
                   <TableCell className="mono">{u.balance.toLocaleString()}</TableCell>
-                  <TableCell>{u.concurrency_limit ?? <span className="text-muted-foreground">默认</span>}</TableCell>
+                  <TableCell>
+                    {u.concurrency_limit == null
+                      ? <span className="text-xs text-muted-foreground">默认</span>
+                      : u.concurrency_limit === 0
+                        ? <span className="text-xs text-muted-foreground">不限</span>
+                        : <span className="mono">{u.concurrency_limit}</span>}
+                  </TableCell>
                   <TableCell>
                     <select value={u.group_id || 0} onChange={(e) => bindGroup(u, Number(e.target.value))}
                       className="h-8 rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring">
@@ -859,7 +878,7 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
         </CardContent>
       </Card>
 
-      <UserDialog dlg={userDlg} groups={groups} userGroups={userGroups} onClose={() => setUserDlg(null)} onSaved={load} />
+      <UserDialog dlg={userDlg} groups={groups} userGroups={userGroups} defaults={defaults} onClose={() => setUserDlg(null)} onSaved={load} />
       <UserChartDialog user={chart} onClose={() => setChart(null)} />
       <PasswordResultDialog info={pwdDlg} onClose={() => setPwdDlg(null)} />
       <ConfirmDialog confirm={confirm} onClose={() => setConfirm(null)} />
@@ -891,10 +910,15 @@ function PasswordResultDialog({ info, onClose }: { info: { username: string; pas
 }
 
 /** 限额单元格:null = 继承全局(灰字+悬浮提示默认值),0 = 不限。 */
-function LimitCell({ v, def }: { v: number | null; def?: number }) {
-  if (v == null) return <span className="text-xs text-muted-foreground" title={def != null ? `全局默认 ${def.toLocaleString()}` : undefined}>继承全局</span>;
+// 大数紧凑展示(K/M):用户组预算列防宽表,悬浮 title 看全值。
+const compactTokens = (v: number) =>
+  v >= 1_000_000 ? `${(v / 1_000_000).toFixed(v % 1_000_000 ? 1 : 0)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(0)}K` : String(v);
+
+function LimitCell({ v, def, compact }: { v: number | null; def?: number; compact?: boolean }) {
+  if (v == null) return <span className="text-xs text-muted-foreground" title={def != null ? `继承全局(默认 ${def.toLocaleString()})` : "继承全局默认"}>继承全局</span>;
   if (v === 0) return <Badge variant="muted" className="text-[10px]">不限</Badge>;
-  return <span className="mono">{v.toLocaleString()}</span>;
+  const shown = v.toLocaleString();
+  return <span className="mono" title={compact ? shown : undefined}>{compact ? compactTokens(v) : shown}</span>;
 }
 
 function UserGroupsPanel() {
@@ -902,16 +926,25 @@ function UserGroupsPanel() {
   const [defaults, setDefaults] = useState<{ concurrency_limit: number; rpm_limit: number; tpm_limit: number }>({ concurrency_limit: 0, rpm_limit: 0, tpm_limit: 0 });
   const [dlg, setDlg] = useState<{ edit: UserGroupRow | null } | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [err, setErr] = useState("");
 
   const load = async () => {
-    const r = await api.userGroups();
-    setRows(r.data); setDefaults(r.defaults);
+    setErr("");
+    try {
+      const r = await api.userGroups();
+      setRows(r.data); setDefaults(r.defaults);
+    } catch (e: any) {
+      // 401 已由 api 层广播全局跳登录;其余错误就地展示,避免整页静默空白。
+      setErr(e.message || "加载失败");
+    }
   };
   useEffect(() => { load(); }, []);
 
   const del = (g: UserGroupRow) => setConfirm({
     title: `删除用户组「${g.name}」?`,
-    desc: `组内 ${g.member_count} 个用户将解挂并回落全局默认限额。`,
+    desc: g.member_count > 0
+      ? `组内 ${g.member_count} 个用户将解挂并回落全局默认限额。`
+      : "该组暂无成员,删除后不可恢复。",
     action: async () => { await api.deleteUserGroup(g.id); load(); },
   });
 
@@ -938,13 +971,17 @@ function UserGroupsPanel() {
             <TableBody>
               {rows.map((g) => (
                 <TableRow key={g.id}>
-                  <TableCell className="font-medium">{g.name}</TableCell>
+                  <TableCell className="max-w-[160px] truncate font-medium" title={g.name}>{g.name}</TableCell>
                   <TableCell><LimitCell v={g.max_concurrency} def={defaults.concurrency_limit} /></TableCell>
                   <TableCell><LimitCell v={g.rpm_limit} def={defaults.rpm_limit} /></TableCell>
                   <TableCell><LimitCell v={g.tpm_limit} def={defaults.tpm_limit} /></TableCell>
-                  <TableCell><LimitCell v={g.budget_daily_tokens} /></TableCell>
-                  <TableCell><LimitCell v={g.budget_monthly_tokens} /></TableCell>
-                  <TableCell className="mono">{g.member_count}</TableCell>
+                  <TableCell><LimitCell v={g.budget_daily_tokens} compact /></TableCell>
+                  <TableCell><LimitCell v={g.budget_monthly_tokens} compact /></TableCell>
+                  <TableCell>
+                    {g.member_count > 0
+                      ? <span className="mono font-medium">{g.member_count}</span>
+                      : <span className="text-xs text-muted-foreground">0</span>}
+                  </TableCell>
                   <TableCell>
                     <RowActions actions={[
                       { label: "编辑", icon: <Pencil className="h-4 w-4" />, onClick: () => setDlg({ edit: g }) },
@@ -953,8 +990,11 @@ function UserGroupsPanel() {
                   </TableCell>
                 </TableRow>
               ))}
-              {rows.length === 0 && (
+              {rows.length === 0 && !err && (
                 <TableRow><TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">还没有用户组,创建后可在用户管理里批量套用限额</TableCell></TableRow>
+              )}
+              {err && rows.length === 0 && (
+                <TableRow><TableCell colSpan={8} className="py-10 text-center text-sm text-destructive">{err}</TableCell></TableRow>
               )}
             </TableBody>
           </Table>
@@ -1000,6 +1040,7 @@ function UserGroupDialog({ dlg, defaults, onClose, onSaved }: { dlg: { edit: Use
     };
     for (const v of Object.values(vals)) {
       if (v != null && (!Number.isFinite(v) || v < 0)) { setErr("限额需为非负数字,留空 = 继承全局,0 = 不限"); return; }
+      if (v != null && !Number.isInteger(v)) { setErr("限额需为整数"); return; }
     }
     try {
       if (edit) await api.patchUserGroup(edit.id, { name: name.trim(), ...vals });
@@ -1017,26 +1058,28 @@ function UserGroupDialog({ dlg, defaults, onClose, onSaved }: { dlg: { edit: Use
         </DialogHeader>
         <div className="space-y-3">
           <div><label className="mb-1 block text-xs text-muted-foreground">名称 *</label>
-            <Input placeholder="用户组名称" value={name} onChange={(e) => setName(e.target.value)} autoFocus /></div>
+            <Input placeholder="如:基础版 / 专业版 / 旗舰版" value={name} maxLength={32} onChange={(e) => setName(e.target.value)} autoFocus /></div>
           <div className="grid grid-cols-3 gap-3">
             <div><label className="mb-1 block text-xs text-muted-foreground">并发上限</label>
-              <Input placeholder={`默认 ${defaults.concurrency_limit}`} value={conc} onChange={(e) => setConc(e.target.value)} /></div>
-            <div><label className="mb-1 block text-xs text-muted-foreground">RPM</label>
-              <Input placeholder={`默认 ${defaults.rpm_limit}`} value={rpm} onChange={(e) => setRpm(e.target.value)} /></div>
-            <div><label className="mb-1 block text-xs text-muted-foreground">TPM</label>
-              <Input placeholder={`默认 ${defaults.tpm_limit}`} value={tpm} onChange={(e) => setTpm(e.target.value)} /></div>
+              <Input placeholder={`继承全局(${defaults.concurrency_limit})`} value={conc} onChange={(e) => setConc(e.target.value)} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">RPM(次/分)</label>
+              <Input placeholder={`继承全局(${defaults.rpm_limit})`} value={rpm} onChange={(e) => setRpm(e.target.value)} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">TPM(tokens/分)</label>
+              <Input placeholder={`继承全局(${defaults.tpm_limit})`} value={tpm} onChange={(e) => setTpm(e.target.value)} /></div>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div><label className="mb-1 block text-xs text-muted-foreground">日预算 tokens</label>
-              <Input placeholder="留空 = 继承全局" value={daily} onChange={(e) => setDaily(e.target.value)} /></div>
+              <Input placeholder="继承全局" value={daily} onChange={(e) => setDaily(e.target.value)} /></div>
             <div><label className="mb-1 block text-xs text-muted-foreground">月预算 tokens</label>
-              <Input placeholder="留空 = 继承全局" value={monthly} onChange={(e) => setMonthly(e.target.value)} /></div>
+              <Input placeholder="继承全局" value={monthly} onChange={(e) => setMonthly(e.target.value)} /></div>
           </div>
           {err && <p className="text-sm text-destructive">{err}</p>}
         </div>
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>取消</Button>
-          <Button onClick={submit} disabled={!name.trim()}><Plus className="h-4 w-4" />{edit ? "保存" : "创建"}</Button>
+          <Button onClick={submit} disabled={!name.trim()}>
+            {edit ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}{edit ? "保存" : "创建"}
+          </Button>
         </div>
       </DialogContent>
     </Dialog>
