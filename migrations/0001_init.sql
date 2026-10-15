@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS users (
   tpm_limit         INTEGER,                       -- 每分钟 token 上限(NULL=用全局默认)
   budget_daily_tokens  INTEGER,                    -- 日预算(charged tokens,NULL=不限)
   budget_monthly_tokens INTEGER,                    -- 月预算(charged tokens,NULL=不限)
+  user_group_id     INTEGER,                       -- 用户组(user_groups.id,NULL=不挂组,用全局默认)
+  password_changed  INTEGER NOT NULL DEFAULT 0,    -- 0=仍为初始密码(管理员可查看) 1=已修改
+  initial_password  TEXT,                          -- 初始密码明文(FIELD_SECRET 加密存储,password_changed=1 后清空)
   source            TEXT,                          -- 注册来源:admin|phone|wechat|alipay
   created_at        TEXT NOT NULL
 );
@@ -107,6 +110,19 @@ CREATE TABLE IF NOT EXISTS model_groups (
   is_active  INTEGER NOT NULL DEFAULT 0,   -- 1=激活(默认组),新用户注册默认绑定
   strategy   TEXT NOT NULL DEFAULT 'weighted_random', -- 负载策略:weighted_random(加权随机,当前)|(可扩展 weighted_round_robin 等)
   created_at TEXT NOT NULL
+);
+
+-- 用户组(限额模板):与模型组正交——模型组管"能用什么",用户组管"能用多少"。
+-- 限额字段 NULL=继承下层(全局默认),0=显式不限;用户显式设置 > 用户组 > 全局默认。
+CREATE TABLE IF NOT EXISTS user_groups (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  name                  TEXT NOT NULL UNIQUE,
+  max_concurrency       INTEGER,
+  rpm_limit             INTEGER,
+  tpm_limit             INTEGER,
+  budget_daily_tokens   BIGINT,
+  budget_monthly_tokens BIGINT,
+  created_at            TEXT NOT NULL
 );
 
 -- 组内路由:对外模型名 -> 指定模型(同名多条=加权/容灾)。按名精确路由。

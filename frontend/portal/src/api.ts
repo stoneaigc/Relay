@@ -60,6 +60,19 @@ export interface ModelCard {
   output_price: number | null;
 }
 
+/** 我的套餐与实时用量(limit 为 null = 不限)。 */
+export interface QuotaInfo {
+  plan: { id: number; name: string } | null;
+  balance: number;
+  concurrency: { limit: number | null; used: number };
+  rpm: { limit: number | null; used: number };
+  tpm: { limit: number | null; used: number };
+  budget: {
+    daily: { limit: number | null; used: number };
+    monthly: { limit: number | null; used: number };
+  };
+}
+
 export const api = {
   me: () => req("/portal/api/me"),
   balance: () => req("/portal/api/balance"),
@@ -70,6 +83,9 @@ export const api = {
     req("/portal/api/keys/rotate", { method: "POST", body: JSON.stringify({ interface_kind }) }),
   models: (): Promise<{ data: ModelCard[] }> => req("/portal/api/models"),
   summary: (): Promise<{ granted: number; used: number; balance: number }> => req("/portal/api/summary"),
+  quota: (): Promise<QuotaInfo> => req("/portal/api/quota"),
+  changePassword: (old_password: string, new_password: string) =>
+    req("/portal/api/auth/change_password", { method: "POST", body: JSON.stringify({ old_password, new_password }) }),
   series: (days?: number): Promise<{ data: { ts: number; tokens: number; calls: number }[] }> =>
     req(`/portal/api/series${typeof days === "number" ? `?days=${days}` : ""}`),
   usage: (page?: number, pageSize?: number): Promise<{ data: any[]; total: number; page: number; page_size: number; total_pages: number }> => {

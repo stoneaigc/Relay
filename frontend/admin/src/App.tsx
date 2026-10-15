@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
-import { Users as UsersIcon, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen } from "lucide-react";
-import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint } from "./api";
+import { Users as UsersIcon, UsersRound, KeyRound, Copy, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen } from "lucide-react";
+import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, UserGroupRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { copyText } from "./clipboard";
 import EChart, { cssVar } from "@/components/EChart";
 import type { EChartsCoreOption } from "echarts/core";
 import PaginationBar from "./PaginationBar";
@@ -76,6 +77,7 @@ const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: a
     title: "运营",
     items: [
       { path: "/users", label: "用户管理", icon: UsersIcon },
+      { path: "/user-groups", label: "用户组", icon: UsersRound },
       { path: "/rewards", label: "奖励审核", icon: Gift },
       { path: "/reward-tasks", label: "奖励设置", icon: Star },
     ],
@@ -195,6 +197,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
                 <Route path="/" element={<Navigate to="/overview" replace />} />
                 <Route path="/overview" element={<OverviewPanel />} />
                 <Route path="/users" element={<UsersPanel onAuthErr={onLogout} />} />
+                <Route path="/user-groups" element={<UserGroupsPanel />} />
                 <Route path="/models" element={<ModelsPanel />} />
                 <Route path="/upstreams" element={<UpstreamsPanel />} />
                 <Route path="/metrics" element={<MetricsPanel />} />
@@ -342,12 +345,13 @@ function Avatar({ name }: { name: string }) {
   );
 }
 
-function UserDialog({ dlg, groups, onClose, onSaved }: { dlg: { edit: UserRow | null } | null; groups: GroupRow[]; onClose: () => void; onSaved: () => void }) {
+function UserDialog({ dlg, groups, userGroups, onClose, onSaved }: { dlg: { edit: UserRow | null } | null; groups: GroupRow[]; userGroups: UserGroupRow[]; onClose: () => void; onSaved: () => void }) {
   const open = !!dlg;
   const edit = dlg?.edit ?? null;
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [groupId, setGroupId] = useState(0);
+  const [userGroupId, setUserGroupId] = useState(0);
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [conc, setConc] = useState("16");
@@ -355,14 +359,18 @@ function UserDialog({ dlg, groups, onClose, onSaved }: { dlg: { edit: UserRow | 
   const [budgetDaily, setBudgetDaily] = useState("");
   const [budgetMonthly, setBudgetMonthly] = useState("");
   const [err, setErr] = useState("");
+  const [created, setCreated] = useState<{ username: string; password: string } | null>(null);
+  const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (open) {
       setUsername(edit?.username ?? ""); setPassword(""); setGroupId(edit?.group_id ?? 0);
+      setUserGroupId(edit?.user_group_id ?? 0);
       setEmail(edit?.email ?? ""); setPhone(edit?.phone ?? "");
       setConc(String(edit?.concurrency_limit ?? 16));
       setAmount(edit ? "0" : "10000000"); setErr("");
       setBudgetDaily(edit?.budget_daily_tokens ? String(edit.budget_daily_tokens) : "");
       setBudgetMonthly(edit?.budget_monthly_tokens ? String(edit.budget_monthly_tokens) : "");
+      setCreated(null); setCopied(false);
     }
   }, [dlg]);
 
@@ -378,71 +386,109 @@ function UserDialog({ dlg, groups, onClose, onSaved }: { dlg: { edit: UserRow | 
       if (edit) {
         const body: any = {
           email: email.trim(), phone: phone.trim(),
-          group_id: groupId, concurrency_limit: Number(conc),
+          group_id: groupId, user_group_id: userGroupId, concurrency_limit: Number(conc),
           budget_daily_tokens: bd, budget_monthly_tokens: bm,
         };
         if (password) body.password = password;
         if (Number(amount)) body.add_tokens = Number(amount);
         await api.patchUser(edit.id, body);
       } else {
-        await api.createUser({
+        const r: any = await api.createUser({
           username: username.trim(), password,
           email: email.trim() || undefined, phone: phone.trim() || undefined,
-          group_id: groupId || undefined, grant_tokens: Number(amount) || 0,
+          group_id: groupId || undefined, user_group_id: userGroupId || undefined, grant_tokens: Number(amount) || 0,
           concurrency_limit: Number(conc),
           budget_daily_tokens: bd || undefined, budget_monthly_tokens: bm || undefined,
         });
+        if (r?.initial_password) setCreated({ username: username.trim(), password: r.initial_password });
       }
       onSaved(); onClose();
     } catch (e: any) { setErr(e.message); }
   };
   const sel = "h-9 w-full rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
+  const limitHint = "留空或 0 = 不限;未设置时继承用户组,再回落全局默认";
 
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>{edit ? "编辑用户" : "创建用户"}</DialogTitle>
-          {edit && <DialogDescription>当前余额 {edit.balance.toLocaleString()} tokens</DialogDescription>}
-        </DialogHeader>
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 gap-3">
-            <div><label className="mb-1 block text-xs text-muted-foreground">用户名{edit ? "(不可改)" : " *"}</label>
-              <Input placeholder="登录用户名" value={username} onChange={(e) => setUsername(e.target.value)} disabled={!!edit} autoFocus={!edit} /></div>
-            <div><label className="mb-1 block text-xs text-muted-foreground">{edit ? "密码(留空不改)" : "密码 *"}</label>
-              <Input type="password" placeholder={edit ? "留空保持不变" : "登录密码"} value={password} onChange={(e) => setPassword(e.target.value)} /></div>
+    <>
+      <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{edit ? "编辑用户" : "创建用户"}</DialogTitle>
+            {edit && <DialogDescription>当前余额 {edit.balance.toLocaleString()} tokens</DialogDescription>}
+          </DialogHeader>
+          <div className="space-y-3">
+            {edit && edit.password_changed === false && edit.initial_password && (
+              <div className="flex flex-wrap items-center gap-2 rounded-lg bg-indigo-500/10 px-3 py-2 text-sm text-indigo-600">
+                <span>该用户仍在使用初始密码:</span>
+                <span className="mono font-semibold text-indigo-700">{edit.initial_password}</span>
+                <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-indigo-600"
+                  onClick={async () => { if (await copyText(edit.initial_password!)) { setCopied(true); setTimeout(() => setCopied(false), 1500); } }}>
+                  {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}{copied ? "已复制" : "复制"}
+                </Button>
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-3">
+              <div><label className="mb-1 block text-xs text-muted-foreground">用户名{edit ? "(不可改)" : " *"}</label>
+                <Input placeholder="登录用户名" value={username} onChange={(e) => setUsername(e.target.value)} disabled={!!edit} autoFocus={!edit} /></div>
+              <div><label className="mb-1 block text-xs text-muted-foreground">{edit ? "密码(留空不改)" : "密码(留空自动生成)"}</label>
+                <Input type="password" placeholder={edit ? "留空保持不变" : "留空自动生成 16 位默认密码"} value={password} onChange={(e) => setPassword(e.target.value)} /></div>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <div><label className="mb-1 block text-xs text-muted-foreground">模型组</label>
+                <select value={groupId} onChange={(e) => setGroupId(Number(e.target.value))} className={sel}>
+                  <option value={0}>未绑定</option>
+                  {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                </select></div>
+              <div><label className="mb-1 block text-xs text-muted-foreground">用户组</label>
+                <select value={userGroupId} onChange={(e) => setUserGroupId(Number(e.target.value))} className={sel}>
+                  <option value={0}>未挂组</option>
+                  {userGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                </select></div>
+              <div><label className="mb-1 block text-xs text-muted-foreground">并发上限</label>
+                <Input value={conc} onChange={(e) => setConc(e.target.value)} /></div>
+            </div>
+            <p className="-mt-2 text-xs text-muted-foreground">{limitHint}</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div><label className="mb-1 block text-xs text-muted-foreground">邮箱(可选)</label>
+                <Input placeholder="name@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
+              <div><label className="mb-1 block text-xs text-muted-foreground">手机号(可选)</label>
+                <Input placeholder="13800000000" value={phone} onChange={(e) => setPhone(e.target.value)} /></div>
+            </div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">{edit ? "增减额度(可为负,0 不变)" : "赠送 tokens"}</label>
+              <Input value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
+            <div className="grid grid-cols-2 gap-3">
+              <div><label className="mb-1 block text-xs text-muted-foreground">日预算 tokens</label>
+                <Input placeholder="留空或 0 = 不限" value={budgetDaily} onChange={(e) => setBudgetDaily(e.target.value)} /></div>
+              <div><label className="mb-1 block text-xs text-muted-foreground">月预算 tokens</label>
+                <Input placeholder="留空或 0 = 不限" value={budgetMonthly} onChange={(e) => setBudgetMonthly(e.target.value)} /></div>
+            </div>
+            <p className="-mt-2 text-xs text-muted-foreground">{limitHint}</p>
+            {err && <p className="text-sm text-destructive">{err}</p>}
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div><label className="mb-1 block text-xs text-muted-foreground">模型组</label>
-              <select value={groupId} onChange={(e) => setGroupId(Number(e.target.value))} className={sel}>
-                <option value={0}>未绑定</option>
-                {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
-              </select></div>
-            <div><label className="mb-1 block text-xs text-muted-foreground">并发上限</label>
-              <Input value={conc} onChange={(e) => setConc(e.target.value)} /></div>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={onClose}>取消</Button>
+            <Button onClick={submit} disabled={!username.trim()}><Plus className="h-4 w-4" />{edit ? "保存" : "创建"}</Button>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div><label className="mb-1 block text-xs text-muted-foreground">邮箱(可选)</label>
-              <Input placeholder="name@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
-            <div><label className="mb-1 block text-xs text-muted-foreground">手机号(可选)</label>
-              <Input placeholder="13800000000" value={phone} onChange={(e) => setPhone(e.target.value)} /></div>
+        </DialogContent>
+      </Dialog>
+
+      {/* 创建成功结果:展示后端实际生效的初始密码明文 */}
+      <Dialog open={!!created} onOpenChange={(o) => !o && setCreated(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>用户已创建</DialogTitle>
+            <DialogDescription>用户「{created?.username}」的初始密码如下。</DialogDescription>
+          </DialogHeader>
+          <div className="flex items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2.5">
+            <span className="mono flex-1 break-all text-sm font-semibold">{created?.password}</span>
+            <Button size="sm" variant="outline" onClick={async () => { if (created && await copyText(created.password)) { setCopied(true); setTimeout(() => setCopied(false), 1500); } }}>
+              {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}{copied ? "已复制" : "复制"}
+            </Button>
           </div>
-          <div><label className="mb-1 block text-xs text-muted-foreground">{edit ? "增减额度(可为负,0 不变)" : "赠送 tokens"}</label>
-            <Input value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
-          <div className="grid grid-cols-2 gap-3">
-            <div><label className="mb-1 block text-xs text-muted-foreground">日预算 tokens</label>
-              <Input placeholder="留空或 0 = 不限" value={budgetDaily} onChange={(e) => setBudgetDaily(e.target.value)} /></div>
-            <div><label className="mb-1 block text-xs text-muted-foreground">月预算 tokens</label>
-              <Input placeholder="留空或 0 = 不限" value={budgetMonthly} onChange={(e) => setBudgetMonthly(e.target.value)} /></div>
-          </div>
-          {err && <p className="text-sm text-destructive">{err}</p>}
-        </div>
-        <div className="flex justify-end gap-2">
-          <Button variant="ghost" onClick={onClose}>取消</Button>
-          <Button onClick={submit} disabled={!username.trim() || (!edit && !password)}><Plus className="h-4 w-4" />{edit ? "保存" : "创建"}</Button>
-        </div>
-      </DialogContent>
-    </Dialog>
+          <p className="text-xs text-muted-foreground">用户首次登录后请引导其修改密码。</p>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -691,6 +737,7 @@ function BudgetBar({ label, used, budget }: { label: string; used: number; budge
 function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
   const [rows, setRows] = useState<UserRow[]>([]);
   const [groups, setGroups] = useState<GroupRow[]>([]);
+  const [userGroups, setUserGroups] = useState<UserGroupRow[]>([]);
   const [q, setQ] = useState("");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
@@ -698,13 +745,14 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
   const [userDlg, setUserDlg] = useState<{ edit: UserRow | null } | null>(null);
   const [chart, setChart] = useState<UserRow | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [pwdDlg, setPwdDlg] = useState<{ username: string; password: string } | null>(null);
   const qRef = useRef("");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = async () => {
     try {
-      const [u, g] = await Promise.all([api.users(page, pageSize, qRef.current || undefined), api.groups()]);
-      setRows(u.data); setGroups(g.data); setTotal(u.total);
+      const [u, g, ug] = await Promise.all([api.users(page, pageSize, qRef.current || undefined), api.groups(), api.userGroups()]);
+      setRows(u.data); setGroups(g.data); setUserGroups(ug.data); setTotal(u.total);
     } catch (e: any) { if (String(e.message).includes("auth")) onAuthErr(); }
   };
   useEffect(() => { load(); }, [page, pageSize]);
@@ -723,6 +771,11 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
   };
   const toggle = async (u: UserRow) => { await api.patchUser(u.id, { status: u.status === 0 ? 1 : 0 }); load(); };
   const bindGroup = async (u: UserRow, gid: number) => { await api.patchUser(u.id, { group_id: gid }); load(); };
+  const bindUserGroup = async (u: UserRow, gid: number) => { await api.patchUser(u.id, { user_group_id: gid }); load(); };
+  const resetPwd = async (u: UserRow) => {
+    const r = await api.resetUserPassword(u.id);
+    setPwdDlg({ username: u.username || u.phone || u.id.slice(0, 8), password: r.initial_password });
+  };
   const del = (u: UserRow) => setConfirm({
     title: `删除用户「${u.username || u.phone || u.id.slice(0, 8)}」?`,
     desc: "该用户及其 API Key 将被删除,无法恢复。",
@@ -747,7 +800,7 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
               <TableRow>
                 <TableHead>用户</TableHead><TableHead>来源</TableHead><TableHead>总量</TableHead><TableHead>已用</TableHead>
                 <TableHead>今日</TableHead><TableHead>预算</TableHead><TableHead>余额</TableHead><TableHead>并发</TableHead>
-                <TableHead>模型组</TableHead><TableHead>状态</TableHead><TableHead className="text-right">操作</TableHead>
+                <TableHead>模型组</TableHead><TableHead>用户组</TableHead><TableHead>状态</TableHead><TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -781,11 +834,19 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
                       {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
                     </select>
                   </TableCell>
+                  <TableCell>
+                    <select value={u.user_group_id ?? 0} onChange={(e) => bindUserGroup(u, Number(e.target.value))}
+                      className="h-8 rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring">
+                      <option value={0}>未挂组</option>
+                      {userGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                    </select>
+                  </TableCell>
                   <TableCell>{u.status === 0 ? <Badge variant="success">正常</Badge> : <Badge variant="muted">禁用</Badge>}</TableCell>
                   <TableCell>
                     <RowActions actions={[
                       { label: "趋势", icon: <TrendingUp className="h-4 w-4" />, onClick: () => setChart(u) },
                       { label: "编辑", icon: <Pencil className="h-4 w-4" />, onClick: () => setUserDlg({ edit: u }) },
+                      { label: "重置密码", icon: <KeyRound className="h-4 w-4" />, onClick: () => resetPwd(u) },
                       { label: u.status === 0 ? "禁用" : "启用", icon: <Power className="h-4 w-4" />, onClick: () => toggle(u) },
                       { label: "删除", icon: <Trash2 className="h-4 w-4" />, variant: "destructive", onClick: () => del(u) },
                     ]} />
@@ -798,10 +859,187 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
         </CardContent>
       </Card>
 
-      <UserDialog dlg={userDlg} groups={groups} onClose={() => setUserDlg(null)} onSaved={load} />
+      <UserDialog dlg={userDlg} groups={groups} userGroups={userGroups} onClose={() => setUserDlg(null)} onSaved={load} />
       <UserChartDialog user={chart} onClose={() => setChart(null)} />
+      <PasswordResultDialog info={pwdDlg} onClose={() => setPwdDlg(null)} />
       <ConfirmDialog confirm={confirm} onClose={() => setConfirm(null)} />
     </div>
+  );
+}
+
+/// 重置/创建用户后的初始密码展示:明文 + 一键复制(密码已存档,后台可随时查看)。
+function PasswordResultDialog({ info, onClose }: { info: { username: string; password: string } | null; onClose: () => void }) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => { if (info) setCopied(false); }, [info]);
+  return (
+    <Dialog open={!!info} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>重置密码成功</DialogTitle>
+          <DialogDescription>用户「{info?.username}」的新密码已生成。</DialogDescription>
+        </DialogHeader>
+        <div className="flex items-center gap-2 rounded-lg border bg-muted/40 px-3 py-2.5">
+          <span className="mono flex-1 break-all text-sm font-semibold">{info?.password}</span>
+          <Button size="sm" variant="outline" onClick={async () => { if (info && await copyText(info.password)) { setCopied(true); setTimeout(() => setCopied(false), 1500); } }}>
+            {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}{copied ? "已复制" : "复制"}
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground">请立即复制,该密码已存档可随时查看。</p>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** 限额单元格:null = 继承全局(灰字+悬浮提示默认值),0 = 不限。 */
+function LimitCell({ v, def }: { v: number | null; def?: number }) {
+  if (v == null) return <span className="text-xs text-muted-foreground" title={def != null ? `全局默认 ${def.toLocaleString()}` : undefined}>继承全局</span>;
+  if (v === 0) return <Badge variant="muted" className="text-[10px]">不限</Badge>;
+  return <span className="mono">{v.toLocaleString()}</span>;
+}
+
+function UserGroupsPanel() {
+  const [rows, setRows] = useState<UserGroupRow[]>([]);
+  const [defaults, setDefaults] = useState<{ concurrency_limit: number; rpm_limit: number; tpm_limit: number }>({ concurrency_limit: 0, rpm_limit: 0, tpm_limit: 0 });
+  const [dlg, setDlg] = useState<{ edit: UserGroupRow | null } | null>(null);
+  const [confirm, setConfirm] = useState<Confirm | null>(null);
+
+  const load = async () => {
+    const r = await api.userGroups();
+    setRows(r.data); setDefaults(r.defaults);
+  };
+  useEffect(() => { load(); }, []);
+
+  const del = (g: UserGroupRow) => setConfirm({
+    title: `删除用户组「${g.name}」?`,
+    desc: `组内 ${g.member_count} 个用户将解挂并回落全局默认限额。`,
+    action: async () => { await api.deleteUserGroup(g.id); load(); },
+  });
+
+  return (
+    <div className="space-y-5">
+      <Card>
+        <CardHeader>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <CardTitle className="text-base">用户组(限额模板)</CardTitle>
+              <CardDescription>用户组控制"能用多少"——并发 / 速率 / 预算;用户显式设置优先于组值,组值优先于全局默认。</CardDescription>
+            </div>
+            <Button size="sm" onClick={() => setDlg({ edit: null })}><Plus className="h-4 w-4" />创建用户组</Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>名称</TableHead><TableHead>并发上限</TableHead><TableHead>RPM</TableHead><TableHead>TPM</TableHead>
+                <TableHead>日预算</TableHead><TableHead>月预算</TableHead><TableHead>成员数</TableHead><TableHead className="text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((g) => (
+                <TableRow key={g.id}>
+                  <TableCell className="font-medium">{g.name}</TableCell>
+                  <TableCell><LimitCell v={g.max_concurrency} def={defaults.concurrency_limit} /></TableCell>
+                  <TableCell><LimitCell v={g.rpm_limit} def={defaults.rpm_limit} /></TableCell>
+                  <TableCell><LimitCell v={g.tpm_limit} def={defaults.tpm_limit} /></TableCell>
+                  <TableCell><LimitCell v={g.budget_daily_tokens} /></TableCell>
+                  <TableCell><LimitCell v={g.budget_monthly_tokens} /></TableCell>
+                  <TableCell className="mono">{g.member_count}</TableCell>
+                  <TableCell>
+                    <RowActions actions={[
+                      { label: "编辑", icon: <Pencil className="h-4 w-4" />, onClick: () => setDlg({ edit: g }) },
+                      { label: "删除", icon: <Trash2 className="h-4 w-4" />, variant: "destructive", onClick: () => del(g) },
+                    ]} />
+                  </TableCell>
+                </TableRow>
+              ))}
+              {rows.length === 0 && (
+                <TableRow><TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">还没有用户组,创建后可在用户管理里批量套用限额</TableCell></TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+
+      <UserGroupDialog dlg={dlg} defaults={defaults} onClose={() => setDlg(null)} onSaved={load} />
+      <ConfirmDialog confirm={confirm} onClose={() => setConfirm(null)} />
+    </div>
+  );
+}
+
+function UserGroupDialog({ dlg, defaults, onClose, onSaved }: { dlg: { edit: UserGroupRow | null } | null; defaults: { concurrency_limit: number; rpm_limit: number; tpm_limit: number }; onClose: () => void; onSaved: () => void }) {
+  const open = !!dlg;
+  const edit = dlg?.edit ?? null;
+  const [name, setName] = useState("");
+  const [conc, setConc] = useState("");
+  const [rpm, setRpm] = useState("");
+  const [tpm, setTpm] = useState("");
+  const [daily, setDaily] = useState("");
+  const [monthly, setMonthly] = useState("");
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    if (open) {
+      setName(edit?.name ?? ""); setErr("");
+      setConc(edit?.max_concurrency == null ? "" : String(edit.max_concurrency));
+      setRpm(edit?.rpm_limit == null ? "" : String(edit.rpm_limit));
+      setTpm(edit?.tpm_limit == null ? "" : String(edit.tpm_limit));
+      setDaily(edit?.budget_daily_tokens == null ? "" : String(edit.budget_daily_tokens));
+      setMonthly(edit?.budget_monthly_tokens == null ? "" : String(edit.budget_monthly_tokens));
+    }
+  }, [dlg]);
+
+  // 空串 = null(继承全局默认),数字 = 显式限额,0 = 不限
+  const num = (s: string) => (s.trim() === "" ? null : Number(s));
+
+  const submit = async () => {
+    setErr("");
+    if (!name.trim()) { setErr("请输入用户组名称"); return; }
+    const vals = {
+      max_concurrency: num(conc), rpm_limit: num(rpm), tpm_limit: num(tpm),
+      budget_daily_tokens: num(daily), budget_monthly_tokens: num(monthly),
+    };
+    for (const v of Object.values(vals)) {
+      if (v != null && (!Number.isFinite(v) || v < 0)) { setErr("限额需为非负数字,留空 = 继承全局,0 = 不限"); return; }
+    }
+    try {
+      if (edit) await api.patchUserGroup(edit.id, { name: name.trim(), ...vals });
+      else await api.addUserGroup({ name: name.trim(), ...vals });
+      onSaved(); onClose();
+    } catch (e: any) { setErr(e.message); }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{edit ? "编辑用户组" : "创建用户组"}</DialogTitle>
+          <DialogDescription>留空 = 继承全局默认,0 = 显式不限;改完组限额会自动重算组内用户的生效限额。</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div><label className="mb-1 block text-xs text-muted-foreground">名称 *</label>
+            <Input placeholder="用户组名称" value={name} onChange={(e) => setName(e.target.value)} autoFocus /></div>
+          <div className="grid grid-cols-3 gap-3">
+            <div><label className="mb-1 block text-xs text-muted-foreground">并发上限</label>
+              <Input placeholder={`默认 ${defaults.concurrency_limit}`} value={conc} onChange={(e) => setConc(e.target.value)} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">RPM</label>
+              <Input placeholder={`默认 ${defaults.rpm_limit}`} value={rpm} onChange={(e) => setRpm(e.target.value)} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">TPM</label>
+              <Input placeholder={`默认 ${defaults.tpm_limit}`} value={tpm} onChange={(e) => setTpm(e.target.value)} /></div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="mb-1 block text-xs text-muted-foreground">日预算 tokens</label>
+              <Input placeholder="留空 = 继承全局" value={daily} onChange={(e) => setDaily(e.target.value)} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">月预算 tokens</label>
+              <Input placeholder="留空 = 继承全局" value={monthly} onChange={(e) => setMonthly(e.target.value)} /></div>
+          </div>
+          {err && <p className="text-sm text-destructive">{err}</p>}
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>取消</Button>
+          <Button onClick={submit} disabled={!name.trim()}><Plus className="h-4 w-4" />{edit ? "保存" : "创建"}</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

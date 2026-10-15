@@ -230,6 +230,24 @@ impl UserState {
         win.push_back((now, tokens));
     }
 
+    /// 当前 RPM 滑动窗口内的请求数(门户配额展示用)。
+    pub fn rpm_used(&self) -> u32 {
+        let now = Self::now_secs();
+        let g = self.rate.lock().unwrap();
+        g.rpm.iter().filter(|&&t| t > now - RATE_WINDOW_SECS).count() as u32
+    }
+
+    /// 当前 TPM 滑动窗口内的 token 消耗(门户配额展示用)。
+    pub fn tpm_used(&self) -> u32 {
+        let now = Self::now_secs();
+        let g = self.rate.lock().unwrap();
+        g.tpm
+            .iter()
+            .filter(|&&(t, _)| t > now - RATE_WINDOW_SECS)
+            .map(|&(_, tok)| tok)
+            .sum()
+    }
+
     pub fn group(&self) -> i64 {
         self.group_id.load(Ordering::Relaxed)
     }

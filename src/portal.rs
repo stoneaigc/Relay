@@ -124,9 +124,20 @@ pub async fn register(
     let active_group = storage::active_group_id(&state.db)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let id = storage::admin_create_user(&state.db, email, &pwhash, Some(email), None, grant, active_group, "email")
-        .await
-        .map_err(|_| ApiError::BadRequest("该邮箱已注册".into()))?;
+    let id = storage::admin_create_user(
+        &state.db,
+        email,
+        &pwhash,
+        Some(email),
+        None,
+        grant,
+        active_group,
+        "email",
+        None,
+        None,
+    )
+    .await
+    .map_err(|_| ApiError::BadRequest("该邮箱已注册".into()))?;
     let us = Arc::new(UserState::new(id, grant, 0, limit, 0, 1.0, active_group.unwrap_or(0)));
     us.set_limits(rpm, tpm);
     state.users.insert(id, us);
@@ -169,12 +180,54 @@ pub async fn reset_password(
     storage::update_user_fields(&state.db, id, None, None, None, Some(&pwhash))
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // 自助重置 = 用户已知新密码,标记已改密(管理员端不再展示初始密码)。
+    storage::mark_password_changed(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     let (secret, ttl) = {
         let cfg = state.config();
         (cfg.auth.jwt_secret.clone(), cfg.auth.session_ttl_secs)
     };
     let token = jwt::issue(&secret, &id.to_string(), "portal", ttl)?;
     Ok(Json(json!({ "token": token, "user": { "id": id } })))
+}
+
+#[derive(Deserialize)]
+pub struct ChangePassword {
+    pub old_password: String,
+    pub new_password: String,
+}
+
+/// POST /portal/auth/change_password —— 已登录用户自助修改密码。
+pub async fn change_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ChangePassword>,
+) -> Result<Json<Value>, ApiError> {
+    let uid = portal_user(&state, &headers)?;
+    if body.new_password.len() < 8 {
+        return Err(ApiError::BadRequest("新密码至少 8 位".into()));
+    }
+    // 旧密码校验(与登录同口径;无哈希账号视为校验失败)。
+    let Some(stored) = storage::get_user_password_hash(&state.db, uid)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+    else {
+        return Err(ApiError::BadRequest("该账号未设置密码".into()));
+    };
+    let (ok, _legacy) = storage::verify_password(&stored, &body.old_password);
+    if !ok {
+        return Err(ApiError::InvalidCredentials);
+    }
+    let new_hash = storage::hash_password(&body.new_password);
+    storage::update_user_fields(&state.db, uid, None, None, None, Some(&new_hash))
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // 自助改密后管理员端不再展示初始密码。
+    storage::mark_password_changed(&state.db, uid)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]
@@ -298,6 +351,58 @@ pub async fn summary(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({ "granted": used + balance, "used": used, "balance": balance })))
+}
+
+/// GET /portal/quota —— 我的套餐与实时用量(并发/RPM/TPM/日·月预算)。
+/// limit 为 null = 不限;数值口径与解析链一致(用户显式 > 用户组 > 全局默认)。
+pub async fn quota(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let uid = portal_user(&state, &headers)?;
+    let u = state.user(&uid).ok_or(ApiError::InvalidKey)?;
+    let row = storage::get_user(&state.db, uid)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or(ApiError::InvalidKey)?;
+    let group = match row.user_group_id {
+        Some(g) => storage::get_user_group(&state.db, g)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+        None => None,
+    };
+    let cl = u.concurrency_limit.load(std::sync::atomic::Ordering::Relaxed);
+    let conc_limit = if cl == u32::MAX { Value::Null } else { json!(cl) };
+    let rpm_limit = u.rpm_limit.load(std::sync::atomic::Ordering::Relaxed);
+    let tpm_limit = u.tpm_limit.load(std::sync::atomic::Ordering::Relaxed);
+    let bd = u.budget_daily.load(std::sync::atomic::Ordering::Relaxed);
+    let bm = u.budget_monthly.load(std::sync::atomic::Ordering::Relaxed);
+    Ok(Json(json!({
+        "plan": group.as_ref().map(|g| json!({ "id": g.id, "name": g.name })),
+        "balance": u.balance(),
+        "concurrency": {
+            "limit": conc_limit,
+            "used": u.in_flight,
+        },
+        "rpm": {
+            "limit": if rpm_limit == 0 { Value::Null } else { json!(rpm_limit) },
+            "used": u.rpm_used(),
+        },
+        "tpm": {
+            "limit": if tpm_limit == 0 { Value::Null } else { json!(tpm_limit) },
+            "used": u.tpm_used(),
+        },
+        "budget": {
+            "daily": {
+                "limit": if bd == 0 { Value::Null } else { json!(bd) },
+                "used": u.used_daily.load(std::sync::atomic::Ordering::Relaxed),
+            },
+            "monthly": {
+                "limit": if bm == 0 { Value::Null } else { json!(bm) },
+                "used": u.used_monthly.load(std::sync::atomic::Ordering::Relaxed),
+            },
+        },
+    })))
 }
 
 /// GET /portal/keys —— 我的 Key(仅掩码)。

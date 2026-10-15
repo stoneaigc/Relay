@@ -257,7 +257,17 @@ pub async fn list_users(
     let used_map = storage::usage_by_user(&state.db, None).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     let today_map = storage::usage_by_user(&state.db, Some(storage::today_start(tz))).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     let month_map = storage::usage_by_user(&state.db, Some(storage::month_start(tz))).await.map_err(|e| ApiError::Internal(e.to_string()))?;
-
+    // 用户组名称映射(展示继承来源)。
+    let group_names: std::collections::HashMap<i64, String> = storage::list_user_groups(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .into_iter()
+        .filter_map(|g| {
+            let id = g.get("id")?.as_i64()?;
+            let name = g.get("name")?.as_str()?.to_string();
+            Some((id, name))
+        })
+        .collect();
     let data: Vec<Value> = rows
         .iter()
         .map(|u| {
@@ -266,6 +276,15 @@ pub async fn list_users(
             let uid = u.id.to_string();
             let used = used_map.get(&uid).copied().unwrap_or(0);
             let today = today_map.get(&uid).copied().unwrap_or(0);
+            // 内存哨兵 u32::MAX(不限)对外呈现为 0。
+            let live_cl = live
+                .as_ref()
+                .map(|x| x.concurrency_limit.load(Ordering::Relaxed))
+                .filter(|v| *v != u32::MAX)
+                .map(|v| v as i64);
+            let ug_name = u
+                .user_group_id
+                .and_then(|g| group_names.get(&g).cloned());
             json!({
                 "id": u.id,
                 "username": u.username,
@@ -277,8 +296,12 @@ pub async fn list_users(
                 "today": today,
                 "used_month": month_map.get(&uid).copied().unwrap_or(0),
                 "granted": used + balance,
-                "concurrency_limit": live.as_ref().map(|x| x.concurrency_limit.load(Ordering::Relaxed) as i64).or(u.concurrency_limit),
+                "concurrency_limit": live_cl.or(u.concurrency_limit),
                 "group_id": live.as_ref().map(|x| x.group()).unwrap_or(u.group_id.unwrap_or(0)),
+                "user_group_id": u.user_group_id,
+                "user_group_name": ug_name,
+                "password_changed": u.password_changed,
+                "initial_password": u.initial_password,
                 "budget_daily_tokens": u.budget_daily_tokens,
                 "budget_monthly_tokens": u.budget_monthly_tokens,
                 "source": u.source,
@@ -298,10 +321,12 @@ pub async fn list_users(
 #[derive(Deserialize)]
 pub struct CreateUser {
     pub username: String,
-    pub password: String,
+    /// 可空:留空则自动生成 16 位默认密码(加密存档,创建后可查看/复制)。
+    pub password: Option<String>,
     pub email: Option<String>,
     pub phone: Option<String>,
     pub group_id: Option<i64>,
+    pub user_group_id: Option<i64>,
     pub grant_tokens: Option<i64>,
     pub concurrency_limit: Option<i64>,
     pub rpm_limit: Option<i64>,
@@ -317,12 +342,28 @@ pub async fn create_user(
     Json(body): Json<CreateUser>,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
-    if body.username.trim().is_empty() || body.password.is_empty() {
-        return Err(ApiError::BadRequest("username and password required".into()));
+    if body.username.trim().is_empty() {
+        return Err(ApiError::BadRequest("username required".into()));
     }
-    // 与 portal 注册口径一致:密码最低 8 位,避免管理端成为弱密码后门。
-    if body.password.len() < 8 {
-        return Err(ApiError::BadRequest("密码至少 8 位".into()));
+    // 密码可空:留空自动生成 16 位默认密码;手填则最低 8 位(与门户注册口径一致)。
+    let initial_plain = match body.password.as_deref().filter(|p| !p.is_empty()) {
+        Some(p) => {
+            if p.len() < 8 {
+                return Err(ApiError::BadRequest("密码至少 8 位".into()));
+            }
+            p.to_string()
+        }
+        None => storage::gen_default_password(),
+    };
+    // 用户组校验(0/None = 不挂组)。
+    let ugid = body.user_group_id.filter(|g| *g > 0);
+    if let Some(g) = ugid {
+        let exists = storage::user_group_exists(&state.db, g)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        if !exists {
+            return Err(ApiError::BadRequest("用户组不存在".into()));
+        }
     }
     let (grant, default_limit, default_rpm, default_tpm) = {
         let cfg = state.config();
@@ -333,15 +374,40 @@ pub async fn create_user(
             cfg.defaults.tpm_limit,
         )
     };
-    let limit = body.concurrency_limit.map(|v| v as u32).unwrap_or(default_limit);
+    // 用户组作为限额下层的生效值(用户未显式设置时)。
+    let ug = match ugid {
+        Some(g) => storage::get_user_group(&state.db, g)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+        None => None,
+    };
+    let resolve_cl = |user_v: Option<i64>, group_v: Option<i64>| -> u32 {
+        user_v
+            .or(group_v)
+            .map(|v| v.max(0) as u32)
+            .unwrap_or(default_limit)
+    };
+    let cl = resolve_cl(body.concurrency_limit, ug.as_ref().and_then(|g| g.max_concurrency));
+    let limit = if cl == 0 { u32::MAX } else { cl };
     let gid = body.group_id.filter(|g| *g > 0);
-    let pwhash = storage::hash_password(&body.password);
+    let pwhash = storage::hash_password(&initial_plain);
     let email = body.email.as_deref().filter(|s| !s.is_empty());
     let phone = body.phone.as_deref().filter(|s| !s.is_empty());
 
-    let id = storage::admin_create_user(&state.db, body.username.trim(), &pwhash, email, phone, grant, gid, "admin")
-        .await
-        .map_err(|_| ApiError::BadRequest("用户名或手机号已存在".into()))?;
+    let id = storage::admin_create_user(
+        &state.db,
+        body.username.trim(),
+        &pwhash,
+        email,
+        phone,
+        grant,
+        gid,
+        "admin",
+        ugid,
+        Some(&initial_plain),
+    )
+    .await
+    .map_err(|_| ApiError::BadRequest("用户名或手机号已存在".into()))?;
     if body.concurrency_limit.is_some()
         || body.rpm_limit.is_some()
         || body.tpm_limit.is_some()
@@ -358,21 +424,35 @@ pub async fn create_user(
             body.tpm_limit,
             body.budget_daily_tokens,
             body.budget_monthly_tokens,
+            ugid,
         )
         .await
         .ok();
     }
+    let rpm = body
+        .rpm_limit
+        .or(ug.as_ref().and_then(|g| g.rpm_limit))
+        .map(|v| v.max(0) as u32)
+        .unwrap_or(default_rpm);
+    let tpm = body
+        .tpm_limit
+        .or(ug.as_ref().and_then(|g| g.tpm_limit))
+        .map(|v| v.max(0) as u32)
+        .unwrap_or(default_tpm);
     let us = Arc::new(UserState::new(id, grant, 0, limit, 0, 1.0, gid.unwrap_or(0)));
-    us.set_limits(
-        body.rpm_limit.map(|v| v.max(0) as u32).unwrap_or(default_rpm),
-        body.tpm_limit.map(|v| v.max(0) as u32).unwrap_or(default_tpm),
-    );
+    us.set_limits(rpm, tpm);
     us.set_budgets(
-        body.budget_daily_tokens.unwrap_or(0),
-        body.budget_monthly_tokens.unwrap_or(0),
+        body.budget_daily_tokens
+            .or(ug.as_ref().and_then(|g| g.budget_daily))
+            .unwrap_or(0)
+            .max(0),
+        body.budget_monthly_tokens
+            .or(ug.as_ref().and_then(|g| g.budget_monthly))
+            .unwrap_or(0)
+            .max(0),
     );
     state.users.insert(id, us);
-    Ok(Json(json!({ "id": id })))
+    Ok(Json(json!({ "id": id, "initial_password": initial_plain })))
 }
 
 /// GET /admin/users/:id
@@ -387,16 +467,24 @@ pub async fn get_user(
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or_else(|| ApiError::BadRequest("user not found".into()))?;
     let balance = state.user(&id).map(|x| x.balance()).unwrap_or(u.token_balance);
+    let live_cl = state
+        .user(&id)
+        .map(|x| x.concurrency_limit.load(Ordering::Relaxed))
+        .filter(|v| *v != u32::MAX)
+        .map(|v| v as i64);
     Ok(Json(json!({
         "id": u.id,
         "phone": u.phone,
         "status": u.status,
         "balance": balance,
         "used_total": u.token_used_total,
-        "concurrency_limit": u.concurrency_limit,
+        "concurrency_limit": live_cl.or(u.concurrency_limit),
         "multiplier": u.bill_multiplier,
         "rpm_limit": u.rpm_limit,
         "tpm_limit": u.tpm_limit,
+        "user_group_id": u.user_group_id,
+        "password_changed": u.password_changed,
+        "initial_password": u.initial_password,
         "created_at": u.created_at,
     })))
 }
@@ -407,7 +495,8 @@ pub struct PatchUser {
     pub status: Option<i64>,
     pub add_tokens: Option<i64>,
     pub bill_multiplier: Option<f64>,
-    pub group_id: Option<i64>, // 绑定模型组(0 = 解绑)
+    pub group_id: Option<i64>,   // 绑定模型组(0 = 解绑)
+    pub user_group_id: Option<i64>, // 用户组限额模板(0 = 解挂)
     pub rpm_limit: Option<i64>,
     pub tpm_limit: Option<i64>,
     pub budget_daily_tokens: Option<i64>,
@@ -437,9 +526,21 @@ pub async fn patch_user(
         body.tpm_limit,
         body.budget_daily_tokens,
         body.budget_monthly_tokens,
+        body.user_group_id.filter(|g| *g > 0),
     )
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // 用户组:0 = 解挂(NULL)。
+    if body.user_group_id == Some(0) {
+        storage::set_user_user_group(&state.db, id, None)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
+    // 用户组变更后,按解析链重算内存限额(用户显式值 > 组值 > 全局默认)。
+    if body.user_group_id.is_some() {
+        let gid = body.user_group_id.filter(|g| *g > 0);
+        recompute_members(&state, vec![id], gid).await?;
+    }
     if let Some(delta) = body.add_tokens {
         storage::add_tokens(&state.db, id, delta)
             .await
@@ -448,7 +549,9 @@ pub async fn patch_user(
 
     if let Some(u) = state.user(&id) {
         if let Some(cl) = body.concurrency_limit {
-            u.concurrency_limit.store(cl as u32, Ordering::Relaxed);
+            // 0 = 显式不限(与解析链语义一致)。
+            u.concurrency_limit
+                .store(if cl == 0 { u32::MAX } else { cl as u32 }, Ordering::Relaxed);
         }
         if let Some(st) = body.status {
             u.status.store(st as u8, Ordering::Relaxed);
@@ -498,6 +601,12 @@ pub async fn patch_user(
         .await
         .map_err(|_| ApiError::BadRequest("用户名或手机号已被占用".into()))?;
     }
+    // 管理员手动指定密码 = 用户已知新密码,标记已改密(初始密码存档随之清空)。
+    if pwhash.is_some() {
+        storage::mark_password_changed(&state.db, id)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -516,6 +625,190 @@ pub async fn delete_user(
     }
     state.users.remove(&id);
     Ok(Json(json!({ "ok": true })))
+}
+
+// ---- 用户组(限额模板) ----
+
+/// GET /admin/user-groups
+pub async fn list_user_groups(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let cfg = state.config();
+    let items = storage::list_user_groups(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({
+        "data": items,
+        "defaults": {
+            "concurrency_limit": cfg.defaults.concurrency_limit,
+            "rpm_limit": cfg.defaults.rpm_limit,
+            "tpm_limit": cfg.defaults.tpm_limit,
+        }
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct UserGroupBody {
+    pub name: String,
+    /// 全部可空:NULL=继承全局默认,0=显式不限。
+    pub max_concurrency: Option<i64>,
+    pub rpm_limit: Option<i64>,
+    pub tpm_limit: Option<i64>,
+    pub budget_daily_tokens: Option<i64>,
+    pub budget_monthly_tokens: Option<i64>,
+}
+
+/// POST /admin/user-groups
+pub async fn create_user_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<UserGroupBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("用户组名称不能为空".into()));
+    }
+    let id = storage::create_user_group(
+        &state.db,
+        name,
+        body.max_concurrency,
+        body.rpm_limit,
+        body.tpm_limit,
+        body.budget_daily_tokens,
+        body.budget_monthly_tokens,
+    )
+    .await
+    .map_err(|_| ApiError::BadRequest("用户组名称已存在".into()))?;
+    Ok(Json(json!({ "id": id })))
+}
+
+/// PATCH /admin/user-groups/:id
+pub async fn update_user_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<UserGroupBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("用户组名称不能为空".into()));
+    }
+    storage::update_user_group(
+        &state.db,
+        id,
+        name,
+        body.max_concurrency,
+        body.rpm_limit,
+        body.tpm_limit,
+        body.budget_daily_tokens,
+        body.budget_monthly_tokens,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // 组限额变更 → 组内所有用户的内存限额按解析链重算。
+    let members = current_group_members(&state, id).await?;
+    recompute_members(&state, members, Some(id)).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// DELETE /admin/user-groups/:id
+pub async fn delete_user_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    // 先取组员(删除后即解挂,查不到了)。
+    let members = current_group_members(&state, id).await?;
+    storage::delete_user_group(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // 组员已全部解挂 → 内存限额回落全局默认。
+    recompute_members(&state, members, None).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn current_group_members(state: &Arc<AppState>, group_id: i64) -> Result<Vec<Uuid>, ApiError> {
+    Ok(storage::list_user_group_members(&state.db, group_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .into_iter()
+        .filter_map(|s| Uuid::parse_str(&s).ok())
+        .collect())
+}
+
+/// 按「用户显式值 > 用户组值 > 全局默认」重算一批用户的内存限额。
+/// group_id=None 表示用户已解挂(按无组重算)。
+async fn recompute_members(
+    state: &Arc<AppState>,
+    members: Vec<Uuid>,
+    group_id: Option<i64>,
+) -> Result<(), ApiError> {
+    let (dc, dr, dt) = {
+        let cfg = state.config();
+        (cfg.defaults.concurrency_limit, cfg.defaults.rpm_limit, cfg.defaults.tpm_limit)
+    };
+    let grp = match group_id {
+        Some(g) => storage::get_user_group(&state.db, g)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+        None => None,
+    };
+    for uid in members {
+        let Some(u) = state.user(&uid) else { continue };
+        let row = storage::get_user(&state.db, uid)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        let Some(row) = row else { continue };
+        let cl = row
+            .concurrency_limit
+            .or(grp.as_ref().and_then(|g| g.max_concurrency))
+            .map(|v| v.max(0) as u32)
+            .unwrap_or(dc);
+        u.concurrency_limit.store(if cl == 0 { u32::MAX } else { cl }, Ordering::Relaxed);
+        let rpm = row
+            .rpm_limit
+            .or(grp.as_ref().and_then(|g| g.rpm_limit))
+            .map(|v| v.max(0) as u32)
+            .unwrap_or(dr);
+        let tpm = row
+            .tpm_limit
+            .or(grp.as_ref().and_then(|g| g.tpm_limit))
+            .map(|v| v.max(0) as u32)
+            .unwrap_or(dt);
+        u.set_limits(rpm, tpm);
+        u.set_budgets(
+            row.budget_daily_tokens
+                .or(grp.as_ref().and_then(|g| g.budget_daily))
+                .unwrap_or(0)
+                .max(0),
+            row.budget_monthly_tokens
+                .or(grp.as_ref().and_then(|g| g.budget_monthly))
+                .unwrap_or(0)
+                .max(0),
+        );
+    }
+    Ok(())
+}
+
+/// POST /admin/users/:id/reset-password —— 管理员重置密码:生成 16 位新密码,
+/// 置 password_changed=0(后台可再次查看),返回明文一次。
+pub async fn reset_user_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let plain = storage::gen_default_password();
+    let pwhash = storage::hash_password(&plain);
+    storage::admin_reset_password(&state.db, id, &pwhash, &plain)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "initial_password": plain })))
 }
 
 /// GET /admin/users/:id/series?days= —— 该用户最近 N 天每日消耗(默认 30,7~90)。

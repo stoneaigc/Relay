@@ -55,6 +55,35 @@ export interface UserRow {
   budget_monthly_tokens: number | null;
   source: string | null;
   created_at: string;
+  /** 所属用户组(限额模板);0/null = 未挂组 */
+  user_group_id?: number | null;
+  user_group_name?: string | null;
+  /** false = 仍在使用初始密码 */
+  password_changed?: boolean;
+  /** 实际生效的初始密码明文;仅未改密时非空 */
+  initial_password?: string | null;
+}
+
+/** 用户组(限额模板):控制"能用多少"——并发/速率/预算;null = 继承全局默认,0 = 显式不限 */
+export interface UserGroupRow {
+  id: number;
+  name: string;
+  max_concurrency: number | null;
+  rpm_limit: number | null;
+  tpm_limit: number | null;
+  budget_daily_tokens: number | null;
+  budget_monthly_tokens: number | null;
+  member_count: number;
+  created_at: string;
+}
+
+export interface UserGroupPayload {
+  name: string;
+  max_concurrency?: number | null;
+  rpm_limit?: number | null;
+  tpm_limit?: number | null;
+  budget_daily_tokens?: number | null;
+  budget_monthly_tokens?: number | null;
 }
 
 export interface ModelRow {
@@ -205,7 +234,7 @@ export const api = {
     const s = qs.toString();
     return req(`/admin/api/users${s ? "?" + s : ""}`);
   },
-  createUser: (body: { username: string; password: string; email?: string; phone?: string; group_id?: number; grant_tokens?: number; concurrency_limit?: number; budget_daily_tokens?: number; budget_monthly_tokens?: number }) =>
+  createUser: (body: { username: string; password: string; email?: string; phone?: string; group_id?: number; user_group_id?: number; grant_tokens?: number; concurrency_limit?: number; budget_daily_tokens?: number; budget_monthly_tokens?: number }) =>
     req("/admin/api/users", { method: "POST", body: JSON.stringify(body) }),
   patchUser: (id: string, body: any) =>
     req(`/admin/api/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
@@ -219,6 +248,18 @@ export const api = {
     const s = qs.toString();
     return req(`/admin/api/users/${id}/usage${s ? "?" + s : ""}`);
   },
+  /** 管理员重置用户密码:生成 16 位新密码并返回明文(已存档,后台可再次查看) */
+  resetUserPassword: (id: string): Promise<{ initial_password: string }> =>
+    req(`/admin/api/users/${id}/reset-password`, { method: "POST" }),
+
+  // ---- 用户组(限额模板):null = 继承全局默认,0 = 显式不限 ----
+  userGroups: (): Promise<{ data: UserGroupRow[]; defaults: { concurrency_limit: number; rpm_limit: number; tpm_limit: number } }> =>
+    req("/admin/api/user-groups"),
+  addUserGroup: (body: UserGroupPayload) =>
+    req("/admin/api/user-groups", { method: "POST", body: JSON.stringify(body) }),
+  patchUserGroup: (id: number, body: UserGroupPayload) =>
+    req(`/admin/api/user-groups/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteUserGroup: (id: number) => req(`/admin/api/user-groups/${id}`, { method: "DELETE" }),
 
   // ---- 上游供应商(Provider) ----
   providers: (page?: number, page_size?: number): Promise<{ data: ProviderRow[]; page: number; page_size: number; total: number; total_pages: number }> =>

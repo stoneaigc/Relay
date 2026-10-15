@@ -309,6 +309,16 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE users ADD COLUMN IF NOT EXISTS budget_monthly_tokens BIGINT")
             .execute(pool)
             .await;
+        // 用户组(限额模板)+ 初始密码体系。
+        let _ = q!("ALTER TABLE users ADD COLUMN IF NOT EXISTS user_group_id BIGINT")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed BIGINT NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE users ADD COLUMN IF NOT EXISTS initial_password TEXT")
+            .execute(pool)
+            .await;
         // 用量日志:密钥归因 + 计费口径成本(USD)。
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS key_id TEXT")
             .execute(pool)
@@ -334,6 +344,12 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE users ADD COLUMN tpm_limit INTEGER").execute(pool).await;
         let _ = q!("ALTER TABLE users ADD COLUMN budget_daily_tokens INTEGER").execute(pool).await;
         let _ = q!("ALTER TABLE users ADD COLUMN budget_monthly_tokens INTEGER").execute(pool).await;
+        // 用户组(限额模板)+ 初始密码体系。
+        let _ = q!("ALTER TABLE users ADD COLUMN user_group_id INTEGER").execute(pool).await;
+        let _ = q!("ALTER TABLE users ADD COLUMN password_changed INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE users ADD COLUMN initial_password TEXT").execute(pool).await;
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN ts INTEGER NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
@@ -419,6 +435,28 @@ pub fn hash_password(pw: &str) -> String {
         .to_string()
 }
 
+/// 生成 16 位默认密码:大小写字母 + 数字(剔除易混淆的 0/O/1/l/I),保证含三类字符。
+pub fn gen_default_password() -> String {
+    use rand::Rng;
+    const UPPER: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ";
+    const LOWER: &[u8] = b"abcdefghijkmnpqrstuvwxyz";
+    const DIGIT: &[u8] = b"23456789";
+    let mut rng = rand::thread_rng();
+    // 保证三类至少各 1 位,其余从三类混合取。
+    let mut pick = |set: &[u8]| set[rng.gen_range(0..set.len())] as char;
+    let mut chars: Vec<char> = vec![pick(UPPER), pick(LOWER), pick(DIGIT)];
+    let all: Vec<u8> = [UPPER, LOWER, DIGIT].concat();
+    while chars.len() < 16 {
+        chars.push(pick(&all));
+    }
+    // Fisher-Yates 洗牌避免前三类固定在开头。
+    for i in (1..chars.len()).rev() {
+        let j = rng.gen_range(0..=i);
+        chars.swap(i, j);
+    }
+    chars.into_iter().collect()
+}
+
 /// 校验口令:自动识别 argon2 PHC 串与旧版无盐 sha256 hex 串(历史数据)。
 /// 返回 (是否匹配, 是否为旧哈希需升级为 argon2)。
 pub fn verify_password(stored: &str, provided: &str) -> (bool, bool) {
@@ -448,7 +486,16 @@ pub async fn upgrade_password_hash(pool: &Db, user_id: Uuid, new_hash: &str) -> 
     Ok(())
 }
 
+/// RPM/TPM 解析链:用户显式 > 用户组 > 全局默认(0 本身就是"不限",无需哨兵转换)。
+fn cl_free_resolve(user_v: Option<i64>, group_v: Option<i64>, default_v: u32) -> u32 {
+    user_v
+        .or(group_v)
+        .map(|v| v.max(0) as u32)
+        .unwrap_or(default_v)
+}
+
 /// 冷启动:把 users 与未吊销的 api_keys 全量加载进内存 Map。
+/// 限额解析链:用户显式设置 > 用户组值 > 全局默认;0 = 显式不限。
 pub async fn load_into_memory(
     pool: &Db,
     cfg: &Config,
@@ -456,7 +503,10 @@ pub async fn load_into_memory(
     keys: &DashMap<String, KeyEntry>,
 ) -> anyhow::Result<()> {
     let rows = q!(
-        "SELECT id, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens FROM users",
+        "SELECT u.id, u.status, u.token_balance, u.token_used_total, u.concurrency_limit, u.bill_multiplier, u.group_id, u.rpm_limit, u.tpm_limit, u.budget_daily_tokens, u.budget_monthly_tokens, \
+                ug.max_concurrency AS ug_concurrency, ug.rpm_limit AS ug_rpm, ug.tpm_limit AS ug_tpm, \
+                ug.budget_daily_tokens AS ug_budget_daily, ug.budget_monthly_tokens AS ug_budget_monthly \
+         FROM users u LEFT JOIN user_groups ug ON ug.id = u.user_group_id",
     )
     .fetch_all(pool)
     .await?;
@@ -468,13 +518,20 @@ pub async fn load_into_memory(
         let cl: Option<i64> = r.get("concurrency_limit");
         let mult: f64 = r.try_get("bill_multiplier").unwrap_or(1.0);
         let group_id: i64 = r.try_get::<Option<i64>, _>("group_id").ok().flatten().unwrap_or(0);
-        let limit = cl.map(|v| v as u32).unwrap_or(cfg.defaults.concurrency_limit);
-        let rpm = r.try_get::<Option<i64>, _>("rpm_limit").ok().flatten().unwrap_or(cfg.defaults.rpm_limit as i64).max(0) as u32;
-        let tpm = r.try_get::<Option<i64>, _>("tpm_limit").ok().flatten().unwrap_or(cfg.defaults.tpm_limit as i64).max(0) as u32;
+        let ug_cl = r.try_get::<Option<i64>, _>("ug_concurrency").ok().flatten();
+        let ug_rpm = r.try_get::<Option<i64>, _>("ug_rpm").ok().flatten();
+        let ug_tpm = r.try_get::<Option<i64>, _>("ug_tpm").ok().flatten();
+        // 并发:用户显式 > 用户组 > 全局默认;0 = 不限(以 u32::MAX 哨兵入内存)。
+        let cl_resolved = cl.or(ug_cl).map(|v| v.max(0) as u32).unwrap_or(cfg.defaults.concurrency_limit);
+        let limit = if cl_resolved == 0 { u32::MAX } else { cl_resolved };
+        let rpm = cl_free_resolve(r.try_get::<Option<i64>, _>("rpm_limit").ok().flatten(), ug_rpm, cfg.defaults.rpm_limit);
+        let tpm = cl_free_resolve(r.try_get::<Option<i64>, _>("tpm_limit").ok().flatten(), ug_tpm, cfg.defaults.tpm_limit);
         let us = Arc::new(UserState::new(id, balance, used_total, limit, status as u8, mult, group_id));
         us.set_limits(rpm, tpm);
-        let bd = r.try_get::<Option<i64>, _>("budget_daily_tokens").ok().flatten().unwrap_or(0).max(0);
-        let bm = r.try_get::<Option<i64>, _>("budget_monthly_tokens").ok().flatten().unwrap_or(0).max(0);
+        let ug_bd = r.try_get::<Option<i64>, _>("ug_budget_daily").ok().flatten();
+        let ug_bm = r.try_get::<Option<i64>, _>("ug_budget_monthly").ok().flatten();
+        let bd = r.try_get::<Option<i64>, _>("budget_daily_tokens").ok().flatten().or(ug_bd).unwrap_or(0).max(0);
+        let bm = r.try_get::<Option<i64>, _>("budget_monthly_tokens").ok().flatten().or(ug_bm).unwrap_or(0).max(0);
         us.set_budgets(bd, bm);
         users.insert(id, us);
     }
@@ -1209,12 +1266,21 @@ pub struct UserRow {
     pub tpm_limit: Option<i64>,
     pub budget_daily_tokens: Option<i64>,
     pub budget_monthly_tokens: Option<i64>,
+    pub user_group_id: Option<i64>,
+    /// 0=仍为初始密码(管理员可查看) 1=已修改。
+    pub password_changed: bool,
+    /// 初始密码明文(库内为 enc_field 密文,查询时解密;password_changed=1 后为 None)。
+    pub initial_password: Option<String>,
     pub source: Option<String>,
     pub created_at: String,
 }
 
-/// 管理端创建用户(用户名/密码/邮箱/手机号/模型组)。
-#[allow(clippy::too_many_arguments)]
+/// 用户表全字段 SELECT(与 row_to_user 对应)。
+const USER_COLS: &str = "id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens, user_group_id, password_changed, initial_password, source, created_at";
+
+/// 管理端创建用户(用户名/密码/邮箱/手机号/模型组/用户组)。
+/// `initial_password_plain`:有值则加密存入 initial_password 并置 password_changed=0(管理员可查看);
+/// 无值(门户自助注册等)则视为已改密(password_changed=1)。
 #[allow(clippy::too_many_arguments)]
 pub async fn admin_create_user(
     pool: &Db,
@@ -1225,11 +1291,14 @@ pub async fn admin_create_user(
     grant: i64,
     group_id: Option<i64>,
     source: &str,
+    user_group_id: Option<i64>,
+    initial_password_plain: Option<&str>,
 ) -> anyhow::Result<Uuid> {
     let id = Uuid::new_v4();
+    let pw_changed: i64 = if initial_password_plain.is_some() { 0 } else { 1 };
     q!(
-        "INSERT INTO users (id, username, password_hash, email, phone, status, token_balance, group_id, source, created_at)
-         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+        "INSERT INTO users (id, username, password_hash, email, phone, status, token_balance, group_id, source, user_group_id, password_changed, initial_password, created_at)
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(username)
@@ -1239,6 +1308,9 @@ pub async fn admin_create_user(
     .bind(grant)
     .bind(group_id)
     .bind(source)
+    .bind(user_group_id)
+    .bind(pw_changed)
+    .bind(enc_field(initial_password_plain))
     .bind(now_iso())
     .execute(pool)
     .await?;
@@ -1304,26 +1376,29 @@ pub async fn find_user_by_username(pool: &Db, username: &str) -> anyhow::Result<
     }
 }
 
+/// 按 id 查密码哈希(门户自助改密校验旧密码用);无哈希返回 None。
+pub async fn get_user_password_hash(pool: &Db, id: Uuid) -> anyhow::Result<Option<String>> {
+    let row = q!("SELECT password_hash FROM users WHERE id = ?")
+        .bind(id.to_string())
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.and_then(|r| r.get::<Option<String>, _>("password_hash")))
+}
+
 pub async fn get_user(pool: &Db, id: Uuid) -> anyhow::Result<Option<UserRow>> {
-    let row = q!(
-        "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens, source, created_at
-         FROM users WHERE id = ?",
-    )
-    .bind(id.to_string())
-    .fetch_optional(pool)
-    .await?;
+    let sql = format!("SELECT {USER_COLS} FROM users WHERE id = ?");
+    let row = q!(&sql)
+        .bind(id.to_string())
+        .fetch_optional(pool)
+        .await?;
     row.map(|r| row_to_user(&r)).transpose()
 }
 
 // 旧的全量版保留(避免影响其它潜在调用方);当前列表接口走下方 *_page 分页版。
 #[allow(dead_code)]
 pub async fn list_users(pool: &Db) -> anyhow::Result<Vec<UserRow>> {
-    let rows = q!(
-        "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens, source, created_at
-         FROM users ORDER BY created_at DESC",
-    )
-    .fetch_all(pool)
-    .await?;
+    let sql = format!("SELECT {USER_COLS} FROM users ORDER BY created_at DESC");
+    let rows = q!(&sql).fetch_all(pool).await?;
     rows.iter().map(row_to_user).collect()
 }
 
@@ -1346,7 +1421,7 @@ pub async fn list_users_page(
     };
     let count_sql = format!("SELECT COUNT(*) AS c FROM users{where_sql}");
     let rows_sql = format!(
-        "SELECT id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens, source, created_at
+        "SELECT {USER_COLS}
          FROM users{where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?"
     );
     let total: i64 = match &kw {
@@ -1378,6 +1453,8 @@ pub async fn list_users_page(
 }
 
 fn row_to_user(r: &sqlx::any::AnyRow) -> anyhow::Result<UserRow> {
+    let initial_enc: Option<String> = r.try_get("initial_password").unwrap_or(None);
+    let pw_changed: i64 = r.try_get::<Option<i64>, _>("password_changed").unwrap_or(Some(1)).unwrap_or(1);
     Ok(UserRow {
         id: Uuid::parse_str(r.get::<String, _>("id").as_str())?,
         username: r.try_get("username").unwrap_or(None),
@@ -1393,6 +1470,14 @@ fn row_to_user(r: &sqlx::any::AnyRow) -> anyhow::Result<UserRow> {
         tpm_limit: r.try_get::<Option<i64>, _>("tpm_limit").unwrap_or(None),
         budget_daily_tokens: r.try_get::<Option<i64>, _>("budget_daily_tokens").unwrap_or(None),
         budget_monthly_tokens: r.try_get::<Option<i64>, _>("budget_monthly_tokens").unwrap_or(None),
+        user_group_id: r.try_get::<Option<i64>, _>("user_group_id").unwrap_or(None),
+        password_changed: pw_changed != 0,
+        // password_changed=0 且密文存在才解密展示;已改密行 initial_password 已清空。
+        initial_password: if pw_changed == 0 {
+            dec_field(initial_enc)
+        } else {
+            None
+        },
         source: r.try_get("source").unwrap_or(None),
         created_at: r.get("created_at"),
     })
@@ -1408,6 +1493,7 @@ pub async fn update_user(
     tpm_limit: Option<i64>,
     budget_daily_tokens: Option<i64>,
     budget_monthly_tokens: Option<i64>,
+    user_group_id: Option<i64>,
 ) -> anyhow::Result<()> {
     if let Some(cl) = concurrency_limit {
         q!("UPDATE users SET concurrency_limit = ? WHERE id = ?")
@@ -1458,6 +1544,13 @@ pub async fn update_user(
             .execute(pool)
             .await?;
     }
+    if let Some(ug) = user_group_id {
+        q!("UPDATE users SET user_group_id = ? WHERE id = ?")
+            .bind(ug)
+            .bind(id.to_string())
+            .execute(pool)
+            .await?;
+    }
     Ok(())
 }
 
@@ -1467,6 +1560,176 @@ pub async fn add_tokens(pool: &Db, id: Uuid, delta: i64) -> anyhow::Result<()> {
         .bind(id.to_string())
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+/// 用户自主修改/重置密码后调用:标记已改密,清空初始密码(管理员不再可查看)。
+pub async fn mark_password_changed(pool: &Db, id: Uuid) -> anyhow::Result<()> {
+    q!("UPDATE users SET password_changed = 1, initial_password = NULL WHERE id = ?")
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 设置用户的用户组(None = 解挂,回落全局默认)。
+pub async fn set_user_user_group(pool: &Db, id: Uuid, group_id: Option<i64>) -> anyhow::Result<()> {
+    q!("UPDATE users SET user_group_id = ? WHERE id = ?")
+        .bind(group_id)
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 列出某用户组内所有用户 id(组限额变更后同步内存用)。
+pub async fn list_user_group_members(pool: &Db, group_id: i64) -> anyhow::Result<Vec<String>> {
+    let rows = q!("SELECT id FROM users WHERE user_group_id = ?")
+        .bind(group_id)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
+}
+
+/// 管理员重置密码:写入新哈希,重置为"未改密"状态并存初始密码(可在后台再次查看)。
+pub async fn admin_reset_password(
+    pool: &Db,
+    id: Uuid,
+    password_hash: &str,
+    initial_plain: &str,
+) -> anyhow::Result<()> {
+    q!("UPDATE users SET password_hash = ?, password_changed = 0, initial_password = ? WHERE id = ?")
+        .bind(password_hash)
+        .bind(enc_field(Some(initial_plain)))
+        .bind(id.to_string())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+// ---- 用户组(限额模板):NULL=继承下层(全局默认),0=显式不限 ----
+
+pub async fn list_user_groups(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
+    let rows = q!(
+        "SELECT g.id, g.name, g.max_concurrency, g.rpm_limit, g.tpm_limit, g.budget_daily_tokens, g.budget_monthly_tokens, g.created_at, \
+                (SELECT COUNT(*) FROM users u WHERE u.user_group_id = g.id) AS member_count
+         FROM user_groups g ORDER BY g.id"
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.get::<i64, _>("id"),
+                "name": r.get::<String, _>("name"),
+                "max_concurrency": r.try_get::<Option<i64>, _>("max_concurrency").unwrap_or(None),
+                "rpm_limit": r.try_get::<Option<i64>, _>("rpm_limit").unwrap_or(None),
+                "tpm_limit": r.try_get::<Option<i64>, _>("tpm_limit").unwrap_or(None),
+                "budget_daily_tokens": r.try_get::<Option<i64>, _>("budget_daily_tokens").unwrap_or(None),
+                "budget_monthly_tokens": r.try_get::<Option<i64>, _>("budget_monthly_tokens").unwrap_or(None),
+                "member_count": r.try_get::<i64, _>("member_count").unwrap_or(0),
+                "created_at": r.get::<String, _>("created_at"),
+            })
+        })
+        .collect())
+}
+
+pub async fn user_group_exists(pool: &Db, id: i64) -> anyhow::Result<bool> {
+    let row = q!("SELECT 1 AS ok FROM user_groups WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.is_some())
+}
+
+/// 用户组行(内存限额同步用)。
+pub struct UserGroupRow {
+    pub id: i64,
+    pub name: String,
+    pub max_concurrency: Option<i64>,
+    pub rpm_limit: Option<i64>,
+    pub tpm_limit: Option<i64>,
+    pub budget_daily: Option<i64>,
+    pub budget_monthly: Option<i64>,
+}
+
+pub async fn get_user_group(pool: &Db, id: i64) -> anyhow::Result<Option<UserGroupRow>> {
+    let row = q!(
+        "SELECT id, name, max_concurrency, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens FROM user_groups WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| UserGroupRow {
+        id: r.get("id"),
+        name: r.get("name"),
+        max_concurrency: r.try_get("max_concurrency").unwrap_or(None),
+        rpm_limit: r.try_get("rpm_limit").unwrap_or(None),
+        tpm_limit: r.try_get("tpm_limit").unwrap_or(None),
+        budget_daily: r.try_get("budget_daily_tokens").unwrap_or(None),
+        budget_monthly: r.try_get("budget_monthly_tokens").unwrap_or(None),
+    }))
+}
+
+pub async fn create_user_group(
+    pool: &Db,
+    name: &str,
+    max_concurrency: Option<i64>,
+    rpm_limit: Option<i64>,
+    tpm_limit: Option<i64>,
+    budget_daily: Option<i64>,
+    budget_monthly: Option<i64>,
+) -> anyhow::Result<i64> {
+    let r = q!(
+        "INSERT INTO user_groups (name, max_concurrency, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+    )
+    .bind(name)
+    .bind(max_concurrency)
+    .bind(rpm_limit)
+    .bind(tpm_limit)
+    .bind(budget_daily)
+    .bind(budget_monthly)
+    .bind(now_iso())
+    .fetch_one(pool)
+    .await?;
+    Ok(r.get("id"))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_user_group(
+    pool: &Db,
+    id: i64,
+    name: &str,
+    max_concurrency: Option<i64>,
+    rpm_limit: Option<i64>,
+    tpm_limit: Option<i64>,
+    budget_daily: Option<i64>,
+    budget_monthly: Option<i64>,
+) -> anyhow::Result<()> {
+    q!(
+        "UPDATE user_groups SET name = ?, max_concurrency = ?, rpm_limit = ?, tpm_limit = ?, budget_daily_tokens = ?, budget_monthly_tokens = ? WHERE id = ?",
+    )
+    .bind(name)
+    .bind(max_concurrency)
+    .bind(rpm_limit)
+    .bind(tpm_limit)
+    .bind(budget_daily)
+    .bind(budget_monthly)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 删除用户组;组内用户自动解挂(user_group_id=NULL,回落全局默认)。
+pub async fn delete_user_group(pool: &Db, id: i64) -> anyhow::Result<()> {
+    q!("UPDATE users SET user_group_id = NULL WHERE user_group_id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    q!("DELETE FROM user_groups WHERE id = ?").bind(id).execute(pool).await?;
     Ok(())
 }
 
@@ -2922,26 +3185,26 @@ mod tests {
     #[tokio::test]
     async fn user_budget_roundtrip() {
         let db = test_db().await;
-        let id = admin_create_user(&db, "budgeter", "x", None, None, 100, None, "admin")
+        let id = admin_create_user(&db, "budgeter", "x", None, None, 100, None, "admin", None, None)
             .await
             .unwrap();
 
         // 设置日/月预算并回读
-        update_user(&db, id, None, None, None, None, None, Some(5000), Some(70000)).await.unwrap();
+        update_user(&db, id, None, None, None, None, None, Some(5000), Some(70000), None).await.unwrap();
         let (rows, _) = list_users_page(&db, 10, 0, None).await.unwrap();
         let u = rows.iter().find(|r| r.id == id).unwrap();
         assert_eq!(u.budget_daily_tokens, Some(5000));
         assert_eq!(u.budget_monthly_tokens, Some(70000));
 
         // None 不改动既有预算
-        update_user(&db, id, None, None, None, None, None, None, None).await.unwrap();
+        update_user(&db, id, None, None, None, None, None, None, None, None).await.unwrap();
         let (rows, _) = list_users_page(&db, 10, 0, None).await.unwrap();
         let u = rows.iter().find(|r| r.id == id).unwrap();
         assert_eq!(u.budget_daily_tokens, Some(5000));
         assert_eq!(u.budget_monthly_tokens, Some(70000));
 
         // Some(0) 表示「不限」
-        update_user(&db, id, None, None, None, None, None, Some(0), Some(0)).await.unwrap();
+        update_user(&db, id, None, None, None, None, None, Some(0), Some(0), None).await.unwrap();
         let (rows, _) = list_users_page(&db, 10, 0, None).await.unwrap();
         let u = rows.iter().find(|r| r.id == id).unwrap();
         assert_eq!(u.budget_daily_tokens, Some(0));
@@ -2953,7 +3216,7 @@ mod tests {
     #[tokio::test]
     async fn list_users_page_search() {
         let db = test_db().await;
-        let id = admin_create_user(&db, "searcher", "x", None, Some("13900001111"), 0, None, "admin")
+        let id = admin_create_user(&db, "searcher", "x", None, Some("13900001111"), 0, None, "admin", None, None)
             .await
             .unwrap();
 

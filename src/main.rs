@@ -320,10 +320,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/email/send_code", post(portal::send_email_code))
         .route("/auth/register", post(portal::register))
         .route("/auth/reset_password", post(portal::reset_password))
+        .route("/auth/change_password", post(portal::change_password))
         .route("/me", get(portal::me))
         .route("/config", get(portal::config))
         .route("/balance", get(portal::balance))
         .route("/summary", get(portal::summary))
+        .route("/quota", get(portal::quota))
         .route("/keys", get(portal::list_keys).post(portal::create_key))
         .route("/keys/rotate", post(portal::rotate_key))
         .route("/models", get(portal::models))
@@ -351,6 +353,12 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/users/:id",
             get(admin::get_user).patch(admin::patch_user).delete(admin::delete_user),
+        )
+        .route("/users/:id/reset-password", post(admin::reset_user_password))
+        .route("/user-groups", get(admin::list_user_groups).post(admin::create_user_group))
+        .route(
+            "/user-groups/:id",
+            axum::routing::patch(admin::update_user_group).delete(admin::delete_user_group),
         )
         .route("/users/:id/usage", get(admin::user_usage))
         .route("/users/:id/series", get(admin::user_series))

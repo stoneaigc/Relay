@@ -272,7 +272,12 @@
         <button type="button" class="send-btn" id="r-send">发送验证码</button>
       </div>
       <label for="r-pass">设置密码</label>
-      <input id="r-pass" type="password" autocomplete="new-password" required minlength="8" placeholder="至少 8 位">
+      <div class="field">
+        <input id="r-pass" type="password" autocomplete="new-password" required minlength="8" placeholder="至少 8 位">
+        <button type="button" class="peek" id="r-peek" aria-label="显示或隐藏密码">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
       <button type="submit" class="submit">注册并登录</button>
       <div class="err" id="r-err" role="alert" aria-live="polite"></div>
       <div class="dev-note" id="r-dev" hidden></div>
@@ -289,7 +294,12 @@
         <button type="button" class="send-btn" id="s-send">发送验证码</button>
       </div>
       <label for="s-pass">新密码</label>
-      <input id="s-pass" type="password" autocomplete="new-password" required minlength="8" placeholder="至少 8 位">
+      <div class="field">
+        <input id="s-pass" type="password" autocomplete="new-password" required minlength="8" placeholder="至少 8 位">
+        <button type="button" class="peek" id="s-peek" aria-label="显示或隐藏密码">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+        </button>
+      </div>
       <button type="submit" class="submit">重置并登录</button>
       <div class="err" id="s-err" role="alert" aria-live="polite"></div>
       <div class="dev-note" id="s-dev" hidden></div>
@@ -344,12 +354,17 @@ $("f-login").addEventListener("submit", async (ev) => {
   }
 });
 
-// 密码可见性切换
-$("peek").addEventListener("click", () => {
-  const p = $("p");
-  p.type = p.type === "password" ? "text" : "password";
-  p.focus();
-});
+// 密码可见性切换(登录/注册/重置三处共用)
+function bindPeek(btnId, inputId) {
+  $(btnId).addEventListener("click", () => {
+    const p = $(inputId);
+    p.type = p.type === "password" ? "text" : "password";
+    p.focus();
+  });
+}
+bindPeek("peek", "p");
+bindPeek("r-peek", "r-pass");
+bindPeek("s-peek", "s-pass");
 
 // ---- 发送邮箱验证码(注册/重置共用):60s 倒计时;开发模式回显验证码 ----
 function bindSend(btnId, emailId, errId, devId) {

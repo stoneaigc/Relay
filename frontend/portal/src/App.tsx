@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, ReactNode } from "react";
 import { BrowserRouter, NavLink, useLocation, useNavigate } from "react-router-dom";
 import {
-  Wallet, KeyRound, Copy, RefreshCw, Plus, LogOut, Check,
+  KeyRound, Copy, RefreshCw, Plus, LogOut, Check,
   LayoutDashboard, Receipt, MessageSquare, Menu, X, SendHorizontal, Boxes,
   Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen,
+  Gauge, Zap, Timer, CalendarDays, KeySquare, Eye, EyeOff, ShieldCheck, Sparkles,
 } from "lucide-react";
-import { api, getToken, clearToken, healthz, SITE_PREFIX, KeyInfo, ModelCard, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType } from "./api";
+import { api, getToken, clearToken, healthz, SITE_PREFIX, KeyInfo, ModelCard, QuotaInfo, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType } from "./api";
 import { copyText } from "./clipboard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -42,13 +43,13 @@ function useCopy(): [boolean, (t: string) => void] {
   return [copied, copy];
 }
 
-/** 值旁边的复制图标按钮:点击后短暂变成绿色对勾。 */
+/** 值旁边的复制图标按钮:点击后短暂变成品牌色对勾。 */
 function CopyButton({ value, label = "复制" }: { value: string; label?: string }) {
   const [copied, copy] = useCopy();
   return (
     <button type="button" onClick={() => copy(value)} title={label} aria-label={label}
       className="shrink-0 rounded-md border border-border bg-background p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-      {copied ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+      {copied ? <Check className="h-3.5 w-3.5 text-primary" /> : <Copy className="h-3.5 w-3.5" />}
     </button>
   );
 }
@@ -67,13 +68,13 @@ function ModelCardView({ m, onDetail }: { m: ModelCard; onDetail: (m: ModelCard)
       className={cn(
         "group flex flex-col gap-2 rounded-xl border p-3.5 text-left transition-all",
         copied
-          ? "border-emerald-500/50 bg-emerald-500/5"
+          ? "border-primary/50 bg-primary/5"
           : "border-border bg-card hover:border-primary/40 hover:shadow-sm"
       )}>
       <div className="flex items-center gap-2">
         <span className="mono truncate text-sm font-medium" title={m.name}>{m.name}</span>
         {copied
-          ? <span className="ml-auto inline-flex shrink-0 items-center gap-1 text-xs text-emerald-600"><Check className="h-3.5 w-3.5" />已复制</span>
+          ? <span className="ml-auto inline-flex shrink-0 items-center gap-1 text-xs text-primary"><Check className="h-3.5 w-3.5" />已复制</span>
           : <Copy className="ml-auto h-3.5 w-3.5 shrink-0 opacity-0 transition-opacity group-hover:opacity-40" onClick={(e) => { e.stopPropagation(); copy(m.name); }} />}
       </div>
       {(m.labels.length > 0 || m.tags.length > 0) && (
@@ -260,6 +261,131 @@ function LineChart({ points }: { points: { ts: number; tokens: number; calls: nu
   return <EChart option={option} height={190} />;
 }
 
+// token 数紧凑格式(预算条用):1.2M / 45K / 800。
+const compactTokens = (n: number) =>
+  n >= 1_000_000 ? `${(n / 1_000_000).toFixed(n % 1_000_000 ? 1 : 0)}M` : n >= 1_000 ? `${(n / 1_000).toFixed(0)}K` : String(n);
+
+/** 我的套餐卡:品牌渐变底,展示套餐名 + 余额 + 消耗进度。 */
+function PlanHero({ quota, summary }: { quota: QuotaInfo | null; summary: { granted: number; used: number; balance: number } | null }) {
+  const pct = summary && summary.granted > 0 ? Math.max(0, Math.min(100, Math.round((summary.used / summary.granted) * 100))) : 0;
+  const lim = (v: number | null | undefined) => (v == null ? "不限" : v.toLocaleString());
+  return (
+    <div className="brand-gradient relative overflow-hidden rounded-2xl p-5 text-white shadow-sm md:p-6">
+      <div className="pointer-events-none absolute -right-10 -top-14 h-44 w-44 rounded-full bg-white/10" />
+      <div className="pointer-events-none absolute -bottom-16 right-24 h-36 w-36 rounded-full bg-white/10" />
+      <div className="relative flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-1.5 text-xs font-medium text-white/80">
+            <Sparkles className="h-3.5 w-3.5" /> 当前套餐
+          </div>
+          <div className="mt-1 text-2xl font-bold tracking-tight md:text-3xl">{quota?.plan?.name ?? "默认套餐"}</div>
+          <p className="mt-1.5 text-xs text-white/75">
+            并发 {lim(quota?.concurrency.limit)} · RPM {lim(quota?.rpm.limit)} · TPM {lim(quota?.tpm.limit)}
+          </p>
+        </div>
+        <div className="text-right">
+          <div className="text-xs text-white/80">余额(tokens)</div>
+          <div className="mono text-3xl font-bold tracking-tight md:text-4xl">{summary ? summary.balance.toLocaleString() : "…"}</div>
+        </div>
+      </div>
+      <div className="relative mt-4">
+        <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/25">
+          <div className="h-full rounded-full bg-white/90 transition-all" style={{ width: `${pct}%` }} />
+        </div>
+        <p className="mt-1.5 text-xs text-white/75">
+          已用 {summary ? summary.used.toLocaleString() : "…"} / 总量 {summary ? summary.granted.toLocaleString() : "…"}({pct}%)
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/** 限额格:图标 + 名称 + 已用/上限 + 进度条(limit=null 视为不限,不画进度)。 */
+function QuotaCell({ icon: Icon, label, limit, used, fmt }: {
+  icon: any; label: string; limit: number | null; used: number; fmt?: (n: number) => string;
+}) {
+  const unlimited = limit == null;
+  const pct = !unlimited && limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+  const danger = !unlimited && pct >= 90;
+  const f = fmt ?? ((n: number) => n.toLocaleString());
+  return (
+    <div className="rounded-xl border bg-card p-3.5">
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground"><Icon className="h-3.5 w-3.5" />{label}</div>
+      <div className="mono mt-1.5 truncate text-lg font-bold tracking-tight" title={`${f(used)} / ${unlimited ? "不限" : f(limit)}`}>
+        {f(used)}<span className="text-xs font-normal text-muted-foreground"> / {unlimited ? "不限" : f(limit)}</span>
+      </div>
+      <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-muted">
+        <div className={cn("h-full rounded-full transition-all", danger ? "bg-destructive" : "bg-primary")}
+          style={{ width: `${unlimited ? 0 : pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+/** 密码输入框(带小眼睛切换)。 */
+function PwInput({ value, onChange, placeholder, autoFocus }: {
+  value: string; onChange: (v: string) => void; placeholder: string; autoFocus?: boolean;
+}) {
+  const [show, setShow] = useState(false);
+  return (
+    <div className="relative">
+      <Input type={show ? "text" : "password"} placeholder={placeholder} value={value}
+        onChange={(e) => onChange(e.target.value)} autoFocus={autoFocus} className="pr-9" />
+      <button type="button" onClick={() => setShow(!show)} title={show ? "隐藏密码" : "显示密码"}
+        className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted-foreground hover:text-foreground">
+        {show ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+      </button>
+    </div>
+  );
+}
+
+/** 修改密码弹窗:旧密码校验 + 新密码两遍输入,成功后自动关闭。 */
+function PasswordDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [oldPw, setOldPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [confirmPw, setConfirmPw] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [ok, setOk] = useState(false);
+  useEffect(() => {
+    if (open) { setOldPw(""); setNewPw(""); setConfirmPw(""); setErr(""); setOk(false); }
+  }, [open]);
+  const submit = async () => {
+    setErr("");
+    if (newPw.length < 8) { setErr("新密码至少 8 位"); return; }
+    if (newPw !== confirmPw) { setErr("两次输入的新密码不一致"); return; }
+    setBusy(true);
+    try {
+      await api.changePassword(oldPw, newPw);
+      setOk(true);
+      window.setTimeout(onClose, 1200);
+    } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+  };
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>修改密码</DialogTitle>
+          <DialogDescription>修改成功后请用新密码重新登录(其他已登录会话不受影响)。</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <PwInput value={oldPw} onChange={setOldPw} placeholder="当前密码" autoFocus />
+          <PwInput value={newPw} onChange={setNewPw} placeholder="新密码(至少 8 位)" />
+          <PwInput value={confirmPw} onChange={setConfirmPw} placeholder="再输一遍新密码" />
+          {ok && <p className="flex items-center gap-1 text-sm text-success"><CheckCircle2 className="h-4 w-4" />密码已修改</p>}
+          {err && <p className="text-sm text-destructive">{err}</p>}
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose} disabled={busy}>取消</Button>
+          <Button onClick={submit} disabled={busy || !oldPw || !newPw || !confirmPw}>
+            <ShieldCheck className="h-4 w-4" />{ok ? "已完成" : busy ? "提交中…" : "确认修改"}
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function App() {
   const [authed, setAuthed] = useState(!!getToken());
   // 全局 401:api 层广播 relay:auth-expired,这里清 token 并跳回统一登录页。
@@ -294,6 +420,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const loc = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [summary, setSummary] = useState<{ granted: number; used: number; balance: number } | null>(null);
+  const [quota, setQuota] = useState<QuotaInfo | null>(null);
   const [phone, setPhone] = useState("");
   const [keys, setKeys] = useState<KeyInfo[]>([]);
   const [usage, setUsage] = useState<any[]>([]);
@@ -306,6 +433,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [reveal, setReveal] = useState<{ kind: string; key: string } | null>(null);
   const [rewardsEnabled, setRewardsEnabled] = useState(false);
   const [version, setVersion] = useState("");
+  const [pwOpen, setPwOpen] = useState(false);
   useEffect(() => { healthz().then((h) => setVersion(h.version)).catch(() => {}); }, []);
   const nav = NAV_ALL.filter((n) => n.path !== "/rewards" || rewardsEnabled);
   const section: Section = loc.pathname.startsWith("/chat") ? "chat"
@@ -328,11 +456,17 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
 
   const refresh = async () => {
     try {
-      const [me, k, m, s] = await Promise.all([api.me(), api.keys(), api.models(), api.summary()]);
-      setPhone(me.phone || "—"); setKeys(k.data); setModels(m.data); setSummary(s);
+      const [me, k, m, s, q] = await Promise.all([api.me(), api.keys(), api.models(), api.summary(), api.quota()]);
+      setPhone(me.phone || "—"); setKeys(k.data); setModels(m.data); setSummary(s); setQuota(q);
     } catch (e: any) { if (String(e.message).includes("auth")) onLogout(); }
   };
   useEffect(() => { refresh(); }, []);
+
+  // 套餐限额的实时用量(RPM/TPM/并发)每 20s 轻量轮询。
+  useEffect(() => {
+    const t = window.setInterval(() => { api.quota().then(setQuota).catch(() => {}); }, 20_000);
+    return () => window.clearInterval(t);
+  }, []);
 
   useEffect(() => {
     api.config().then((c) => setRewardsEnabled(c.rewards_enabled)).catch(() => {});
@@ -371,6 +505,9 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       </nav>
       <div className="px-2 py-3">
         <div className="px-3 pb-2 text-xs text-muted-foreground">{phone}</div>
+        <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground" onClick={() => setPwOpen(true)}>
+          <ShieldCheck className="h-4 w-4" />修改密码
+        </Button>
         <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground" onClick={onLogout}>
           <LogOut className="h-4 w-4" />退出登录
         </Button>
@@ -414,34 +551,14 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             <div className="p-4 md:p-6">
               {effectiveSection === "overview" ? (
                 <div className="space-y-5">
-                  <Card>
-                    <CardContent className="pt-5">
-                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                        <Wallet className="h-4 w-4" /> 我的额度(Tokens)
-                      </div>
-                      <div className="mt-3 grid grid-cols-3 gap-3">
-                        <div>
-                          <div className="text-xs text-muted-foreground">总量</div>
-                          <div className="mono text-xl font-bold tracking-tight md:text-2xl">{summary ? summary.granted.toLocaleString() : "…"}</div>
-                        </div>
-                        <div>
-                          <div className="text-xs text-muted-foreground">已用</div>
-                          <div className="mono text-xl font-bold tracking-tight md:text-2xl">{summary ? summary.used.toLocaleString() : "…"}</div>
-                        </div>
-                        <div>
-                          <div className="text-xs text-muted-foreground">余额</div>
-                          <div className="mono text-xl font-bold tracking-tight text-primary md:text-2xl">{summary ? summary.balance.toLocaleString() : "…"}</div>
-                        </div>
-                      </div>
-                      <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                        <div className="h-full rounded-full bg-primary"
-                          style={{ width: `${summary && summary.granted > 0 ? Math.max(0, Math.min(100, (summary.used / summary.granted) * 100)) : 0}%` }} />
-                      </div>
-                      <p className="mt-2 text-xs text-muted-foreground">
-                        已用 {summary && summary.granted > 0 ? Math.round((summary.used / summary.granted) * 100) : 0}% · 两个接口共用
-                      </p>
-                    </CardContent>
-                  </Card>
+                  <PlanHero quota={quota} summary={summary} />
+                  <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+                    <QuotaCell icon={Gauge} label="并发" limit={quota?.concurrency.limit ?? null} used={quota?.concurrency.used ?? 0} />
+                    <QuotaCell icon={Zap} label="RPM · 次/分" limit={quota?.rpm.limit ?? null} used={quota?.rpm.used ?? 0} />
+                    <QuotaCell icon={Timer} label="TPM · tokens/分" limit={quota?.tpm.limit ?? null} used={quota?.tpm.used ?? 0} />
+                    <QuotaCell icon={CalendarDays} label="日预算" limit={quota?.budget.daily.limit ?? null} used={quota?.budget.daily.used ?? 0} fmt={compactTokens} />
+                    <QuotaCell icon={KeySquare} label="月预算" limit={quota?.budget.monthly.limit ?? null} used={quota?.budget.monthly.used ?? 0} fmt={compactTokens} />
+                  </div>
                   <div className="grid gap-5 md:grid-cols-2">
                     <InterfaceCard kind="openai" label="OpenAI 接口" baseUrl={`${window.location.origin}${SITE_PREFIX}/v1`} keys={keys} onReveal={setReveal} onChanged={refresh} />
                     <InterfaceCard kind="anthropic" label="Anthropic 接口" baseUrl={`${window.location.origin}${SITE_PREFIX}/v1`} keys={keys} onReveal={setReveal} onChanged={refresh} />
@@ -550,6 +667,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       <Dialog open={!!reveal} onOpenChange={(o) => !o && setReveal(null)}>
         {reveal && <RevealContent kind={reveal.kind} apiKey={reveal.key} />}
       </Dialog>
+
+      <PasswordDialog open={pwOpen} onClose={() => setPwOpen(false)} />
     </div>
   );
 }
