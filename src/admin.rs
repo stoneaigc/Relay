@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::config::{EmailConfig, ProviderKind};
 use crate::error::ApiError;
-use crate::state::{AppState, UserState};
+use crate::state::{AppState, KeyEntry, UserState};
 use crate::{jwt, storage};
 
 /// 任何模型/组/路由改动后,从 DB 重建内存路由图。
@@ -27,8 +27,54 @@ async fn rebuild_routing(state: &AppState) -> Result<(), ApiError> {
 }
 
 fn admin_guard(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    // 管理员专属 Key:由外层 admin_key_auth 中间件校验后注入身份头
+    // (客户端伪造值会被中间件先清除,仅服务端校验通过才写入)。
+    if headers.contains_key(ADMIN_IDENTITY_HEADER) {
+        return Ok(());
+    }
     let cfg = state.config();
     jwt::from_headers(&cfg.auth.jwt_secret, headers, "admin").map(|_| ())
+}
+
+/// 服务端注入的管理员身份头(admin_key_auth 中间件写入;入站一律清除防伪造)。
+pub const ADMIN_IDENTITY_HEADER: &str = "x-admin-identity";
+
+/// admin_api 外层认证中间件:支持「管理员专属 API Key」(Bearer relay_adm_*)直连管理接口。
+/// JWT 请求原样透传给既有 admin_guard;Key 请求查库校验后注入身份与审计归因头。
+pub async fn admin_key_auth(
+    State(state): State<Arc<AppState>>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::header::AUTHORIZATION;
+    // 防伪造:无论何种通道,先清掉客户端自带的两类服务端头。
+    req.headers_mut().remove(ADMIN_IDENTITY_HEADER);
+    req.headers_mut().remove(crate::audit::AUDIT_ACTOR_HEADER);
+    let key_token = req
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|t| t.starts_with(storage::ADMIN_KEY_PREFIX))
+        .map(str::to_string);
+    if let Some(token) = key_token {
+        return match storage::find_admin_key(&state.db, &storage::hash_key(&token)).await {
+            Ok(Some((id, name))) => {
+                storage::touch_admin_key(&state.db, id).await;
+                if let Ok(hv) = axum::http::HeaderValue::from_str(&name) {
+                    req.headers_mut().insert(ADMIN_IDENTITY_HEADER, hv);
+                }
+                let actor = format!("admin-key:{name}");
+                if let Ok(hv) = axum::http::HeaderValue::from_str(&actor) {
+                    req.headers_mut().insert(crate::audit::AUDIT_ACTOR_HEADER, hv);
+                }
+                next.run(req).await
+            }
+            _ => ApiError::Unauthorized.into_response(),
+        };
+    }
+    next.run(req).await
 }
 
 /// 价格合法性:可空;有值时必须是有限非负数($/1M tokens)。
@@ -2506,12 +2552,85 @@ pub async fn get_portal_settings(
         .get(crate::settings::K_PORTAL_REWARDS_ENABLED)
         .map(|v| v == "true")
         .unwrap_or(false);
-    Ok(Json(json!({ "rewards_enabled": rewards_enabled })))
+    // 手机号注册开关:缺省 true。
+    let phone_register_enabled = kv
+        .get(crate::settings::K_PORTAL_PHONE_REGISTER)
+        .map(|v| v != "false")
+        .unwrap_or(true);
+    // 门户 Key 审批开关:缺省 false。
+    let key_approval_required = kv
+        .get(crate::settings::K_PORTAL_KEY_APPROVAL)
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    Ok(Json(json!({
+        "rewards_enabled": rewards_enabled,
+        "phone_register_enabled": phone_register_enabled,
+        "key_approval_required": key_approval_required,
+    })))
 }
 
 #[derive(Deserialize)]
 pub struct PortalSettingsBody {
     pub rewards_enabled: bool,
+    #[serde(default = "default_true")]
+    pub phone_register_enabled: bool,
+    #[serde(default)]
+    pub key_approval_required: bool,
+}
+
+// ---- 管理员专属 API Key ----
+
+/// GET /admin/api/admin-keys
+pub async fn list_admin_keys(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let items = storage::list_admin_keys(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "data": items })))
+}
+
+#[derive(Deserialize)]
+pub struct AdminKeyBody {
+    pub name: String,
+}
+
+/// POST /admin/api/admin-keys —— 创建管理密钥,明文仅此一次返回。
+pub async fn create_admin_key(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<AdminKeyBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("请填写密钥备注名".into()));
+    }
+    let count = storage::count_admin_keys(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if count as usize >= storage::ADMIN_KEY_CAP {
+        return Err(ApiError::BadRequest(format!("管理密钥最多 {} 把,请先吊销不用的密钥", storage::ADMIN_KEY_CAP)));
+    }
+    let (id, plain, prefix) = storage::create_admin_key(&state.db, name)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "id": id, "key": plain, "key_prefix": prefix })))
+}
+
+/// DELETE /admin/api/admin-keys/:id —— 吊销,即时失效。
+pub async fn revoke_admin_key(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    storage::revoke_admin_key(&state.db, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// POST /admin/settings/portal -- 保存门户配置。
@@ -2524,7 +2643,213 @@ pub async fn save_portal_settings(
     storage::set_setting(&state.db, crate::settings::K_PORTAL_REWARDS_ENABLED, &body.rewards_enabled.to_string())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    storage::set_setting(&state.db, crate::settings::K_PORTAL_PHONE_REGISTER, &body.phone_register_enabled.to_string())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    storage::set_setting(&state.db, crate::settings::K_PORTAL_KEY_APPROVAL, &body.key_approval_required.to_string())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({ "ok": true })))
+}
+
+// ---- 分级密钥管控:门户用户 API Key 的范围配置/审批/吊销(仅管理员可操作) ----
+
+/// GET /admin/api/keys —— 全量用户 Key 列表(明文/哈希不回显)。
+pub async fn list_all_keys(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let items = storage::list_all_keys(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "data": items })))
+}
+
+#[derive(Deserialize)]
+pub struct PatchKeyBody {
+    /// 模型白名单;None=不改,Some(空数组)=不限,Some(列表)=仅允许列表内模型。
+    pub allowed_models: Option<Vec<String>>,
+    /// 审批动作;None=不改。
+    pub approved: Option<bool>,
+}
+
+/// PATCH /admin/api/keys/:id —— 配置范围 / 审批(同步内存,生效即时)。
+pub async fn patch_key(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<PatchKeyBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if let Some(models) = &body.allowed_models {
+        let trimmed: Vec<String> = models.iter().map(|m| m.trim().to_string()).filter(|m| !m.is_empty()).collect();
+        let hit = storage::set_key_scope(&state.db, &id, Some(&trimmed))
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        let Some((hash, status)) = hit else {
+            return Err(ApiError::BadRequest("key not found".into()));
+        };
+        // 同步内存:已启用的 Key 原地更新范围;待审批的不在内存(等效失效)。
+        if status == 0 {
+            if let Some((kid, uid, allowed)) = storage::get_key_by_hash_for_memory(&state.db, &hash)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?
+            {
+                state.keys.insert(hash, KeyEntry { id: kid, user_id: uid, allowed_models: allowed });
+            }
+        } else {
+            // 拿不到 hash 对应的启用态 → 从内存移除兜底(理论不可达)。
+        }
+    }
+    if let Some(approved) = body.approved {
+        let status: i64 = if approved { 0 } else { 1 };
+        let hash = storage::set_key_status(&state.db, &id, status)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        match hash {
+            Some(h) if status == 0 => {
+                // 审批通过 → 热插入内存(范围按库内最新值)。
+                if let Some((kid, uid, allowed)) = storage::get_key_by_hash_for_memory(&state.db, &h)
+                    .await
+                    .map_err(|e| ApiError::Internal(e.to_string()))?
+                {
+                    state.keys.insert(h, KeyEntry { id: kid, user_id: uid, allowed_models: allowed });
+                }
+            }
+            Some(h) => {
+                // 撤销审批/设为待审 → 从内存移除,立即失效。
+                state.keys.remove(&h);
+            }
+            None => return Err(ApiError::BadRequest("key not found".into())),
+        }
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// DELETE /admin/api/keys/:id —— 管理员吊销用户 Key,即时失效。
+pub async fn revoke_key_admin(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if let Some(h) = storage::revoke_key_by_id(&state.db, &id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+    {
+        state.keys.remove(&h);
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---- 系统配置:短信网关(手机号注册验证码通道) ----
+
+/// GET /admin/settings/sms -- 回显短信网关配置(headers 不回显明文,仅返回 has_headers)。
+pub async fn get_sms_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let gateway = crate::sms::load_gateway(&state.db).await;
+    Ok(Json(json!({
+        "gateway_url": gateway.url,
+        "gateway_method": gateway.method,
+        "gateway_body": gateway.body_template,
+        "has_headers": !gateway.headers_json.trim().is_empty(),
+        "dev": gateway.is_dev(),
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct SmsSettingsBody {
+    pub gateway_url: String,
+    /// GET | POST,默认 POST。
+    #[serde(default)]
+    pub gateway_method: Option<String>,
+    /// 请求头 JSON 字符串;空串或缺省 = 清除。
+    #[serde(default)]
+    pub gateway_headers: Option<String>,
+    pub gateway_body: String,
+}
+
+/// PUT /admin/settings/sms -- 保存短信网关配置(headers 加密入库)。
+pub async fn save_sms_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<SmsSettingsBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let url = body.gateway_url.trim().to_string();
+    if !url.is_empty() && !valid_base_url(&url) {
+        return Err(ApiError::BadRequest("网关地址必须是合法的 http(s) URL".into()));
+    }
+    let method = match body.gateway_method.as_deref().unwrap_or("POST").trim().to_uppercase().as_str() {
+        "GET" => "GET".to_string(),
+        _ => "POST".to_string(),
+    };
+    if !url.is_empty() && body.gateway_body.trim().is_empty() {
+        return Err(ApiError::BadRequest("已配置网关时,请求体模板不能为空(需含 {phone} 与 {code} 占位符)".into()));
+    }
+    if !url.is_empty() && (!body.gateway_body.contains("{phone}") || !body.gateway_body.contains("{code}")) {
+        return Err(ApiError::BadRequest("请求体模板必须包含 {phone} 与 {code} 占位符".into()));
+    }
+    storage::set_setting(&state.db, crate::settings::K_SMS_GATEWAY_URL, &url)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    storage::set_setting(&state.db, crate::settings::K_SMS_GATEWAY_METHOD, &method)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    storage::set_setting(&state.db, crate::settings::K_SMS_BODY_TEMPLATE, body.gateway_body.trim())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    match body.gateway_headers.as_deref().map(str::trim).filter(|s| !s.is_empty() && *s != "{}") {
+        Some(h) => {
+            // 合法性预检:必须是 JSON 对象,避免线上才报错。{} 表示无自定义头。
+            let parsed: Value = serde_json::from_str(if h == "{}" { "{}" } else { h })
+                .map_err(|_| ApiError::BadRequest("请求头必须是合法的 JSON 对象,如 {\"Authorization\":\"APPCODE xxx\"}(填 {} 清除)".into()))?;
+            if !matches!(parsed, Value::Object(_)) {
+                return Err(ApiError::BadRequest("请求头必须是合法的 JSON 对象,如 {\"Authorization\":\"APPCODE xxx\"}(填 {} 清除)".into()));
+            }
+            let secret = storage::field_secret();
+            let enc = if secret.is_empty() {
+                h.to_string() // 测试态降级明文
+            } else {
+                crate::settings::encrypt(&secret, h).map_err(|e| ApiError::Internal(e.to_string()))?
+            };
+            storage::set_setting(&state.db, crate::settings::K_SMS_HEADERS_ENC, &enc)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
+        None => {
+            // 缺省/留空 = 保持已存配置不变(前端仅在有改动时携带该字段)。
+        }
+    }
+    Ok(Json(json!({ "ok": true, "dev": url.is_empty() })))
+}
+
+#[derive(Deserialize)]
+pub struct SmsTestBody {
+    pub phone: String,
+}
+
+/// POST /admin/settings/sms/test -- 向指定手机号发一条测试短信(真实下发)。
+pub async fn test_sms_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<SmsTestBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let phone = body.phone.trim();
+    if !(phone.len() == 11 && phone.starts_with('1') && phone.chars().skip(1).all(|c| c.is_ascii_digit())) {
+        return Err(ApiError::BadRequest("请填写正确的 11 位手机号".into()));
+    }
+    let gateway = crate::sms::load_gateway(&state.db).await;
+    let result = crate::sms::test_gateway(&state.http, &gateway, phone).await;
+    match result {
+        Ok(v) => Ok(Json(v)),
+        Err(e) => Err(ApiError::BadRequest(e)),
+    }
 }
 
 // ---- 系统配置:embedding(L2 语义缓存供应商) ----

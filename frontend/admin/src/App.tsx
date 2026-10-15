@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
-import { Users as UsersIcon, UsersRound, KeyRound, Copy, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen } from "lucide-react";
-import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, UserGroupRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint } from "./api";
+import { Users as UsersIcon, UsersRound, KeyRound, Copy, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen, SlidersHorizontal, Undo2, Ban } from "lucide-react";
+import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, UserGroupRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint, AdminKeyRow, AdminApiKeyRow } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -78,6 +78,7 @@ const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: a
     items: [
       { path: "/users", label: "用户管理", icon: UsersIcon },
       { path: "/user-groups", label: "用户组", icon: UsersRound },
+      { path: "/keys", label: "API 密钥", icon: KeyRound },
       { path: "/rewards", label: "奖励审核", icon: Gift },
       { path: "/reward-tasks", label: "奖励设置", icon: Star },
     ],
@@ -198,6 +199,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
                 <Route path="/overview" element={<OverviewPanel />} />
                 <Route path="/users" element={<UsersPanel onAuthErr={onLogout} />} />
                 <Route path="/user-groups" element={<UserGroupsPanel />} />
+                <Route path="/keys" element={<KeysPanel />} />
                 <Route path="/models" element={<ModelsPanel />} />
                 <Route path="/upstreams" element={<UpstreamsPanel />} />
                 <Route path="/metrics" element={<MetricsPanel />} />
@@ -313,7 +315,7 @@ function UserChartDialog({ user, onClose }: { user: UserRow | null; onClose: () 
   );
 }
 
-type Confirm = { title: string; desc?: string; action: () => void | Promise<void> };
+type Confirm = { title: string; desc?: string; action: () => void | Promise<void>; confirmLabel?: string };
 
 function ConfirmDialog({ confirm, onClose }: { confirm: Confirm | null; onClose: () => void }) {
   return (
@@ -326,7 +328,7 @@ function ConfirmDialog({ confirm, onClose }: { confirm: Confirm | null; onClose:
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>取消</Button>
           <Button variant="destructive" onClick={async () => { await confirm?.action(); onClose(); }}>
-            <Trash2 className="h-4 w-4" />删除
+            <Trash2 className="h-4 w-4" />{confirm?.confirmLabel ?? "删除"}
           </Button>
         </div>
       </DialogContent>
@@ -1086,6 +1088,161 @@ function UserGroupDialog({ dlg, defaults, onClose, onSaved }: { dlg: { edit: Use
   );
 }
 
+
+// ============================================================
+// API 密钥(用户 Key 集中管控:审批 / 模型范围 / 吊销)
+// ============================================================
+
+/** 时间列展示:兼容 "@unix秒" / 纯数字秒 / ISO 字符串,输出 YYYY-MM-DD HH:mm。 */
+function fmtDateTime(v: string | null | undefined): string {
+  if (!v) return "—";
+  const raw = String(v).replace(/^@/, "");
+  const tsMs = /^\d+$/.test(raw) ? Number(raw) * 1000 : NaN;
+  const d = isFinite(tsMs) ? new Date(tsMs) : new Date(raw);
+  if (isNaN(d.getTime())) return "—";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function KeysPanel() {
+  const [rows, setRows] = useState<AdminKeyRow[]>([]);
+  const [err, setErr] = useState("");
+  const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [scope, setScope] = useState<AdminKeyRow | null>(null);
+
+  const load = async () => {
+    setErr("");
+    try {
+      setRows((await api.allKeys()).data);
+    } catch (e: any) {
+      // 401 已由 api 层广播全局跳登录;其余错误就地展示。
+      setErr(e.message || "加载失败");
+    }
+  };
+  useEffect(() => { load(); }, []);
+
+  const setApproved = async (k: AdminKeyRow, approved: boolean) => {
+    try { await api.patchKey(k.id, { approved }); await load(); }
+    catch (e: any) { setErr(e.message); }
+  };
+  const revoke = (k: AdminKeyRow) => setConfirm({
+    title: "吊销该 Key?",
+    desc: "该 Key 将立即失效,使用它的应用会中断。",
+    confirmLabel: "吊销",
+    action: async () => { await api.revokeKey(k.id); await load(); },
+  });
+
+  return (
+    <div className="space-y-5">
+      <Card>
+        <CardHeader>
+          <div className="space-y-1">
+            <CardTitle className="text-base">API 密钥</CardTitle>
+            <CardDescription>全部用户 Key 的集中管控:审批、模型范围与吊销,操作即时生效(最多展示 500 条)。</CardDescription>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>属主</TableHead><TableHead>接口</TableHead><TableHead>Key</TableHead>
+                <TableHead>状态</TableHead><TableHead>模型范围</TableHead><TableHead>创建时间</TableHead><TableHead className="text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((k) => {
+                const models = k.allowed_models ?? [];
+                return (
+                  <TableRow key={k.id}>
+                    <TableCell className="max-w-[160px] truncate font-medium" title={k.username || k.phone || k.user_id}>
+                      {k.username || k.phone || k.user_id.slice(0, 8)}
+                    </TableCell>
+                    <TableCell><Badge variant="muted">{k.interface_kind}</Badge></TableCell>
+                    <TableCell><span className="mono text-xs">{k.key_prefix}</span></TableCell>
+                    <TableCell>
+                      {k.revoked ? <Badge variant="muted">已吊销</Badge>
+                        : k.status === 1 ? <Badge variant="muted" className="border-amber-500/30 bg-amber-500/10 text-amber-600">待审批</Badge>
+                        : <Badge variant="success">启用</Badge>}
+                    </TableCell>
+                    <TableCell>
+                      {models.length === 0
+                        ? <span className="text-xs text-muted-foreground">组内全部</span>
+                        : <span className="text-xs" title={models.join("\n")}>
+                            {models.slice(0, 3).join(", ")}{models.length > 3 ? ` +${models.length - 3}` : ""}
+                          </span>}
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{fmtDateTime(k.created_at)}</TableCell>
+                    <TableCell>
+                      {!k.revoked && (
+                        <RowActions max={3} actions={[
+                          { label: "配置范围", icon: <SlidersHorizontal className="h-4 w-4" />, onClick: () => setScope(k) },
+                          ...(k.status === 1 ? [{ label: "批准", icon: <Check className="h-4 w-4" />, onClick: () => setApproved(k, true) }] : []),
+                          ...(k.status !== 1 ? [{ label: "撤销审批", icon: <Undo2 className="h-4 w-4" />, onClick: () => setApproved(k, false) }] : []),
+                          { label: "吊销", icon: <Ban className="h-4 w-4" />, variant: "destructive" as const, onClick: () => revoke(k) },
+                        ]} />
+                      )}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+              {rows.length === 0 && !err && (
+                <TableRow><TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">暂无任何 API Key</TableCell></TableRow>
+              )}
+              {err && rows.length === 0 && (
+                <TableRow><TableCell colSpan={7} className="py-10 text-center text-sm text-destructive">{err}</TableCell></TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+
+      <KeyScopeDialog keyRow={scope} onClose={() => setScope(null)} onSaved={load} />
+      <ConfirmDialog confirm={confirm} onClose={() => setConfirm(null)} />
+    </div>
+  );
+}
+
+function KeyScopeDialog({ keyRow, onClose, onSaved }: { keyRow: AdminKeyRow | null; onClose: () => void; onSaved: () => void }) {
+  const open = !!keyRow;
+  const [text, setText] = useState("");
+  const [err, setErr] = useState("");
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (open) { setText((keyRow?.allowed_models ?? []).join("\n")); setErr(""); }
+  }, [keyRow]);
+
+  const submit = async () => {
+    if (!keyRow) return;
+    const models = text.split("\n").map((s) => s.trim()).filter(Boolean);
+    if (models.join("\n") === (keyRow.allowed_models ?? []).join("\n")) { onClose(); return; }
+    setSaving(true); setErr("");
+    try {
+      await api.patchKey(keyRow.id, { allowed_models: models });
+      onSaved(); onClose();
+    } catch (e: any) { setErr(e.message); } finally { setSaving(false); }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>配置模型范围</DialogTitle>
+          <DialogDescription>留空 = 不限(用户组内全部模型);每行一个模型名。</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <textarea rows={6} placeholder={"gpt-4o\nclaude-sonnet-4"}
+            className="w-full rounded-lg border border-input bg-card p-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+            value={text} onChange={(e) => setText(e.target.value)} />
+          {err && <p className="text-sm text-destructive">{err}</p>}
+        </div>
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose}>取消</Button>
+          <Button onClick={submit} disabled={saving}>{saving ? "保存中…" : "保存"}</Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 const HEALTH_META: Record<ProviderHealthItem["status"], { label: string; cls: string; dot: string; pulse?: boolean }> = {
   ok:       { label: "健康",   cls: "bg-success/10 text-success", dot: "bg-success" },
@@ -3499,9 +3656,33 @@ function SettingsPanel() {
   const [logErr, setLogErr] = useState("");
   // 门户设置
   const [portalRewards, setPortalRewards] = useState(false);
+  const [portalPhone, setPortalPhone] = useState(true);
+  const [portalKeyApproval, setPortalKeyApproval] = useState(false);
   const [portalSaving, setPortalSaving] = useState(false);
   const [portalNote, setPortalNote] = useState("");
   const [portalErr, setPortalErr] = useState("");
+  // 管理员专属 Key
+  const [admKeys, setAdmKeys] = useState<AdminApiKeyRow[]>([]);
+  const [admKeyDlgOpen, setAdmKeyDlgOpen] = useState(false);
+  const [admKeyName, setAdmKeyName] = useState("");
+  const [admKeyCreating, setAdmKeyCreating] = useState(false);
+  const [admKeyResult, setAdmKeyResult] = useState<{ key: string } | null>(null);
+  const [admKeyCopied, setAdmKeyCopied] = useState(false);
+  const [admKeyConfirm, setAdmKeyConfirm] = useState<Confirm | null>(null);
+  const [admKeyErr, setAdmKeyErr] = useState("");
+  // 短信网关
+  const [smsUrl, setSmsUrl] = useState("");
+  const [smsMethod, setSmsMethod] = useState("POST");
+  const [smsBody, setSmsBody] = useState("");
+  const [smsHeaders, setSmsHeaders] = useState("");
+  const [smsHasHeaders, setSmsHasHeaders] = useState(false);
+  const [smsDev, setSmsDev] = useState(true);
+  const [smsSaving, setSmsSaving] = useState(false);
+  const [smsNote, setSmsNote] = useState("");
+  const [smsErr, setSmsErr] = useState("");
+  const [smsTestOpen, setSmsTestOpen] = useState(false);
+  const [smsTestPhone, setSmsTestPhone] = useState("");
+  const [smsTesting, setSmsTesting] = useState<null | "loading" | { ok: boolean; msg: string }>(null);
   // 管理员账号(后台改密,即时生效)
   const [admOld, setAdmOld] = useState("");
   const [admNew, setAdmNew] = useState("");
@@ -3562,7 +3743,21 @@ function SettingsPanel() {
       .then((r) => { setLogPreview(r.body_preview_max_bytes); setLogRetention(r.retention_days); })
       .catch(() => { /* 回退默认值 */ });
     api.portalSettings()
-      .then((r) => setPortalRewards(r.rewards_enabled))
+      .then((r) => {
+        setPortalRewards(r.rewards_enabled);
+        setPortalPhone(r.phone_register_enabled ?? true);
+        setPortalKeyApproval(r.key_approval_required ?? false);
+      })
+      .catch(() => { /* 回退默认值 */ });
+    api.adminKeys()
+      .then((r) => setAdmKeys(r.data))
+      .catch(() => { /* 加载失败不阻塞其它设置卡 */ });
+    api.getSmsSettings()
+      .then((r) => {
+        setSmsUrl(r.gateway_url ?? ""); setSmsMethod(r.gateway_method || "POST");
+        setSmsBody(r.gateway_body ?? ""); setSmsHeaders("");
+        setSmsHasHeaders(!!r.has_headers); setSmsDev(!!r.dev);
+      })
       .catch(() => { /* 回退默认值 */ });
   }, []);
 
@@ -3681,11 +3876,77 @@ function SettingsPanel() {
     setPortalErr(""); setPortalNote("");
     setPortalSaving(true);
     try {
-      await api.savePortalSettings({ rewards_enabled: portalRewards });
+      await api.savePortalSettings({ rewards_enabled: portalRewards, phone_register_enabled: portalPhone, key_approval_required: portalKeyApproval });
       setPortalNote("已保存,即时生效。");
     } catch (e: any) {
       setPortalErr(e.message);
     } finally { setPortalSaving(false); }
+  };
+
+  const loadAdminKeys = () => { api.adminKeys().then((r) => setAdmKeys(r.data)).catch(() => {}); };
+  const createAdminKey = async () => {
+    setAdmKeyErr(""); setAdmKeyCreating(true);
+    try {
+      const r = await api.createAdminKey(admKeyName.trim());
+      setAdmKeyDlgOpen(false); setAdmKeyName("");
+      setAdmKeyCopied(false); setAdmKeyResult({ key: r.key });
+      loadAdminKeys();
+    } catch (e: any) { setAdmKeyErr(e.message); } finally { setAdmKeyCreating(false); }
+  };
+  const revokeAdminKey = (k: AdminApiKeyRow) => setAdmKeyConfirm({
+    title: `吊销密钥「${k.name}」?`,
+    desc: "该 Key 将立即失效,使用它的脚本/自动化会中断。",
+    confirmLabel: "吊销",
+    action: async () => { await api.revokeAdminKey(k.id); loadAdminKeys(); },
+  });
+
+  const saveSms = async () => {
+    setSmsErr(""); setSmsNote("");
+    const url = smsUrl.trim();
+    if (url) {
+      try {
+        const u = new URL(url);
+        if (u.protocol !== "http:" && u.protocol !== "https:") throw new Error();
+      } catch { setSmsErr("网关地址必须是合法的 http(s) URL"); return; }
+      if (!smsBody.trim()) { setSmsErr("配置了网关地址时,请求体模板必填"); return; }
+      if (!smsBody.includes("{phone}") || !smsBody.includes("{code}")) { setSmsErr("请求体模板必须包含 {phone} 与 {code} 占位符"); return; }
+    }
+    const headers = smsHeaders.trim();
+    if (headers) {
+      try {
+        const v = JSON.parse(headers);
+        if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error();
+      } catch { setSmsErr("请求头必须是 JSON 对象字符串,如 {\"Authorization\":\"APPCODE xxx\"}"); return; }
+    }
+    setSmsSaving(true);
+    try {
+      const body: any = { gateway_url: url, gateway_method: smsMethod, gateway_body: smsBody };
+      if (headers) body.gateway_headers = headers; // 留空不传 = 保持后端已存值;传 "{}" = 清除自定义头
+      await api.saveSmsSettings(body);
+      // 保存成功后重新拉取回填,dev/has_headers 以服务端为准
+      const fresh = await api.getSmsSettings();
+      setSmsUrl(fresh.gateway_url ?? ""); setSmsMethod(fresh.gateway_method || "POST"); setSmsBody(fresh.gateway_body ?? "");
+      setSmsHeaders(""); setSmsHasHeaders(!!fresh.has_headers); setSmsDev(!!fresh.dev);
+      setSmsNote("已保存,即时生效。");
+    } catch (e: any) {
+      setSmsErr(e.message);
+    } finally { setSmsSaving(false); }
+  };
+
+  const openSmsTest = () => {
+    if (smsDev) { setSmsErr(""); setSmsNote("未配置短信网关,当前为开发模式:验证码将随注册响应回显,无需发送测试短信。"); return; }
+    setSmsTestPhone(""); setSmsTesting(null);
+    setSmsTestOpen(true);
+  };
+
+  const runSmsTest = async () => {
+    setSmsTesting("loading");
+    try {
+      const r = await api.testSmsSettings(smsTestPhone.trim());
+      setSmsTesting({ ok: true, msg: r.message || "测试短信已提交网关。" });
+    } catch (e: any) {
+      setSmsTesting({ ok: false, msg: e.message || "发送失败" });
+    }
   };
 
   return (
@@ -3933,6 +4194,20 @@ function SettingsPanel() {
             </div>
             <Switch checked={portalRewards} onCheckedChange={setPortalRewards} />
           </div>
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm font-medium">手机号注册</div>
+              <div className="text-xs text-muted-foreground">关闭后登录页隐藏手机号注册入口,接口一并拒绝。</div>
+            </div>
+            <Switch checked={portalPhone} onCheckedChange={setPortalPhone} />
+          </div>
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm font-medium">新建 Key 需审批</div>
+              <div className="text-xs text-muted-foreground">开启后,用户在门户新建/刷新的 API Key 处于待审批状态,需管理员批准后才能调用接口。</div>
+            </div>
+            <Switch checked={portalKeyApproval} onCheckedChange={setPortalKeyApproval} />
+          </div>
           <div className="flex flex-wrap items-center gap-2 border-t pt-4">
             <Button onClick={savePortal} disabled={portalSaving}>{portalSaving ? "保存中…" : "保存配置"}</Button>
             {portalNote && <span className="text-xs text-success">{portalNote}</span>}
@@ -3940,6 +4215,149 @@ function SettingsPanel() {
           </div>
         </CardContent>
       </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-base">短信网关</CardTitle>
+            <Badge variant={smsDev ? "muted" : "success"}>{smsDev ? "开发模式" : "已配置"}</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {smsDev && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-600">
+              未配置短信网关,当前为开发模式:验证码将随注册响应回显。生产环境请配置网关。
+            </div>
+          )}
+          <p className="text-xs text-muted-foreground">
+            注册验证码通过此 HTTP 网关下发。请求体模板中的 {"{phone}"} 与 {"{code}"} 占位符会在发送时替换为实际手机号与验证码。
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="sm:col-span-2"><label className="mb-1 block text-xs text-muted-foreground">网关地址(http/https URL,留空 = 开发模式)</label>
+              <Input placeholder="https://sms.example.com/v1/send" value={smsUrl} onChange={(e) => setSmsUrl(e.target.value)} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">请求方法</label>
+              <select value={smsMethod} onChange={(e) => setSmsMethod(e.target.value)} className={sel}>
+                <option value="POST">POST</option>
+                <option value="GET">GET</option>
+              </select></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">请求头 JSON(可选)</label>
+              <Input placeholder={smsHasHeaders ? "已配置(留空保持不变),填 {} 清除" : '{"Authorization":"APPCODE xxx"}'}
+                value={smsHeaders} onChange={(e) => setSmsHeaders(e.target.value)} /></div>
+            <div className="sm:col-span-2"><label className="mb-1 block text-xs text-muted-foreground">请求体模板(必须包含 {"{phone}"} 与 {"{code}"} 占位符)</label>
+              <textarea rows={3} placeholder={'{"phone":"{phone}","code":"{code}"}'}
+                className="w-full rounded-lg border border-input bg-card p-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring"
+                value={smsBody} onChange={(e) => setSmsBody(e.target.value)} /></div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+            <Button onClick={saveSms} disabled={smsSaving}>{smsSaving ? "保存中…" : "保存配置"}</Button>
+            <Button variant="outline" onClick={openSmsTest}><Send className="h-4 w-4" />发送测试短信</Button>
+            {smsNote && <span className="text-xs text-success">{smsNote}</span>}
+            {smsErr && <span className="text-xs text-destructive">{smsErr}</span>}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Dialog open={smsTestOpen} onOpenChange={(o) => !o && setSmsTestOpen(false)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>发送测试短信</DialogTitle>
+            <DialogDescription>向指定手机号发送一条测试验证码,验证网关配置是否可用。</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <Input placeholder="手机号,如 13800138000" value={smsTestPhone} onChange={(e) => setSmsTestPhone(e.target.value)} />
+            <div className="flex flex-wrap items-center gap-2">
+              <Button onClick={runSmsTest} disabled={smsTesting === "loading" || !smsTestPhone.trim()}>
+                {smsTesting === "loading" ? "发送中…" : "发送"}
+              </Button>
+              {smsTesting && smsTesting !== "loading" && (
+                <span className={cn("text-xs", smsTesting.ok ? "text-success" : "text-destructive")}>{smsTesting.msg}</span>
+              )}
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Card>
+        <CardHeader>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <CardTitle className="text-base">管理员专属 Key</CardTitle>
+              <CardDescription>供脚本/自动化调用管理接口使用,拥有全部管理权限;明文仅创建时展示一次;上限 10 把。</CardDescription>
+            </div>
+            <Button size="sm" onClick={() => { setAdmKeyName(""); setAdmKeyErr(""); setAdmKeyDlgOpen(true); }}>
+              <Plus className="h-4 w-4" />创建密钥
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>名称</TableHead><TableHead>Key</TableHead><TableHead>最近使用</TableHead><TableHead>状态</TableHead><TableHead className="text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {admKeys.map((k) => (
+                <TableRow key={k.id}>
+                  <TableCell className="max-w-[220px] truncate font-medium" title={k.name}>{k.name}</TableCell>
+                  <TableCell><span className="mono text-xs">{k.key_prefix}</span></TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{k.last_used_at ? fmtDateTime(k.last_used_at) : "从未使用"}</TableCell>
+                  <TableCell>{k.revoked ? <Badge variant="muted">已吊销</Badge> : <Badge variant="success">启用</Badge>}</TableCell>
+                  <TableCell>
+                    {!k.revoked && (
+                      <RowActions actions={[
+                        { label: "吊销", icon: <Ban className="h-4 w-4" />, variant: "destructive", onClick: () => revokeAdminKey(k) },
+                      ]} />
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+              {admKeys.length === 0 && (
+                <TableRow><TableCell colSpan={5} className="py-8 text-center text-sm text-muted-foreground">暂无密钥,创建后即可用其调用管理接口</TableCell></TableRow>
+              )}
+            </TableBody>
+          </Table>
+          {admKeyErr && <p className="mt-2 text-sm text-destructive">{admKeyErr}</p>}
+        </CardContent>
+      </Card>
+
+      <Dialog open={admKeyDlgOpen} onOpenChange={(o) => !o && setAdmKeyDlgOpen(false)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>创建管理员专属 Key</DialogTitle>
+            <DialogDescription>为该密钥备注一个用途名称,便于日后识别;创建成功后明文仅展示一次。</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <label className="mb-1 block text-xs text-muted-foreground">备注名 *</label>
+              <Input placeholder="如:CI 部署脚本" value={admKeyName} maxLength={32}
+                onChange={(e) => setAdmKeyName(e.target.value)} autoFocus />
+            </div>
+            {admKeyErr && <p className="text-sm text-destructive">{admKeyErr}</p>}
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setAdmKeyDlgOpen(false)}>取消</Button>
+            <Button onClick={createAdminKey} disabled={admKeyCreating || !admKeyName.trim()}>
+              {admKeyCreating ? "创建中…" : "创建"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!admKeyResult} onOpenChange={(o) => !o && setAdmKeyResult(null)}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>密钥已创建</DialogTitle>
+            <DialogDescription>请立即复制,关闭后无法再次查看。</DialogDescription>
+          </DialogHeader>
+          <div className="mono select-all rounded-lg border bg-muted/50 px-3 py-3 text-sm break-all">{admKeyResult?.key}</div>
+          <Button onClick={async () => { if (admKeyResult && await copyText(admKeyResult.key)) { setAdmKeyCopied(true); setTimeout(() => setAdmKeyCopied(false), 1500); } }}>
+            {admKeyCopied ? <><Check className="h-4 w-4" />已复制</> : <><Copy className="h-4 w-4" />复制</>}
+          </Button>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDialog confirm={admKeyConfirm} onClose={() => setAdmKeyConfirm(null)} />
 
       <Card>
         <CardHeader>

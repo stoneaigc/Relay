@@ -37,6 +37,11 @@ pub fn init_field_secret(secret: &str) {
     let _ = FIELD_SECRET.set(secret.to_string());
 }
 
+/// 读取字段级加密主密钥(其它模块加密自有敏感配置用;未注入=空串,调用方自行降级)。
+pub fn field_secret() -> String {
+    FIELD_SECRET.get().cloned().unwrap_or_default()
+}
+
 /// 加密待入库的敏感字段(空值原样返回 None;已带密文前缀则不二次包裹;
 /// 未注入密钥(测试态)或加密失败时回退明文,保证功能可用)。
 fn enc_field(plain: Option<&str>) -> Option<String> {
@@ -268,6 +273,13 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_plain TEXT")
             .execute(pool)
             .await;
+        // 分级密钥管控:模型范围 + 审批状态。
+        let _ = q!("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allowed_models TEXT")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS status BIGINT NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
         // 模型广场元数据:上下文长度与能力标签(逗号分隔)。
         let _ = q!("ALTER TABLE models ADD COLUMN IF NOT EXISTS context_length BIGINT")
             .execute(pool)
@@ -357,6 +369,11 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE providers ADD COLUMN display_name TEXT").execute(pool).await;
         // Key 明文列:门户端随时查看/复制完整 Key(认证仍走 key_hash)。
         let _ = q!("ALTER TABLE api_keys ADD COLUMN key_plain TEXT").execute(pool).await;
+        // 分级密钥管控:模型范围 + 审批状态。
+        let _ = q!("ALTER TABLE api_keys ADD COLUMN allowed_models TEXT").execute(pool).await;
+        let _ = q!("ALTER TABLE api_keys ADD COLUMN status INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
         // 模型广场元数据:上下文长度与能力标签(逗号分隔)。
         let _ = q!("ALTER TABLE models ADD COLUMN context_length INTEGER").execute(pool).await;
         let _ = q!("ALTER TABLE models ADD COLUMN tags TEXT").execute(pool).await;
@@ -536,13 +553,29 @@ pub async fn load_into_memory(
         users.insert(id, us);
     }
 
-    let rows = q!("SELECT id, user_id, key_hash FROM api_keys WHERE revoked = 0")
-        .fetch_all(pool)
-        .await?;
+    // 仅加载「已启用」的 Key;待审批(status=1)不进内存 = 等效失效,审批后由管理端热插。
+    let rows = q!(
+        "SELECT id, user_id, key_hash, allowed_models FROM api_keys WHERE revoked = 0 AND status = 0"
+    )
+    .fetch_all(pool)
+    .await?;
     for r in rows {
         let user_id = Uuid::parse_str(r.get::<String, _>("user_id").as_str())?;
         let id = Uuid::parse_str(r.get::<String, _>("id").as_str())?;
-        keys.insert(r.get::<String, _>("key_hash"), KeyEntry { id, user_id });
+        let allowed_models: Option<String> = r.try_get("allowed_models").unwrap_or(None);
+        let allowed = allowed_models.and_then(|s| {
+            let v: Vec<String> = s
+                .split(',')
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(str::to_string)
+                .collect();
+            if v.is_empty() { None } else { Some(v) }
+        });
+        keys.insert(
+            r.get::<String, _>("key_hash"),
+            KeyEntry { id, user_id, allowed_models: allowed },
+        );
     }
 
     // 重启恢复:从库内日/月用量初始化预算窗口(仅预算用户)。
@@ -1733,6 +1766,93 @@ pub async fn delete_user_group(pool: &Db, id: i64) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---- 管理员专属 API Key(管理面脚本/自动化;明文仅创建时返回一次) ----
+
+pub const ADMIN_KEY_PREFIX: &str = "relay_adm_";
+/// 管理密钥数量上限(防滥用)。
+pub const ADMIN_KEY_CAP: usize = 10;
+
+pub async fn count_admin_keys(pool: &Db) -> anyhow::Result<i64> {
+    let c: i64 = q!("SELECT COUNT(*) AS c FROM admin_keys WHERE revoked = 0")
+        .fetch_one(pool)
+        .await?
+        .get("c");
+    Ok(c)
+}
+
+/// 创建管理密钥:明文仅在调用方响应中返回一次;库存 sha256。
+/// 返回 (id, 明文, 掩码前缀)。
+pub async fn create_admin_key(pool: &Db, name: &str) -> anyhow::Result<(i64, String, String)> {
+    let plain = gen_admin_key_plain();
+    let hash = hash_key(&plain);
+    let prefix = plain.chars().take(14).collect::<String>();
+    let r = q!(
+        "INSERT INTO admin_keys (name, key_hash, key_prefix, created_at) VALUES (?, ?, ?, ?) RETURNING id",
+    )
+    .bind(name)
+    .bind(&hash)
+    .bind(&prefix)
+    .bind(now_iso())
+    .fetch_one(pool)
+    .await?;
+    Ok((r.get("id"), plain, prefix))
+}
+
+fn gen_admin_key_plain() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("{ADMIN_KEY_PREFIX}{hex}")
+}
+
+/// 列出管理密钥(不含哈希)。
+pub async fn list_admin_keys(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
+    let rows = q!(
+        "SELECT id, name, key_prefix, revoked, last_used_at, created_at FROM admin_keys ORDER BY id DESC"
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.get::<i64, _>("id"),
+                "name": r.get::<String, _>("name"),
+                "key_prefix": r.get::<String, _>("key_prefix"),
+                "revoked": r.get::<i64, _>("revoked") != 0,
+                "last_used_at": r.try_get::<Option<String>, _>("last_used_at").unwrap_or(None),
+                "created_at": r.get::<String, _>("created_at"),
+            })
+        })
+        .collect())
+}
+
+/// 按哈希校验管理密钥,命中返回 (id, name)。
+pub async fn find_admin_key(pool: &Db, key_hash: &str) -> anyhow::Result<Option<(i64, String)>> {
+    let row = q!("SELECT id, name FROM admin_keys WHERE key_hash = ? AND revoked = 0")
+        .bind(key_hash)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| (r.get("id"), r.get("name"))))
+}
+
+pub async fn touch_admin_key(pool: &Db, id: i64) {
+    let _ = q!("UPDATE admin_keys SET last_used_at = ? WHERE id = ?")
+        .bind(now_iso())
+        .bind(id)
+        .execute(pool)
+        .await;
+}
+
+pub async fn revoke_admin_key(pool: &Db, id: i64) -> anyhow::Result<()> {
+    q!("UPDATE admin_keys SET revoked = 1 WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 // ---- 奖励任务(后台可配置)----
 
 /// 审核 / 申领校验所需的任务字段。
@@ -1860,6 +1980,47 @@ pub async fn update_reward_task(
 pub async fn delete_reward_task(pool: &Db, id: i64) -> anyhow::Result<()> {
     q!("DELETE FROM reward_tasks WHERE id = ?").bind(id).execute(pool).await?;
     Ok(())
+}
+
+/// 首次启动播种 default 组体系(幂等,已有任何组时不做改动):
+/// - 模型组空 → 建「default」并激活;已有组但无激活组 → 激活第一个(落地 P1-4);
+/// - 用户组空 → 建「default」(五项限额全 NULL=继承全局)。
+pub async fn seed_default_groups_if_empty(pool: &Db) -> anyhow::Result<()> {
+    // 模型组
+    let c: i64 = q!("SELECT COUNT(*) AS c FROM model_groups").fetch_one(pool).await?.get("c");
+    if c == 0 {
+        q!("INSERT INTO model_groups (name, is_active, created_at) VALUES ('default', 1, ?)")
+            .bind(now_iso())
+            .execute(pool)
+            .await?;
+        tracing::info!("seeded default model group");
+    } else {
+        let active: i64 = q!("SELECT COUNT(*) AS c FROM model_groups WHERE is_active = 1")
+            .fetch_one(pool)
+            .await?
+            .get("c");
+        if active == 0 {
+            q!("UPDATE model_groups SET is_active = 1 WHERE id = (SELECT MIN(id) FROM model_groups)")
+                .execute(pool)
+                .await?;
+            tracing::info!("no active model group, activated the first one");
+        }
+    }
+    // 用户组
+    let c: i64 = q!("SELECT COUNT(*) AS c FROM user_groups").fetch_one(pool).await?.get("c");
+    if c == 0 {
+        create_user_group(pool, "default", None, None, None, None, None).await?;
+        tracing::info!("seeded default user group");
+    }
+    Ok(())
+}
+
+/// default 用户组 id(不存在 = None)。注册/管理员建号默认挂组用。
+pub async fn default_user_group_id(pool: &Db) -> anyhow::Result<Option<i64>> {
+    let row = q!("SELECT id FROM user_groups WHERE name = 'default'")
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| r.get("id")))
 }
 
 /// 首次启动:若无任务,播种 3 个默认任务(star / issue / 提建议)。
@@ -2153,24 +2314,30 @@ pub struct KeyRow {
     /// 完整 Key 明文(AES-256-GCM 静态加密存储;解密后仅返回给 Key 属主,门户端随时复制)。
     pub key_plain: Option<String>,
     pub revoked: i64,
+    /// 0=启用 1=待管理员审批(审批开关开启时创建的新 Key)。
+    pub status: i64,
+    /// 模型白名单(逗号分隔;None=不限=用户组内全部)。
+    pub allowed_models: Option<Vec<String>>,
     pub created_at: String,
 }
 
 /// 创建一把 Key,写库;返回 (明文, 哈希, KeyRow)。
 /// 明文以字段级加密(AES-256-GCM,jwt_secret 派生)存入 key_plain:支持门户端随时复制,
 /// 同时保证拖库不等于 Key 泄露;库内认证仍走 key_hash。
+/// `status`:0=直接启用;1=待管理员审批(审批开关开启时)。
 pub async fn create_key(
     pool: &Db,
     user_id: Uuid,
     interface_kind: &str,
+    status: i64,
 ) -> anyhow::Result<(String, String, KeyRow)> {
     let (plaintext, hash, prefix) = generate_key();
     let id = Uuid::new_v4();
     let created = now_iso();
     let enc_plain = enc_field(Some(&plaintext));
     q!(
-        "INSERT INTO api_keys (id, user_id, interface_kind, key_hash, key_prefix, key_plain, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO api_keys (id, user_id, interface_kind, key_hash, key_prefix, key_plain, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(user_id.to_string())
@@ -2178,6 +2345,7 @@ pub async fn create_key(
     .bind(&hash)
     .bind(&prefix)
     .bind(enc_plain)
+    .bind(status)
     .bind(&created)
     .execute(pool)
     .await?;
@@ -2187,6 +2355,8 @@ pub async fn create_key(
         key_prefix: prefix,
         key_plain: Some(plaintext.clone()),
         revoked: 0,
+        status,
+        allowed_models: None,
         created_at: created,
     };
     Ok((plaintext, hash, row))
@@ -2216,7 +2386,7 @@ pub async fn revoke_active_keys(
 
 pub async fn list_keys(pool: &Db, user_id: Uuid) -> anyhow::Result<Vec<KeyRow>> {
     let rows = q!(
-        "SELECT id, interface_kind, key_prefix, key_plain, revoked, created_at
+        "SELECT id, interface_kind, key_prefix, key_plain, revoked, status, allowed_models, created_at
          FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
     )
     .bind(user_id.to_string())
@@ -2224,6 +2394,7 @@ pub async fn list_keys(pool: &Db, user_id: Uuid) -> anyhow::Result<Vec<KeyRow>> 
     .await?;
     rows.iter()
         .map(|r| {
+            let allowed_raw: Option<String> = r.try_get("allowed_models").unwrap_or(None);
             Ok(KeyRow {
                 id: Uuid::parse_str(r.get::<String, _>("id").as_str())?,
                 interface_kind: r.get("interface_kind"),
@@ -2231,10 +2402,101 @@ pub async fn list_keys(pool: &Db, user_id: Uuid) -> anyhow::Result<Vec<KeyRow>> 
                 // 密文解密后仅返回给 Key 属主;解密失败(换过 jwt_secret)为 None,前端以「刷新 Key」兜底。
                 key_plain: dec_field(r.try_get::<Option<String>, _>("key_plain").unwrap_or(None)),
                 revoked: r.get("revoked"),
+                status: r.try_get("status").unwrap_or(0),
+                allowed_models: allowed_raw.map(|s| {
+                    s.split(',').map(str::trim).filter(|m| !m.is_empty()).map(str::to_string).collect()
+                }),
                 created_at: r.get("created_at"),
             })
         })
         .collect()
+}
+
+// ---- API Key 管理端(分级密钥管控:范围配置/审批/吊销) ----
+
+/// 全量 Key 列表(管理端,含属主用户名;明文/哈希不回显)。上限 500 条。
+pub async fn list_all_keys(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
+    let rows = q!(
+        "SELECT k.id, k.user_id, u.username, u.phone, k.interface_kind, k.key_prefix, k.revoked, k.status, k.allowed_models, k.created_at
+         FROM api_keys k LEFT JOIN users u ON u.id = k.user_id
+         ORDER BY k.created_at DESC LIMIT 500",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let allowed_raw: Option<String> = r.try_get("allowed_models").unwrap_or(None);
+            let allowed: Vec<String> = allowed_raw
+                .map(|s| s.split(',').map(str::trim).filter(|m| !m.is_empty()).map(str::to_string).collect())
+                .unwrap_or_default();
+            serde_json::json!({
+                "id": r.get::<String, _>("id"),
+                "user_id": r.get::<String, _>("user_id"),
+                "username": r.try_get::<Option<String>, _>("username").unwrap_or(None),
+                "phone": r.try_get::<Option<String>, _>("phone").unwrap_or(None),
+                "interface_kind": r.get::<String, _>("interface_kind"),
+                "key_prefix": r.get::<String, _>("key_prefix"),
+                "revoked": r.get::<i64, _>("revoked") != 0,
+                "status": r.try_get::<i64, _>("status").unwrap_or(0),
+                "allowed_models": allowed,
+                "created_at": r.get::<String, _>("created_at"),
+            })
+        })
+        .collect())
+}
+
+/// 按哈希取单把 Key(审批通过后回填内存用)。
+pub async fn get_key_by_hash_for_memory(pool: &Db, key_hash: &str) -> anyhow::Result<Option<(Uuid, Uuid, Option<Vec<String>>)>> {
+    let row = q!("SELECT id, user_id, allowed_models FROM api_keys WHERE key_hash = ? AND revoked = 0 AND status = 0")
+        .bind(key_hash)
+        .fetch_optional(pool)
+        .await?;
+    match row {
+        None => Ok(None),
+        Some(r) => {
+            let allowed_raw: Option<String> = r.try_get("allowed_models").unwrap_or(None);
+            let allowed = allowed_raw.and_then(|s| {
+                let v: Vec<String> = s.split(',').map(str::trim).filter(|m| !m.is_empty()).map(str::to_string).collect();
+                if v.is_empty() { None } else { Some(v) }
+            });
+            Ok(Some((
+                Uuid::parse_str(r.get::<String, _>("id").as_str())?,
+                Uuid::parse_str(r.get::<String, _>("user_id").as_str())?,
+                allowed,
+            )))
+        }
+    }
+}
+
+/// 设置 Key 的模型范围;None=不限。返回 (是否存在, key_hash, status)(供内存同步)。
+pub async fn set_key_scope(pool: &Db, id: &str, allowed: Option<&[String]>) -> anyhow::Result<Option<(String, i64)>> {
+    let val = allowed.map(|v| v.join(","));
+    let r = q!("UPDATE api_keys SET allowed_models = ? WHERE id = ? RETURNING key_hash, status")
+        .bind(val)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(r.map(|row| (row.get::<String, _>("key_hash"), row.get::<i64, _>("status"))))
+}
+
+/// 设置 Key 审批状态(0=启用 1=待审批)。返回 (是否存在, key_hash)(供内存同步)。
+pub async fn set_key_status(pool: &Db, id: &str, status: i64) -> anyhow::Result<Option<String>> {
+    let r = q!("UPDATE api_keys SET status = ? WHERE id = ? RETURNING key_hash")
+        .bind(status)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(r.map(|row| row.get::<String, _>("key_hash")))
+}
+
+/// 管理员吊销单把 Key;返回 key_hash(供内存删除)。已吊销返回 None。
+pub async fn revoke_key_by_id(pool: &Db, id: &str) -> anyhow::Result<Option<String>> {
+    let r = q!("UPDATE api_keys SET revoked = 1 WHERE id = ? AND revoked = 0 RETURNING key_hash")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(r.map(|row| row.get::<String, _>("key_hash")))
 }
 
 // ---- 用量查询 ----

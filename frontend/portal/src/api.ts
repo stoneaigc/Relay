@@ -45,6 +45,21 @@ export interface KeyInfo {
   key_plain?: string | null;
   revoked: boolean;
   created_at: string;
+  /** 0=启用 1=待审批 */
+  status?: number;
+  /** true = 新建/刷新的 Key 尚待管理员批准,批准前调用接口会 401 */
+  pending_approval?: boolean;
+  /** 允许调用的模型范围;null/空 = 不限(组内全部) */
+  allowed_models?: string[] | null;
+}
+
+/** 创建/轮换 Key 的响应:明文仅本次返回;待审批开启时 status=1 */
+export interface KeyMutationResp {
+  id: string;
+  key: string;
+  key_prefix: string;
+  status?: number;
+  pending_approval?: boolean;
 }
 
 /** 模型广场卡片:聚合同名部署后的展示信息。价格 null 表示上游未定价。 */
@@ -77,9 +92,9 @@ export const api = {
   me: () => req("/portal/api/me"),
   balance: () => req("/portal/api/balance"),
   keys: (): Promise<{ data: KeyInfo[] }> => req("/portal/api/keys"),
-  createKey: (interface_kind: string) =>
+  createKey: (interface_kind: string): Promise<KeyMutationResp> =>
     req("/portal/api/keys", { method: "POST", body: JSON.stringify({ interface_kind }) }),
-  rotateKey: (interface_kind: string) =>
+  rotateKey: (interface_kind: string): Promise<KeyMutationResp> =>
     req("/portal/api/keys/rotate", { method: "POST", body: JSON.stringify({ interface_kind }) }),
   models: (): Promise<{ data: ModelCard[] }> => req("/portal/api/models"),
   summary: (): Promise<{ granted: number; used: number; balance: number }> => req("/portal/api/summary"),

@@ -1,4 +1,4 @@
-﻿mod admin;
+mod admin;
 mod audit;
 mod auth;
 mod cache;
@@ -17,6 +17,7 @@ mod responses;
 pub mod routing;
 mod semantic_cache;
 mod settings;
+mod sms;
 mod state;
 mod storage;
 mod translate;
@@ -52,20 +53,34 @@ use chrono::{Datelike, Timelike};
 /// 无结尾斜杠的 SPA 入口(如 /relay/admin)301 重定向到带斜杠的原始路径,保证相对资源引用正确解析。
 async fn strip_web_prefix(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
-    let stripped = ["admin", "portal", "v1", "login"].iter().find_map(|app| {
-        let pat = format!("/{app}");
-        let idx = path.find(&pat)?;
-        // idx==0 说明请求本就挂在根路径(如 /admin/...),无前缀可剥;
-        // 模式自带前导斜杠,".../xadmin/..." 不会被误匹配。
-        if idx == 0 {
-            return None;
+    // 最早段匹配:在所有入口名(admin/portal/v1/login)的合法命中里取**最靠前**的一个,
+    // 只剥离它之前的前缀。v0.3.5~0.4.2 的 find_map 版本会在路径**中段**命中(如
+    // /admin/api/settings/portal 里的 "/portal"),把管理接口误改写/重定向(308)——系统性 bug。
+    // idx==0 说明请求本就挂在根路径(如 /admin/...),无前缀可剥,原样通过。
+    let stripped = (|| -> Option<String> {
+        let mut best: Option<usize> = None;
+        for app in ["admin", "portal", "v1", "login"] {
+            let needle = format!("/{app}");
+            let pat_len = needle.len();
+            let mut from = 0;
+            while let Some(rel) = path[from..].find(&needle) {
+                let idx = from + rel;
+                let rest = &path[idx + pat_len..];
+                if rest.is_empty() || rest.starts_with('/') {
+                    match best {
+                        Some(i) if idx >= i => {}
+                        _ => best = Some(idx),
+                    }
+                    break; // 该模式的首次合法命中即可
+                }
+                from = idx + 1; // 段边界不符(如 /admin-keys 命中 /admin),继续找下一处
+            }
         }
-        let rest = &path[idx + pat.len()..];
-        if !rest.is_empty() && !rest.starts_with('/') {
-            return None;
+        match best {
+            Some(0) | None => None,
+            Some(i) => Some(path[i..].to_string()),
         }
-        Some(format!("{pat}{rest}"))
-    });
+    })();
     match stripped {
         // SPA 入口无结尾斜杠:301 到原始路径+斜杠(保留反代前缀),相对资源才能落在正确目录。
         Some(p) if p == "/admin" || p == "/portal" => {
@@ -170,7 +185,9 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // 首次启动播种默认奖励任务(star / issue / 提建议)。
+    // 首启播种:奖励任务示例 + default 模型组/用户组(P1-4/P4-2,幂等)。
     storage::seed_reward_tasks_if_empty(&db).await?;
+    storage::seed_default_groups_if_empty(&db).await?;
 
     // 从 DB 加载系统配置(目前 email.* 与 fallback.*),覆盖到内存 Config(DB 优先于配置文件)。
     {
@@ -318,6 +335,7 @@ async fn main() -> anyhow::Result<()> {
     let portal_api = Router::new()
         .route("/auth/login", post(portal::password_login))
         .route("/auth/email/send_code", post(portal::send_email_code))
+        .route("/auth/phone/send_code", post(portal::send_phone_code))
         .route("/auth/register", post(portal::register))
         .route("/auth/reset_password", post(portal::reset_password))
         .route("/auth/change_password", post(portal::change_password))
@@ -411,6 +429,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/settings/embedding/test", post(admin::test_embedding))
         .route("/settings/logging", get(admin::get_logging_settings).post(admin::save_logging_settings))
         .route("/settings/portal", get(admin::get_portal_settings).post(admin::save_portal_settings))
+        .route("/settings/sms", get(admin::get_sms_settings).put(admin::save_sms_settings))
+        .route("/settings/sms/test", post(admin::test_sms_settings))
+        .route("/admin-keys", get(admin::list_admin_keys).post(admin::create_admin_key))
+        .route("/admin-keys/:id", axum::routing::delete(admin::revoke_admin_key))
+        .route("/keys", get(admin::list_all_keys))
+        .route("/keys/:id", axum::routing::patch(admin::patch_key).delete(admin::revoke_key_admin))
         // 检查更新(比对 GitHub 最新 Release)
         .route("/version/check", get(admin::version_check))
         // ---- 上游治理仪表盘 ----
@@ -429,6 +453,12 @@ async fn main() -> anyhow::Result<()> {
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&state),
             audit::audit_middleware,
+        ))
+        // 管理员专属 Key 认证(外层,先于审计执行):Bearer relay_adm_* 查库注入身份,
+        // JWT 请求原样透传;同时清除客户端伪造的服务端身份头。
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            admin::admin_key_auth,
         ));
 
     // SPA 静态资源(未命中的子路径回退到 index.html,交给前端路由)。

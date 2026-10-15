@@ -195,9 +195,18 @@ pub async fn audit_middleware(
 
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
-    let actor = crate::jwt::from_headers(&state.config().auth.jwt_secret, req.headers(), "admin")
-        .map(|c| c.sub)
-        .unwrap_or_else(|_| "anonymous".to_string());
+    // 归因优先级:服务端注入头(管理员 Key 中间件写入,入站客户端伪造值已被清掉)> admin JWT > anonymous。
+    let actor = req
+        .headers()
+        .get(AUDIT_ACTOR_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_owned())
+        .or_else(|| {
+            crate::jwt::from_headers(&state.config().auth.jwt_secret, req.headers(), "admin")
+                .map(|c| c.sub)
+                .ok()
+        })
+        .unwrap_or_else(|| "anonymous".to_string());
 
     let start = Instant::now();
     let resp = next.run(req).await;

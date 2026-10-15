@@ -430,7 +430,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [models, setModels] = useState<ModelCard[]>([]);
   const [series, setSeries] = useState<{ ts: number; tokens: number; calls: number }[]>([]);
   const [seriesDays, setSeriesDays] = useState(30);
-  const [reveal, setReveal] = useState<{ kind: string; key: string } | null>(null);
+  const [reveal, setReveal] = useState<{ kind: string; key: string; pending_approval?: boolean } | null>(null);
   const [rewardsEnabled, setRewardsEnabled] = useState(false);
   const [version, setVersion] = useState("");
   const [pwOpen, setPwOpen] = useState(false);
@@ -665,7 +665,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       </main>
 
       <Dialog open={!!reveal} onOpenChange={(o) => !o && setReveal(null)}>
-        {reveal && <RevealContent kind={reveal.kind} apiKey={reveal.key} />}
+        {reveal && <RevealContent kind={reveal.kind} apiKey={reveal.key} pendingApproval={reveal.pending_approval} />}
       </Dialog>
 
       <PasswordDialog open={pwOpen} onClose={() => setPwOpen(false)} />
@@ -1002,7 +1002,7 @@ function RewardTaskCard({ task, claim, busy, onSubmit }: {
 
 function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
   kind: string; label: string; baseUrl: string; keys: KeyInfo[];
-  onReveal: (r: { kind: string; key: string }) => void; onChanged: () => void;
+  onReveal: (r: { kind: string; key: string; pending_approval?: boolean }) => void; onChanged: () => void;
 }) {
   const active = keys.find((k) => k.interface_kind === kind && !k.revoked);
   const [busy, setBusy] = useState(false);
@@ -1010,12 +1010,12 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const create = async () => {
     setBusy(true); setErr("");
-    try { const r = await api.createKey(kind); onReveal({ kind, key: r.key }); onChanged(); }
+    try { const r = await api.createKey(kind); onReveal({ kind, key: r.key, pending_approval: r.pending_approval }); onChanged(); }
     catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
   const doRotate = async () => {
     setBusy(true); setErr("");
-    try { const r = await api.rotateKey(kind); setConfirmOpen(false); onReveal({ kind, key: r.key }); onChanged(); }
+    try { const r = await api.rotateKey(kind); setConfirmOpen(false); onReveal({ kind, key: r.key, pending_approval: r.pending_approval }); onChanged(); }
     catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
   return (
@@ -1023,7 +1023,11 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
           <KeyRound className="h-4 w-4 text-muted-foreground" /> {label}
-          {active ? <Badge variant="success">已启用</Badge> : <Badge variant="muted">未创建</Badge>}
+          {active
+            ? (active.pending_approval
+              ? <Badge variant="muted" className="border-amber-500/30 bg-amber-500/10 text-amber-600">待审批</Badge>
+              : <Badge variant="success">已启用</Badge>)
+            : <Badge variant="muted">未创建</Badge>}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -1059,6 +1063,9 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
           ) : (
             <div className="mono rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active ? active.key_prefix : "—"}</div>
           )}
+          {active?.pending_approval && (
+            <p className="text-xs text-amber-600">该 Key 正在等待管理员批准,批准后才能调用接口</p>
+          )}
           <p className="mt-1 text-xs text-muted-foreground">
             {active?.key_plain
               ? "Key 以掩码显示、加密存储且仅你可见,点右侧按钮随时复制;泄露请「刷新 Key」重新生成(旧 Key 立即失效)。"
@@ -1092,7 +1099,7 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
   );
 }
 
-function RevealContent({ kind, apiKey }: { kind: string; apiKey: string }) {
+function RevealContent({ kind, apiKey, pendingApproval }: { kind: string; apiKey: string; pendingApproval?: boolean }) {
   const [state, setState] = useState<"idle" | "ok" | "sel">("idle");
   const keyRef = useRef<HTMLDivElement>(null);
   const copy = async () => {
@@ -1115,7 +1122,7 @@ function RevealContent({ kind, apiKey }: { kind: string; apiKey: string }) {
     <DialogContent>
       <DialogHeader>
         <DialogTitle>你的新 {kind === "openai" ? "OpenAI" : "Anthropic"} Key</DialogTitle>
-        <DialogDescription>请立即复制保存;关闭后将无法再次查看完整 Key(库里只存掩码与哈希),如丢失请「刷新 Key」重新生成。</DialogDescription>
+        <DialogDescription>请立即复制保存;关闭后将无法再次查看完整 Key(库里只存掩码与哈希),如丢失请「刷新 Key」重新生成。{pendingApproval ? "(该 Key 需管理员批准后生效)" : ""}</DialogDescription>
       </DialogHeader>
       <div ref={keyRef} className="mono select-all rounded-lg border bg-muted/50 px-3 py-3 text-sm break-all" title="点击可全选">{apiKey}</div>
       <Button onClick={copy} variant={state === "ok" ? "secondary" : "default"}>

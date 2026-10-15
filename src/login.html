@@ -114,6 +114,9 @@
   /* 验证码行:输入框 + 发送按钮 */
   .code-row { display: flex; gap: 8px; }
   .code-row input { flex: 1; min-width: 0; }
+  /* 注册方式子切换(邮箱/手机号),复用 tabs 样式,收窄间距 */
+  .tabs.sub { margin-top: 0; padding: 3px; }
+  .tabs.sub .tab { padding: 6px 0; font-size: 12.5px; }
   .send-btn { flex: none; padding: 0 14px; border: 1px solid rgba(99,102,241,.35); border-radius: 11px;
     background: rgba(99,102,241,.08); color: #4f46e5; font-size: 13px; cursor: pointer; white-space: nowrap; }
   .send-btn:hover:not(:disabled) { background: rgba(99,102,241,.16); }
@@ -262,14 +265,29 @@
       <button type="button" class="link-btn" data-goto="reset">忘记密码?</button>
     </form>
 
-    <!-- 注册(门户用户,邮箱验证码) -->
+    <!-- 注册(双渠道:邮箱验证码 / 手机短信验证码,均强制验证) -->
     <form id="f-register" hidden>
-      <label for="r-email">邮箱</label>
-      <input id="r-email" type="email" autocomplete="email" required>
-      <label for="r-code">验证码</label>
-      <div class="code-row">
-        <input id="r-code" autocomplete="one-time-code" required>
-        <button type="button" class="send-btn" id="r-send">发送验证码</button>
+      <div class="tabs sub" role="tablist" aria-label="注册方式">
+        <button type="button" class="tab active" data-regmode="email">邮箱注册</button>
+        <button type="button" class="tab" data-regmode="phone">手机号注册</button>
+      </div>
+      <div id="reg-email-fields">
+        <label for="r-email">邮箱</label>
+        <input id="r-email" type="email" autocomplete="email" required>
+        <label for="r-code">验证码</label>
+        <div class="code-row">
+          <input id="r-code" autocomplete="one-time-code" required>
+          <button type="button" class="send-btn" id="r-send">发送验证码</button>
+        </div>
+      </div>
+      <div id="reg-phone-fields" hidden>
+        <label for="p-phone">手机号</label>
+        <input id="p-phone" inputmode="numeric" maxlength="11" placeholder="11 位手机号" autocomplete="tel">
+        <label for="p-code">短信验证码</label>
+        <div class="code-row">
+          <input id="p-code" autocomplete="one-time-code" required>
+          <button type="button" class="send-btn" id="p-send">发送验证码</button>
+        </div>
       </div>
       <label for="r-pass">设置密码</label>
       <div class="field">
@@ -368,21 +386,24 @@ bindPeek("peek", "p");
 bindPeek("r-peek", "r-pass");
 bindPeek("s-peek", "s-pass");
 
-// ---- 发送邮箱验证码(注册/重置共用):60s 倒计时;开发模式回显验证码 ----
-function bindSend(btnId, emailId, errId, devId) {
+// ---- 发送验证码(邮箱/手机号共用):60s 倒计时;开发模式回显验证码 ----
+function bindSend(btnId, idInputId, errId, devId, url) {
   $(btnId).addEventListener("click", async () => {
     const btn = $(btnId), err = $(errId), dev = $(devId);
     err.textContent = ""; dev.hidden = true;
-    const email = $(emailId).value.trim();
-    if (!email.includes("@") || email.length < 3) { err.textContent = "请先填写正确的邮箱"; return; }
+    const id = $(idInputId).value.trim();
+    if (url.includes("phone") ? !/^1[3-9]\d{9}$/.test(id) : !id.includes("@") || id.length < 3) {
+      err.textContent = url.includes("phone") ? "请先填写正确的 11 位手机号" : "请先填写正确的邮箱";
+      return;
+    }
     btn.disabled = true;
     const label = btn.textContent;
     btn.textContent = "发送中…";
     try {
-      const res = await fetch("portal/api/auth/email/send_code", {
+      const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify(url.includes("phone") ? { phone: id } : { email: id }),
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error((d && d.error && d.error.message) || "发送失败");
@@ -400,18 +421,36 @@ function bindSend(btnId, emailId, errId, devId) {
     }
   });
 }
-bindSend("r-send", "r-email", "r-err", "r-dev");
-bindSend("s-send", "s-email", "s-err", "s-dev");
+bindSend("r-send", "r-email", "r-err", "r-dev", "portal/api/auth/email/send_code");
+bindSend("p-send", "p-phone", "r-err", "r-dev", "portal/api/auth/phone/send_code");
+bindSend("s-send", "s-email", "s-err", "s-dev", "portal/api/auth/email/send_code");
 
-// ---- 注册(门户用户):成功即带登录态进入门户 ----
+// ---- 注册方式切换:邮箱 | 手机号 ----
+let regMode = "email";
+document.querySelectorAll("[data-regmode]").forEach((b) => b.addEventListener("click", () => {
+  regMode = b.dataset.regmode;
+  document.querySelectorAll("[data-regmode]").forEach((x) => x.classList.toggle("active", x === b));
+  $("reg-email-fields").hidden = regMode !== "email";
+  $("reg-phone-fields").hidden = regMode !== "phone";
+  $("subtitle").textContent = regMode === "phone" ? "手机号注册,注册即送体验额度" : "邮箱注册,注册即送体验额度";
+  $("r-err").textContent = ""; $("r-dev").hidden = true;
+}));
+
+// ---- 注册(双渠道,均强制验证码):成功即带登录态进入门户 ----
 $("f-register").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   $("r-err").textContent = "";
+  const password = $("r-pass").value;
+  const body = regMode === "phone"
+    ? { kind: "phone", phone: $("p-phone").value.trim(), code: $("p-code").value.trim(), password }
+    : { kind: "email", email: $("r-email").value.trim(), code: $("r-code").value.trim(), password };
+  if (password.length < 8) { $("r-err").textContent = "密码至少 8 位"; return; }
+  if (!body.code) { $("r-err").textContent = "请填写验证码"; return; }
   try {
     const res = await fetch("portal/api/auth/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: $("r-email").value.trim(), code: $("r-code").value.trim(), password: $("r-pass").value }),
+      body: JSON.stringify(body),
     });
     const d = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error((d && d.error && d.error.message) || "注册失败");

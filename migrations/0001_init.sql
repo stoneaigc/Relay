@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
   key_prefix     TEXT NOT NULL,                    -- 掩码展示用
   key_plain      TEXT,                             -- 完整 Key 明文:门户端随时查看/复制(认证仍走 key_hash)
   revoked        INTEGER NOT NULL DEFAULT 0,
+  status         INTEGER NOT NULL DEFAULT 0,       -- 0=启用 1=待管理员审批(审批开关开启时创建)
+  allowed_models TEXT,                             -- 逗号分隔可调模型名;NULL=不限(用户组内全部)
   created_at     TEXT NOT NULL
 );
 
@@ -211,4 +213,15 @@ CREATE TABLE IF NOT EXISTS admin_audit_logs (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON admin_audit_logs(created_at);
+
+-- 管理员专属 API Key(脚本/自动化调用管理接口;明文仅创建时返回一次,库存 sha256)。
+CREATE TABLE IF NOT EXISTS admin_keys (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT NOT NULL,                -- 备注名(审计归因: admin-key:{name})
+  key_hash      TEXT NOT NULL UNIQUE,         -- sha256(明文)
+  key_prefix    TEXT NOT NULL,                -- 掩码展示
+  revoked       INTEGER NOT NULL DEFAULT 0,
+  last_used_at  TEXT,
+  created_at    TEXT NOT NULL
+);
 

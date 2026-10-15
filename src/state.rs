@@ -32,6 +32,8 @@ pub struct KeyEntry {
     /// api_keys.id,用量明细按密钥维度归因用。
     pub id: Uuid,
     pub user_id: Uuid,
+    /// 模型白名单(None=不限,调用用户组内全部;Some=仅允许列表内模型)。
+    pub allowed_models: Option<Vec<String>>,
 }
 
 /// 单用户运行态。token 余额/并发都是原子量,落库异步进行。

@@ -147,6 +147,11 @@ pub async fn list_models(
 ) -> Result<Json<Value>, ApiError> {
     let auth = authenticate(&state, &headers)?;
     let names = state.routing.load().group_model_names(auth.user.group());
+    // 分级密钥管控:Key 被限制模型范围时,/v1/models 只返回白名单内的模型。
+    let names: Vec<&String> = match &auth.key_scope {
+        Some(allowed) => names.iter().filter(|n| allowed.iter().any(|a| a == *n)).collect(),
+        None => names.iter().collect(),
+    };
     let data: Vec<Value> = names
         .iter()
         .map(|n| json!({ "id": n, "object": "model", "owned_by": "relay" }))
@@ -332,6 +337,10 @@ async fn run_openai(
     let auth = authenticate(&state, &headers)?;
     let req: Value = serde_json::from_slice(&body)
         .map_err(|e| ApiError::BadRequest(format!("invalid json: {e}")))?;
+    // 分级密钥管控:Key 被限制模型范围时校验请求模型。
+    if let Some(m) = req.get("model").and_then(|m| m.as_str()) {
+        auth.check_model(m)?;
+    }
     let no_cache = no_cache_requested(&headers);
     run_chat(state, auth.user, Some(auth.key_id), req, no_cache).await
 }
@@ -1078,6 +1087,10 @@ async fn run_anthropic(
     let auth = authenticate(&state, &headers)?;
     let req: Value = serde_json::from_slice(&body)
         .map_err(|e| ApiError::BadRequest(format!("invalid json: {e}")))?;
+    // 分级密钥管控:Key 被限制模型范围时校验请求模型。
+    if let Some(m) = req.get("model").and_then(|m| m.as_str()) {
+        auth.check_model(m)?;
+    }
     let no_cache = no_cache_requested(&headers);
     run_messages(state, auth.user, Some(auth.key_id), req, no_cache).await
 }
@@ -2233,6 +2246,10 @@ pub async fn responses(
     let stream = req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
     let chat_req = crate::responses::responses_to_chat(&req)?;
     let model = chat_req.get("model").and_then(|m| m.as_str()).unwrap_or_default().to_string();
+    // 分级密钥管控:Key 被限制模型范围时校验请求模型。
+    if !model.is_empty() {
+        auth.check_model(&model)?;
+    }
 
     let resp = run_chat(state, auth.user, Some(auth.key_id), chat_req, no_cache).await?;
     let (parts, body) = resp.into_parts();

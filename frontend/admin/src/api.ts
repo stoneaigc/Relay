@@ -217,6 +217,30 @@ export interface ImportPreviewResp {
   summary: { groups: number; create: number; overwrite: number; routes: number; time_rules: number; skipped_routes: number };
 }
 
+/** 用户门户 API Key(管理端视角);status 0=启用 1=待审批;allowed_models 空数组=不限 */
+export interface AdminKeyRow {
+  id: string;
+  user_id: string;
+  username: string | null;
+  phone: string | null;
+  interface_kind: string;
+  key_prefix: string;
+  revoked: boolean;
+  status: number;
+  allowed_models: string[];
+  created_at: string;
+}
+
+/** 管理员专属 Key(供脚本/自动化调用管理接口) */
+export interface AdminApiKeyRow {
+  id: number;
+  name: string;
+  key_prefix: string;
+  revoked: boolean;
+  last_used_at: string | null;
+  created_at: string;
+}
+
 export const api = {
   // 管理员一键切换门户:按管理员用户名查找同名门户用户并签发 portal 令牌(无同名用户时 404)
   portalSso: (): Promise<{ role: string; token: string; username: string }> =>
@@ -251,6 +275,18 @@ export const api = {
   /** 管理员重置用户密码:生成 16 位新密码并返回明文(已存档,后台可再次查看) */
   resetUserPassword: (id: string): Promise<{ initial_password: string }> =>
     req(`/admin/api/users/${id}/reset-password`, { method: "POST" }),
+
+  // ---- API 密钥(用户 Key 治理:审批/模型范围/吊销,均即时生效) ----
+  allKeys: (): Promise<{ data: AdminKeyRow[] }> => req("/admin/api/keys"),
+  patchKey: (id: string, body: { allowed_models?: string[]; approved?: boolean }) =>
+    req(`/admin/api/keys/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  revokeKey: (id: string) => req(`/admin/api/keys/${id}`, { method: "DELETE" }),
+
+  // ---- 管理员专属 Key(明文仅创建时返回一次;上限 10 把) ----
+  adminKeys: (): Promise<{ data: AdminApiKeyRow[] }> => req("/admin/api/admin-keys"),
+  createAdminKey: (name: string): Promise<{ id: number; key: string; key_prefix: string }> =>
+    req("/admin/api/admin-keys", { method: "POST", body: JSON.stringify({ name }) }),
+  revokeAdminKey: (id: number) => req(`/admin/api/admin-keys/${id}`, { method: "DELETE" }),
 
   // ---- 用户组(限额模板):null = 继承全局默认,0 = 显式不限 ----
   userGroups: (): Promise<{ data: UserGroupRow[]; defaults: { concurrency_limit: number; rpm_limit: number; tpm_limit: number } }> =>
@@ -394,9 +430,16 @@ export const api = {
     req("/admin/api/settings/logging", { method: "POST", body: JSON.stringify(body) }),
 
   // ---- 门户设置 ----
-  portalSettings: (): Promise<{ rewards_enabled: boolean }> => req("/admin/api/settings/portal"),
-  savePortalSettings: (body: { rewards_enabled: boolean }) =>
+  portalSettings: (): Promise<{ rewards_enabled: boolean; phone_register_enabled: boolean; key_approval_required?: boolean }> => req("/admin/api/settings/portal"),
+  savePortalSettings: (body: { rewards_enabled: boolean; phone_register_enabled: boolean; key_approval_required: boolean }) =>
     req("/admin/api/settings/portal", { method: "POST", body: JSON.stringify(body) }),
+
+  // ---- 短信网关 ----
+  getSmsSettings: () => req("/admin/api/settings/sms"),
+  saveSmsSettings: (body: { gateway_url: string; gateway_method?: string; gateway_headers?: string; gateway_body: string }) =>
+    req("/admin/api/settings/sms", { method: "PUT", body: JSON.stringify(body) }),
+  testSmsSettings: (phone: string) =>
+    req("/admin/api/settings/sms/test", { method: "POST", body: JSON.stringify({ phone }) }),
 
   // ---- 上游治理(熔断器 + 并发槽仪表盘) ----
   listUpstreams: (): Promise<UpstreamsResp> => req("/admin/api/upstreams"),

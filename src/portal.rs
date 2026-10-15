@@ -88,61 +88,179 @@ pub async fn send_email_code(
 }
 
 #[derive(Deserialize)]
+pub struct SendPhoneCode {
+    pub phone: String,
+}
+
+/// 校验大陆手机号格式。
+fn valid_phone(p: &str) -> bool {
+    p.len() == 11 && p.starts_with('1') && p.chars().skip(1).all(|c| c.is_ascii_digit())
+}
+
+/// POST /portal/auth/phone/send_code —— 发送手机号注册验证码(经短信网关)。
+/// 未配置 sms.gateway_url 时为开发模式:验证码随响应回显并打日志。
+pub async fn send_phone_code(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<SendPhoneCode>,
+) -> Result<Json<Value>, ApiError> {
+    // 开关:后台「设置→门户」可关(关闭后前端隐藏手机号注册,接口一并拒绝)。
+    let kv = storage::load_settings(&state.db, crate::settings::PORTAL_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if kv.get(crate::settings::K_PORTAL_PHONE_REGISTER).map(|v| v != "true").unwrap_or(false) {
+        return Err(ApiError::BadRequest("手机号注册未开放".into()));
+    }
+    let phone = body.phone.trim().to_string();
+    if !valid_phone(&phone) {
+        return Err(ApiError::BadRequest("手机号格式不正确".into()));
+    }
+    // 防轰炸:IP 与手机号双标识(发码消耗资源,成功也不清零;上限 5 次/15 分钟)。
+    let ip_key = format!("code:{}", addr.ip());
+    let phone_key = format!("codep:{phone}");
+    for k in [&ip_key, &phone_key] {
+        if let Some(secs) = state.login_guard.locked_for(k) {
+            return Err(ApiError::TooManyAttempts(format!(
+                "请求过于频繁,请 {secs} 秒后再试"
+            )));
+        }
+    }
+    state.login_guard.record_failure(&ip_key);
+    state.login_guard.record_failure(&phone_key);
+    // 限频:60 秒内不重复发。缓存值 "{发送时刻}:{code哈希}"。
+    let code_key = format!("phone_code:{phone}");
+    if let Some(v) = state.cache.get(&code_key).await.map_err(|e| ApiError::Internal(e.to_string()))? {
+        let sent_at = v.split_once(':').and_then(|(t, _)| t.parse::<i64>().ok()).unwrap_or(0);
+        if now_secs() - sent_at < 60 {
+            return Err(ApiError::BadRequest("请求过于频繁,请稍后再试".into()));
+        }
+    }
+    let code: String = {
+        use rand::Rng;
+        format!("{:06}", rand::thread_rng().gen_range(0..1_000_000))
+    };
+    let val = format!("{}:{}", now_secs(), storage::hash_key(&code));
+    state
+        .cache
+        .set_ex(&code_key, &val, 300)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let gateway = crate::sms::load_gateway(&state.db).await;
+    if gateway.is_dev() {
+        // 开发模式:验证码打日志并随响应回显(与邮箱开发模式一致),本地联调可用。
+        tracing::warn!("[DEV] 手机验证码 {phone}: {code}");
+        Ok(Json(json!({ "sent": false, "dev_code": code })))
+    } else {
+        crate::sms::send(&state.http, &gateway, &phone, &code)
+            .await
+            .map_err(ApiError::BadRequest)?;
+        Ok(Json(json!({ "sent": true })))
+    }
+}
+
+#[derive(Deserialize)]
 pub struct Register {
-    pub email: String,
+    /// 注册渠道:"email"(默认,兼容旧请求)| "phone"。
+    #[serde(default)]
+    pub kind: Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
     pub code: String,
     pub password: String,
 }
 
-/// POST /portal/auth/register —— 邮箱注册(需验证码),返回会话 JWT。
+/// 校验验证码并消费(通用:邮箱/手机号共用 cache 键规则 "{kind}_code:{id}")。
+async fn verify_code(state: &AppState, kind: &str, id: &str, code: &str) -> Result<(), ApiError> {
+    let code_key = format!("{kind}_code:{id}");
+    match state.cache.get(&code_key).await.map_err(|e| ApiError::Internal(e.to_string()))? {
+        Some(v) if v.split_once(':').map(|(_, h)| h) == Some(storage::hash_key(code).as_str()) => {
+            let _ = state.cache.del(&code_key).await;
+            Ok(())
+        }
+        _ => Err(ApiError::BadRequest("验证码错误或已过期".into())),
+    }
+}
+
+/// POST /portal/auth/register —— 双渠道注册(邮箱验证码 / 手机短信验证码),返回会话 JWT。
 pub async fn register(
     State(state): State<Arc<AppState>>,
     Json(body): Json<Register>,
 ) -> Result<Json<Value>, ApiError> {
-    let email = body.email.trim().to_lowercase();
-    if !email.contains('@') || email.len() < 3 {
-        return Err(ApiError::BadRequest("邮箱格式不正确".into()));
-    }
     if body.password.len() < 8 {
         return Err(ApiError::BadRequest("密码至少 8 位".into()));
     }
-    // 校验验证码。过期由缓存 TTL 负责;值格式 "{发送时刻}:{code哈希}"。
-    let code_key = format!("email_code:{email}");
-    match state.cache.get(&code_key).await.map_err(|e| ApiError::Internal(e.to_string()))? {
-        Some(v) if v.split_once(':').map(|(_, h)| h) == Some(storage::hash_key(&body.code).as_str()) => {
-            let _ = state.cache.del(&code_key).await;
-        }
-        _ => return Err(ApiError::BadRequest("验证码错误或已过期".into())),
-    }
-    let email = email.as_str();
+    let kind = body.kind.as_deref().unwrap_or("email");
+    let pwhash = storage::hash_password(&body.password);
+    // 新用户默认挂 default 用户组(P4-2);不存在则 NULL(回落全局默认)。
+    let default_ug = storage::default_user_group_id(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     let (grant, limit, rpm, tpm, secret, ttl) = {
         let cfg = state.config();
         (cfg.defaults.signup_grant_tokens, cfg.defaults.concurrency_limit, cfg.defaults.rpm_limit, cfg.defaults.tpm_limit, cfg.auth.jwt_secret.clone(), cfg.auth.session_ttl_secs)
     };
-    let pwhash = storage::hash_password(&body.password);
     // 注册默认绑定到激活(默认)模型组;无激活组则不绑定。
     let active_group = storage::active_group_id(&state.db)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let id = storage::admin_create_user(
-        &state.db,
-        email,
-        &pwhash,
-        Some(email),
-        None,
-        grant,
-        active_group,
-        "email",
-        None,
-        None,
-    )
-    .await
-    .map_err(|_| ApiError::BadRequest("该邮箱已注册".into()))?;
+    let (id, display) = match kind {
+        "phone" => {
+            let phone = body.phone.as_deref().map(str::trim).unwrap_or_default();
+            if !valid_phone(phone) {
+                return Err(ApiError::BadRequest("手机号格式不正确".into()));
+            }
+            let kv = storage::load_settings(&state.db, crate::settings::PORTAL_PREFIX)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            if kv.get(crate::settings::K_PORTAL_PHONE_REGISTER).map(|v| v != "true").unwrap_or(false) {
+                return Err(ApiError::BadRequest("手机号注册未开放".into()));
+            }
+            verify_code(&state, "phone", phone, &body.code).await?;
+            let id = storage::admin_create_user(
+                &state.db,
+                phone,
+                &pwhash,
+                None,
+                Some(phone),
+                grant,
+                active_group,
+                "phone",
+                default_ug,
+                None,
+            )
+            .await
+            .map_err(|_| ApiError::BadRequest("该手机号已注册".into()))?;
+            (id, phone.to_string())
+        }
+        _ => {
+            let email = body.email.as_deref().map(str::trim).unwrap_or_default().to_lowercase();
+            if !email.contains('@') || email.len() < 3 {
+                return Err(ApiError::BadRequest("邮箱格式不正确".into()));
+            }
+            verify_code(&state, "email_code", &email, &body.code).await?;
+            let id = storage::admin_create_user(
+                &state.db,
+                &email,
+                &pwhash,
+                Some(&email),
+                None,
+                grant,
+                active_group,
+                "email",
+                default_ug,
+                None,
+            )
+            .await
+            .map_err(|_| ApiError::BadRequest("该邮箱已注册".into()))?;
+            (id, email)
+        }
+    };
     let us = Arc::new(UserState::new(id, grant, 0, limit, 0, 1.0, active_group.unwrap_or(0)));
     us.set_limits(rpm, tpm);
     state.users.insert(id, us);
     let token = jwt::issue(&secret, &id.to_string(), "portal", ttl)?;
-    Ok(Json(json!({ "token": token, "user": { "id": id, "email": email } })))
+    Ok(Json(json!({ "token": token, "user": { "id": id, "account": display } })))
 }
 
 #[derive(Deserialize)]
@@ -424,6 +542,9 @@ pub async fn list_keys(
                 // 完整 Key(解密后)仅返回给 Key 属主本人,门户端随时复制;换过 jwt_secret 的旧 Key 为 null。
                 "key_plain": k.key_plain,
                 "revoked": k.revoked != 0,
+                "status": k.status,
+                "pending_approval": k.revoked == 0 && k.status == 1,
+                "allowed_models": k.allowed_models,
                 "created_at": k.created_at,
             })
         })
@@ -440,7 +561,16 @@ fn valid_interface(k: &str) -> bool {
     k == "openai" || k == "anthropic"
 }
 
+/// 读门户 Key 审批开关(缺省 false:Key 创建即用)。
+async fn key_approval_required(state: &AppState) -> Result<bool, ApiError> {
+    let kv = storage::load_settings(&state.db, crate::settings::PORTAL_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(kv.get(crate::settings::K_PORTAL_KEY_APPROVAL).map(|v| v == "true").unwrap_or(false))
+}
+
 /// POST /portal/keys —— 创建 Key,响应含明文(仅此一次)。
+/// 审批开关开启时新 Key 为「待审批」状态,管理员批准后才会生效。
 pub async fn create_key(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -451,7 +581,7 @@ pub async fn create_key(
         return Err(ApiError::BadRequest("interface_kind must be openai|anthropic".into()));
     }
 
-    // 每接口仅允许一把有效 Key。
+    // 每接口仅允许一把有效 Key(待审批也算占位)。
     let existing = storage::list_keys(&state.db, uid)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -464,20 +594,28 @@ pub async fn create_key(
         ));
     }
 
-    let (plaintext, hash, row) = storage::create_key(&state.db, uid, &body.interface_kind)
+    let approval = key_approval_required(&state).await?;
+    let status: i64 = if approval { 1 } else { 0 };
+    let (plaintext, hash, row) = storage::create_key(&state.db, uid, &body.interface_kind, status)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    state.keys.insert(hash, KeyEntry { id: row.id, user_id: uid });
+    // 待审批不进内存 = 等效不可用;批准后由管理端热插。
+    if status == 0 {
+        state.keys.insert(hash, KeyEntry { id: row.id, user_id: uid, allowed_models: None });
+    }
 
     Ok(Json(json!({
         "id": row.id,
         "interface_kind": row.interface_kind,
         "key": plaintext,            // 明文,仅此一次
         "key_prefix": row.key_prefix,
+        "status": status,
+        "pending_approval": status == 1,
     })))
 }
 
 /// POST /portal/keys/rotate —— 轮换:旧 Key 失效,返回新明文(仅此一次)。
+/// 审批开关开启时新 Key 同样需要审批;审批关闭时新 Key 立即生效。
 pub async fn rotate_key(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -495,16 +633,22 @@ pub async fn rotate_key(
         state.keys.remove(&h);
     }
 
-    let (plaintext, hash, row) = storage::create_key(&state.db, uid, &body.interface_kind)
+    let approval = key_approval_required(&state).await?;
+    let status: i64 = if approval { 1 } else { 0 };
+    let (plaintext, hash, row) = storage::create_key(&state.db, uid, &body.interface_kind, status)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    state.keys.insert(hash, KeyEntry { id: row.id, user_id: uid });
+    if status == 0 {
+        state.keys.insert(hash, KeyEntry { id: row.id, user_id: uid, allowed_models: None });
+    }
 
     Ok(Json(json!({
         "id": row.id,
         "interface_kind": row.interface_kind,
         "key": plaintext,
         "key_prefix": row.key_prefix,
+        "status": status,
+        "pending_approval": status == 1,
     })))
 }
 

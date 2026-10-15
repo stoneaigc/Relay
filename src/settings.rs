@@ -22,6 +22,18 @@ pub const K_USER: &str = "email.username";
 pub const K_FROM: &str = "email.from";
 pub const K_PASS_ENC: &str = "email.password_enc";
 
+/// 手机号注册开关("true"/"false",缺省 true)。
+pub const K_PORTAL_PHONE_REGISTER: &str = "portal.phone_register_enabled";
+/// 门户 API Key 审批开关("true"/"false",缺省 false;开启后新 Key 需管理员批准才可用)。
+pub const K_PORTAL_KEY_APPROVAL: &str = "portal.key_approval_required";
+
+/// settings 表里短信网关相关 key(gateway_headers 含密钥,加密存)。
+pub const SMS_PREFIX: &str = "sms.";
+pub const K_SMS_GATEWAY_URL: &str = "sms.gateway_url";
+pub const K_SMS_GATEWAY_METHOD: &str = "sms.gateway_method";
+pub const K_SMS_HEADERS_ENC: &str = "sms.gateway_headers_enc";
+pub const K_SMS_BODY_TEMPLATE: &str = "sms.gateway_body";
+
 /// 从 jwt_secret 派生 32 字节 AES-256-GCM 密钥(HKDF-SHA256,info 固定)。
 fn derive_key(secret: &str) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(None, secret.as_bytes());
