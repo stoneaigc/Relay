@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription, SheetSection } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import { copyText } from "./clipboard";
 import EChart, { cssVar } from "@/components/EChart";
@@ -419,19 +420,32 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
   };
   const sel = "h-9 w-full rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
   const limitHint = "留空 = 继承用户组/全局默认,0 = 显式不限";
+  // 生效预览:用户显式 > 用户组 > 全局默认(预算无全局层,组未设即不限)。
+  const selGroup = userGroups.find((g) => g.id === userGroupId);
+  const effConc = conc.trim() === "" ? (selGroup?.max_concurrency ?? defaults.concurrency_limit) : Number(conc || 0);
+  const effDaily = budgetDaily.trim() === "" ? selGroup?.budget_daily_tokens ?? null : Number(budgetDaily || 0);
+  const effMonthly = budgetMonthly.trim() === "" ? selGroup?.budget_monthly_tokens ?? null : Number(budgetMonthly || 0);
+  const effRpm = selGroup?.rpm_limit ?? defaults.rpm_limit;
+  const effTpm = selGroup?.tpm_limit ?? defaults.tpm_limit;
+  const fmtEff = (v: number | null | undefined) => (v == null || v === 0 ? "不限" : v.toLocaleString());
+  const concPlaceholder = selGroup
+    ? `继承用户组:${selGroup.name}(${selGroup.max_concurrency == null ? `全局 ${defaults.concurrency_limit}` : selGroup.max_concurrency})`
+    : `继承全局(${defaults.concurrency_limit})`;
+  const budgetPlaceholder = (gv: number | null) =>
+    selGroup ? `继承用户组(${gv == null ? "不限" : gv.toLocaleString()})` : "留空或 0 = 不限";
 
   return (
     <>
-      <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{edit ? "编辑用户" : "创建用户"}</DialogTitle>
-            {edit && <DialogDescription>当前余额 {edit.balance.toLocaleString()} tokens</DialogDescription>}
-          </DialogHeader>
-          <div className="space-y-3">
+      <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
+        <SheetContent>
+          <SheetHeader>
+            <SheetTitle>{edit ? "编辑用户" : "创建用户"}</SheetTitle>
+            <SheetDescription>{edit ? `当前余额 ${edit.balance.toLocaleString()} tokens` : "密码留空将自动生成 16 位初始密码"}</SheetDescription>
+          </SheetHeader>
+          <div className="flex-1 space-y-5 overflow-y-auto px-5 py-4">
             {edit && edit.password_changed === false && edit.initial_password && (
               <div className="flex flex-wrap items-center gap-2 rounded-lg bg-indigo-500/10 px-3 py-2 text-sm text-indigo-600">
-                <span>该用户仍在使用初始密码:</span>
+                <span>仍在使用初始密码:</span>
                 <span className="mono font-semibold text-indigo-700">{edit.initial_password}</span>
                 <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-indigo-600"
                   onClick={async () => { if (await copyText(edit.initial_password!)) { setCopiedHint(true); setTimeout(() => setCopiedHint(false), 1500); } }}>
@@ -439,52 +453,72 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
                 </Button>
               </div>
             )}
-            <div className="grid grid-cols-2 gap-3">
-              <div><label className="mb-1 block text-xs text-muted-foreground">用户名{edit ? "(不可改)" : " *"}</label>
-                <Input placeholder="登录用户名" value={username} onChange={(e) => setUsername(e.target.value)} disabled={!!edit} autoFocus={!edit} /></div>
-              <div><label className="mb-1 block text-xs text-muted-foreground">{edit ? "密码(留空不改)" : "密码(留空自动生成)"}</label>
-                <Input type="password" placeholder={edit ? "留空保持不变" : "留空自动生成 16 位默认密码"} value={password} onChange={(e) => setPassword(e.target.value)} /></div>
-            </div>
-            <div className="grid grid-cols-3 gap-3">
-              <div><label className="mb-1 block text-xs text-muted-foreground">模型组</label>
-                <select value={groupId} onChange={(e) => setGroupId(Number(e.target.value))} className={sel}>
-                  <option value={0}>未绑定</option>
-                  {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
-                </select></div>
-              <div><label className="mb-1 block text-xs text-muted-foreground">用户组</label>
-                <select value={userGroupId} onChange={(e) => setUserGroupId(Number(e.target.value))} className={sel}>
-                  <option value={0}>未挂组</option>
-                  {userGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
-                </select></div>
+            <SheetSection title="账号">
+              <div className="grid grid-cols-2 gap-3">
+                <div><label className="mb-1 block text-xs text-muted-foreground">用户名{edit ? "(不可改)" : " *"}</label>
+                  <Input placeholder="登录用户名" value={username} onChange={(e) => setUsername(e.target.value)} disabled={!!edit} autoFocus={!edit} /></div>
+                <div><label className="mb-1 block text-xs text-muted-foreground">{edit ? "密码(留空不改)" : "密码(留空自动生成)"}</label>
+                  <Input type="password" placeholder={edit ? "留空保持不变" : "自动生成 16 位"} value={password} onChange={(e) => setPassword(e.target.value)} /></div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div><label className="mb-1 block text-xs text-muted-foreground">邮箱(可选)</label>
+                  <Input placeholder="name@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
+                <div><label className="mb-1 block text-xs text-muted-foreground">手机号(可选)</label>
+                  <Input placeholder="13800000000" value={phone} onChange={(e) => setPhone(e.target.value)} /></div>
+              </div>
+            </SheetSection>
+            <SheetSection title="套餐" hint="决定能用什么 / 能用多少">
+              <div className="grid grid-cols-2 gap-3">
+                <div><label className="mb-1 block text-xs text-muted-foreground">模型组</label>
+                  <select value={groupId} onChange={(e) => setGroupId(Number(e.target.value))} className={sel}>
+                    <option value={0}>未绑定</option>
+                    {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                  </select></div>
+                <div><label className="mb-1 block text-xs text-muted-foreground">用户组</label>
+                  <select value={userGroupId} onChange={(e) => setUserGroupId(Number(e.target.value))} className={sel}>
+                    <option value={0}>未挂组</option>
+                    {userGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+                  </select></div>
+              </div>
+            </SheetSection>
+            <SheetSection title="限额与预算" hint={limitHint}>
               <div><label className="mb-1 block text-xs text-muted-foreground">并发上限</label>
-                <Input placeholder={`继承全局(${defaults.concurrency_limit})`} value={conc} onChange={(e) => setConc(e.target.value)} /></div>
-            </div>
-            <p className="-mt-2 text-xs text-muted-foreground">{limitHint}</p>
-            <div className="grid grid-cols-2 gap-3">
-              <div><label className="mb-1 block text-xs text-muted-foreground">邮箱(可选)</label>
-                <Input placeholder="name@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
-              <div><label className="mb-1 block text-xs text-muted-foreground">手机号(可选)</label>
-                <Input placeholder="13800000000" value={phone} onChange={(e) => setPhone(e.target.value)} /></div>
-            </div>
-            <div><label className="mb-1 block text-xs text-muted-foreground">{edit ? "增减额度(可为负,0 不变)" : "赠送 tokens"}</label>
-              <Input value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
-            <div className="grid grid-cols-2 gap-3">
-              <div><label className="mb-1 block text-xs text-muted-foreground">日预算 tokens</label>
-                <Input placeholder="留空或 0 = 不限" value={budgetDaily} onChange={(e) => setBudgetDaily(e.target.value)} /></div>
-              <div><label className="mb-1 block text-xs text-muted-foreground">月预算 tokens</label>
-                <Input placeholder="留空或 0 = 不限" value={budgetMonthly} onChange={(e) => setBudgetMonthly(e.target.value)} /></div>
-            </div>
-            <p className="-mt-2 text-xs text-muted-foreground">{limitHint}</p>
+                <Input placeholder={concPlaceholder} value={conc} onChange={(e) => setConc(e.target.value)} /></div>
+              <div className="grid grid-cols-2 gap-3">
+                <div><label className="mb-1 block text-xs text-muted-foreground">日预算 tokens</label>
+                  <Input placeholder={budgetPlaceholder(selGroup?.budget_daily_tokens ?? null)} value={budgetDaily} onChange={(e) => setBudgetDaily(e.target.value)} /></div>
+                <div><label className="mb-1 block text-xs text-muted-foreground">月预算 tokens</label>
+                  <Input placeholder={budgetPlaceholder(selGroup?.budget_monthly_tokens ?? null)} value={budgetMonthly} onChange={(e) => setBudgetMonthly(e.target.value)} /></div>
+              </div>
+              <div className="rounded-lg bg-muted/50 px-3 py-2.5">
+                <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">生效预览{selGroup ? `(用户组:${selGroup.name})` : "(未挂组,按全局默认)"}</p>
+                <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+                  <span>并发 <b className="font-semibold text-foreground">{fmtEff(effConc)}</b></span>
+                  <span className="text-muted-foreground/50">·</span>
+                  <span>RPM <b className="font-semibold text-foreground">{fmtEff(effRpm)}</b><span className="ml-0.5 text-[10px] text-muted-foreground/70">{selGroup ? "组" : "全局"}</span></span>
+                  <span className="text-muted-foreground/50">·</span>
+                  <span>TPM <b className="font-semibold text-foreground">{fmtEff(effTpm)}</b><span className="ml-0.5 text-[10px] text-muted-foreground/70">{selGroup ? "组" : "全局"}</span></span>
+                  <span className="text-muted-foreground/50">·</span>
+                  <span>日预算 <b className="font-semibold text-foreground">{fmtEff(effDaily)}</b>{effDaily !== 0 && selGroup?.budget_daily_tokens != null && budgetDaily.trim() === "" && <span className="ml-0.5 text-[10px] text-muted-foreground/70">组</span>}</span>
+                  <span className="text-muted-foreground/50">·</span>
+                  <span>月预算 <b className="font-semibold text-foreground">{fmtEff(effMonthly)}</b>{effMonthly !== 0 && selGroup?.budget_monthly_tokens != null && budgetMonthly.trim() === "" && <span className="ml-0.5 text-[10px] text-muted-foreground/70">组</span>}</span>
+                </div>
+              </div>
+            </SheetSection>
+            <SheetSection title="额度">
+              <div><label className="mb-1 block text-xs text-muted-foreground">{edit ? "增减额度(可为负,0 不变)" : "赠送 tokens"}</label>
+                <Input value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
+            </SheetSection>
             {err && <p className="text-sm text-destructive">{err}</p>}
           </div>
-          <div className="flex justify-end gap-2">
+          <div className="flex justify-end gap-2 border-t px-5 py-3">
             <Button variant="ghost" onClick={onClose}>取消</Button>
             <Button onClick={submit} disabled={!username.trim()}>
               {edit ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}{edit ? "保存" : "创建"}
             </Button>
           </div>
-        </DialogContent>
-      </Dialog>
+        </SheetContent>
+      </Sheet>
 
       {/* 创建成功结果:展示后端实际生效的初始密码明文 */}
       <Dialog open={!!created} onOpenChange={(o) => !o && setCreated(null)}>
