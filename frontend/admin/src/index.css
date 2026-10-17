@@ -1,48 +1,290 @@
 @import "tailwindcss";
 
-/* 简约浅色设计令牌 */
+/* =========================================================================
+   Relay Admin 设计系统
+   靛紫品牌 + 精密工程感:与登录页 / Portal 同源的品牌色,冷调中性面,等宽数字。
+   令牌全部以 CSS 变量暴露,Tailwind v4 会据此生成对应工具类(--color-* 派生 bg / text 等)
+   ========================================================================= */
+
 @theme {
-  --color-background: #f7f7f8;
-  --color-foreground: #1f2228;
+  /* —— 品牌靛紫 —— */
+  --color-brand-50: #eef1ff;
+  --color-brand-100: #e0e5ff;
+  --color-brand-200: #c7cffe;
+  --color-brand-300: #a5b4fc;
+  --color-brand-400: #818cf8;
+  --color-brand-500: #6366f1;
+  --color-brand-600: #4f46e5;
+  --color-brand-700: #4338ca;
+  --color-violet-500: #8b5cf6;
+  --color-violet-600: #7c3aed;
+
+  /* —— 语义色 —— */
+  --color-background: #f5f6fb;
+  --color-foreground: #1b1e28;
   --color-card: #ffffff;
-  --color-card-foreground: #1f2228;
+  --color-card-foreground: #1b1e28;
   --color-popover: #ffffff;
-  --color-popover-foreground: #1f2228;
-  --color-primary: #1f2937;
+  --color-popover-foreground: #1b1e28;
+
+  --color-primary: #6366f1;
   --color-primary-foreground: #ffffff;
-  --color-secondary: #f1f2f4;
-  --color-secondary-foreground: #1f2228;
-  --color-muted: #f1f2f4;
+  --color-secondary: #f1f2f9;
+  --color-secondary-foreground: #2a2e3c;
+
+  --color-muted: #f1f2f9;
   --color-muted-foreground: #6b7280;
-  --color-accent: #f1f2f4;
-  --color-accent-foreground: #1f2228;
+  --color-subtle-foreground: #8b90a0;
+
+  --color-accent: #eef0fe;
+  --color-accent-foreground: #4338ca;
+
   --color-destructive: #dc2626;
   --color-destructive-foreground: #ffffff;
-  --color-success: #16a34a;
+  --color-success: #15a34a;
+  --color-success-foreground: #0f7a37;
   --color-warning: #f59e0b;
   --color-warning-foreground: #b45309;
-  --color-border: #e7e8ec;
-  --color-input: #e1e3e8;
-  --color-ring: #c7cad1;
+
+  --color-border: #e6e7f1;
+  --color-border-strong: #d7d9e8;
+  --color-input: #dcddec;
+  --color-ring: #a5b4fc;
+
+  /* —— 字型 —— */
+  --font-sans: "IBM Plex Sans Variable", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+
+  /* —— 表面分层阴影(冷调,低扩散,营造工程师式的干净层次) —— */
+  --shadow-card: 0 1px 2px rgba(28, 30, 48, 0.04), 0 1px 1px rgba(28, 30, 48, 0.03);
+  --shadow-panel: 0 1px 2px rgba(28, 30, 48, 0.04), 0 8px 24px -12px rgba(28, 30, 48, 0.12);
+  --shadow-pop: 0 4px 10px -2px rgba(28, 30, 48, 0.08), 0 12px 32px -8px rgba(28, 30, 48, 0.16);
+  --shadow-drawer: -18px 0 48px -24px rgba(28, 30, 48, 0.28), -2px 0 10px -6px rgba(28, 30, 48, 0.12);
+  --shadow-brand: 0 1px 2px rgba(79, 70, 229, 0.24), 0 6px 16px -6px rgba(99, 102, 241, 0.42);
+
+  /* —— 动效曲线 —— */
+  --ease-out-expo: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
 }
+
+/* ========================= 基础层 ========================= */
 
 * {
   border-color: var(--color-border);
 }
+
 html,
 body,
 #root {
   height: 100%;
 }
+
 body {
   margin: 0;
-  background: var(--color-background);
   color: var(--color-foreground);
-  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: var(--font-sans);
+  font-feature-settings: "cv05" 1, "ss01" 1;
+  /* 冷调环境光:左上角一抹品牌色微光,呼应登录页的品牌面板 */
+  background-color: var(--color-background);
+  background-image: radial-gradient(
+      1100px 560px at 12% -12%,
+      rgba(99, 102, 241, 0.09) 0%,
+      rgba(99, 102, 241, 0) 62%
+    ),
+    radial-gradient(900px 520px at 108% -6%, rgba(139, 92, 246, 0.07) 0%, rgba(139, 92, 246, 0) 58%);
+  background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
+
+::selection {
+  background: rgba(99, 102, 241, 0.2);
+}
+
+/* 全局细滚动条:悬浮才显形,避免 Windows 宽灰条割裂观感 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(28, 30, 48, 0.18) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  background-clip: content-box;
+  background-color: rgba(28, 30, 48, 0.16);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(28, 30, 48, 0.32);
+}
+
+/* ========================= 工具类 ========================= */
+
 .mono {
-  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-family: var(--font-mono);
+}
+
+/* 等宽数字:表格 / 金额 / 计数对齐用 */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+.brand-gradient {
+  background-image: linear-gradient(135deg, var(--color-brand-500) 0%, var(--color-violet-500) 100%);
+}
+
+.brand-text-gradient {
+  background-image: linear-gradient(120deg, var(--color-brand-600) 0%, var(--color-violet-500) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ========================= 动效关键帧 ========================= */
+
+@keyframes relay-sheet-in {
+  from {
+    opacity: 0.35;
+    transform: translate3d(24px, 0, 0) scale(0.994);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+@keyframes relay-sheet-out {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(24px, 0, 0) scale(0.994);
+  }
+}
+@keyframes relay-veil-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes relay-veil-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+@keyframes relay-pop-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.955) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1) translateY(0);
+  }
+}
+@keyframes relay-pop-out {
+  from {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1) translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.965) translateY(6px);
+  }
+}
+@keyframes relay-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+@keyframes relay-menu-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, -4px, 0) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+@keyframes relay-tip-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* ========================= 抽屉(Sheet) ========================= */
+
+[data-sheet-veil][data-state="open"] {
+  animation: relay-veil-in 0.3s var(--ease-out-expo) both;
+}
+[data-sheet-veil][data-state="closed"] {
+  animation: relay-veil-out 0.22s ease-in both;
+}
+
+[data-sheet-panel][data-state="open"] {
+  animation: relay-sheet-in 0.46s var(--ease-spring) both;
+}
+[data-sheet-panel][data-state="closed"] {
+  animation: relay-sheet-out 0.26s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+/* 抽屉内容分层入场:各段依次上浮 */
+[data-sheet-body] > * {
+  animation: relay-rise 0.5s var(--ease-out-expo) both;
+}
+[data-sheet-body] > *:nth-child(1) {
+  animation-delay: 0.06s;
+}
+[data-sheet-body] > *:nth-child(2) {
+  animation-delay: 0.11s;
+}
+[data-sheet-body] > *:nth-child(3) {
+  animation-delay: 0.16s;
+}
+[data-sheet-body] > *:nth-child(4) {
+  animation-delay: 0.21s;
+}
+[data-sheet-body] > *:nth-child(n + 5) {
+  animation-delay: 0.26s;
+}
+
+/* ========================= 弹窗(Dialog) ========================= */
+
+[data-dialog-veil][data-state="open"] {
+  animation: relay-veil-in 0.26s var(--ease-out-expo) both;
+}
+[data-dialog-veil][data-state="closed"] {
+  animation: relay-veil-out 0.2s ease-in both;
+}
+[data-dialog-content][data-state="open"] {
+  animation: relay-pop-in 0.34s var(--ease-spring) both;
+}
+[data-dialog-content][data-state="closed"] {
+  animation: relay-pop-out 0.2s cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
 /* Modal 统一 footer:贴左右/底边 + 分隔线;不吸底覆盖内容,随内容流滚动,小视口下不会被 footer 遮挡表单。 */
@@ -55,17 +297,15 @@ body {
   border-radius: 0 0 0.75rem 0.75rem;
 }
 
-/* Modal 滚动条隐形化:6px 细圆角半透明,悬浮才加深,避免 Windows 宽灰条破坏弹窗观感。 */
-[data-dialog-content]::-webkit-scrollbar {
-  width: 6px;
-}
-[data-dialog-content]::-webkit-scrollbar-track {
-  background: transparent;
-}
-[data-dialog-content]::-webkit-scrollbar-thumb {
-  border-radius: 9999px;
-  background: rgb(0 0 0 / 0.14);
-}
-[data-dialog-content]::-webkit-scrollbar-thumb:hover {
-  background: rgb(0 0 0 / 0.3);
+/* ========================= 无障碍:尊重降低动效偏好 ========================= */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

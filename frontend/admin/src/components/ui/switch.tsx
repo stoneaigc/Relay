@@ -2,13 +2,14 @@ import * as React from "react";
 import * as SwitchPrimitives from "@radix-ui/react-switch";
 import { cn } from "@/lib/utils";
 
+// 开关:选中态用品牌色,滑块走冷调投影,位移过渡带一点弹性。
 const Switch = React.forwardRef<
   React.ElementRef<typeof SwitchPrimitives.Root>,
   React.ComponentPropsWithoutRef<typeof SwitchPrimitives.Root>
 >(({ className, ...props }, ref) => (
   <SwitchPrimitives.Root
     className={cn(
-      "peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors",
+      "peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors duration-200",
       "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
       "disabled:cursor-not-allowed disabled:opacity-50",
       "data-[state=checked]:bg-primary data-[state=unchecked]:bg-input",
@@ -19,7 +20,8 @@ const Switch = React.forwardRef<
   >
     <SwitchPrimitives.Thumb
       className={cn(
-        "pointer-events-none block h-4 w-4 rounded-full bg-card shadow-sm ring-0 transition-transform",
+        "pointer-events-none block h-4 w-4 rounded-full bg-card shadow-[0_1px_3px_rgba(28,30,48,0.3)] ring-0",
+        "transition-transform duration-200 ease-[cubic-bezier(0.32,0.72,0,1)]",
         "data-[state=checked]:translate-x-4 data-[state=unchecked]:translate-x-0"
       )}
     />

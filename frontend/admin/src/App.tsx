@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
-import { Users as UsersIcon, UsersRound, KeyRound, Copy, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen, SlidersHorizontal, Undo2, Ban } from "lucide-react";
+import { Users as UsersIcon, UsersRound, KeyRound, Copy, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen, SlidersHorizontal, Undo2, Ban, ChevronRight } from "lucide-react";
 import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, UserGroupRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint, AdminKeyRow, AdminApiKeyRow } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription, SheetSection } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription, SheetSection, SheetBody, SheetFooter } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import { copyText } from "./clipboard";
 import EChart, { cssVar } from "@/components/EChart";
@@ -117,14 +117,19 @@ function Console({ onLogout }: { onLogout: () => void }) {
   const [version, setVersion] = useState("");
   const loc = useLocation();
   useEffect(() => { healthz().then((h) => setVersion(h.version)).catch(() => {}); }, []);
-  const title = NAV.find((n) => loc.pathname.startsWith(n.path))?.label ?? "";
+  // 取匹配最深的导航项,避免 /user-groups 误命中 /users。
+  const activeNav = NAV.filter((n) => loc.pathname === n.path || loc.pathname.startsWith(n.path + "/")).sort(
+    (a, b) => b.path.length - a.path.length
+  )[0];
+  const title = activeNav?.label ?? "";
+  const groupTitle = activeNav ? NAV_GROUPS.find((g) => g.items.includes(activeNav))?.title ?? "" : "";
   const isGroups = loc.pathname.startsWith("/groups");
 
   const sidebar = (
     <>
-      <div className="flex items-center justify-between px-4 py-4">
-        <div className="flex items-center gap-2 text-lg font-bold">
-          <svg viewBox="0 0 64 64" className="h-7 w-7 shrink-0">
+      <div className="flex items-center justify-between px-4 pb-3 pt-4">
+        <div className="flex items-center gap-2.5">
+          <svg viewBox="0 0 64 64" className="h-9 w-9 shrink-0 drop-shadow-[0_4px_10px_rgba(99,102,241,0.35)]">
             <defs><linearGradient id="ag" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style={{stopColor:'#6366f1'}}/><stop offset="100%" style={{stopColor:'#8b5cf6'}}/></linearGradient></defs>
             <rect width="64" height="64" rx="14" fill="url(#ag)"/>
             <path d="M10 32 L24 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
@@ -134,27 +139,37 @@ function Console({ onLogout }: { onLogout: () => void }) {
             <path d="M40 32 L54 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
             <path d="M46 25 L54 32 L46 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
           </svg>
-          <span>Relay</span>
+          <div className="flex flex-col leading-none">
+            <span className="text-[17px] font-bold tracking-tight text-foreground">Relay</span>
+            <span className="mt-1 text-[10px] font-medium tracking-[0.14em] text-subtle-foreground">ADMIN CONSOLE</span>
+          </div>
         </div>
-        <button className="md:hidden" onClick={() => setMobileOpen(false)}><X className="h-5 w-5" /></button>
+        <button className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted md:hidden" onClick={() => setMobileOpen(false)}><X className="h-5 w-5" /></button>
       </div>
-      <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 py-1">
+      <nav className="flex-1 space-y-0.5 overflow-y-auto px-2.5 pb-2 pt-1">
         {NAV_GROUPS.map((g, gi) => (
-          <div key={gi} className={cn(gi > 0 && "mt-3")}>
+          <div key={gi} className={cn(gi > 0 && "mt-4")}>
             {g.title && (
-              <div className="px-3 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/60">{g.title}</div>
+              <div className="px-3 pb-1.5 pt-1 text-[11px] font-semibold tracking-wide text-subtle-foreground">{g.title}</div>
             )}
             {g.items.map((n) => (
               <NavLink key={n.path} to={n.path} onClick={() => setMobileOpen(false)}
-                className={({ isActive }) => cn("flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",
-                  isActive ? "bg-accent font-medium text-foreground" : "text-muted-foreground hover:bg-accent")}>
-                <n.icon className="h-4 w-4 shrink-0" /> {n.label}
+                className={({ isActive }) => cn("relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors duration-150",
+                  isActive
+                    ? "bg-brand-50 font-semibold text-brand-700 before:absolute before:left-0 before:top-1/2 before:h-4 before:w-[3px] before:-translate-y-1/2 before:rounded-r-full before:bg-primary before:content-['']"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground")}>
+                {({ isActive }) => (
+                  <>
+                    <n.icon className={cn("h-4 w-4 shrink-0", isActive ? "text-brand-600" : "text-subtle-foreground")} />
+                    {n.label}
+                  </>
+                )}
               </NavLink>
             ))}
           </div>
         ))}
       </nav>
-      <div className="px-2 py-3">
+      <div className="space-y-0.5 border-t border-border px-2.5 py-3">
         {/* 一键切换门户:有同名门户用户则带登录态直达,否则回落门户登录页 */}
         <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground"
           onClick={async () => {
@@ -166,34 +181,42 @@ function Console({ onLogout }: { onLogout: () => void }) {
           }}>
           <ExternalLink className="h-4 w-4" />进入用户门户
         </Button>
-        <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground" onClick={onLogout}>
+        <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground hover:text-destructive" onClick={onLogout}>
           <LogOut className="h-4 w-4" />退出登录
         </Button>
-        {version && <div className="px-3 pt-2 text-[10px] text-muted-foreground/60">Relay v{version}</div>}
+        {version && <div className="px-3 pt-2 text-[10px] tracking-wide text-subtle-foreground">Relay v{version}</div>}
       </div>
     </>
   );
 
   return (
     <div className="flex h-screen gap-2 overflow-hidden bg-background p-2 md:gap-3 md:p-3">
-      <aside className="hidden w-56 shrink-0 flex-col overflow-hidden rounded-2xl border bg-card shadow-sm md:flex">{sidebar}</aside>
+      <aside className="hidden w-56 shrink-0 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-panel md:flex">{sidebar}</aside>
       {mobileOpen && (
         <div className="fixed inset-0 z-40 md:hidden">
-          <div className="absolute inset-0 bg-black/30" onClick={() => setMobileOpen(false)} />
-          <aside className="absolute inset-y-0 left-0 flex w-64 flex-col bg-card shadow-xl">{sidebar}</aside>
+          <div className="absolute inset-0 bg-[#0b0d18]/40 backdrop-blur-[3px]" onClick={() => setMobileOpen(false)} />
+          <aside className="absolute inset-y-0 left-0 flex w-64 flex-col overflow-hidden rounded-r-2xl border-r border-border bg-card shadow-drawer animate-[relay-sheet-in_0.34s_var(--ease-spring)_both]">{sidebar}</aside>
         </div>
       )}
-      <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border bg-card shadow-sm">
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4 text-sm font-medium md:px-6">
-          <button className="md:hidden" onClick={() => setMobileOpen(true)}><Menu className="h-5 w-5" /></button>
-          {title}
+      <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-panel">
+        <header className="flex h-16 shrink-0 items-center gap-3 border-b border-border px-4 md:px-6">
+          <button className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted md:hidden" onClick={() => setMobileOpen(true)}><Menu className="h-5 w-5" /></button>
+          <div className="flex min-w-0 items-center gap-2">
+            {groupTitle && (
+              <>
+                <span className="shrink-0 text-[13px] text-subtle-foreground">{groupTitle}</span>
+                <ChevronRight className="h-3.5 w-3.5 shrink-0 text-border-strong" />
+              </>
+            )}
+            <h1 className="truncate text-[15px] font-semibold tracking-tight text-foreground">{title}</h1>
+          </div>
         </header>
         {isGroups ? (
-          <div className="min-h-0 flex-1 p-4 md:p-6">
+          <div className="min-h-0 flex-1 bg-muted/50 p-4 md:p-6">
             <Routes><Route path="/groups" element={<GroupsPanel />} /></Routes>
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-auto">
+          <div className="min-h-0 flex-1 overflow-auto bg-muted/50">
             <div className="p-4 md:p-6">
               <Routes>
                 <Route path="/" element={<Navigate to="/overview" replace />} />
@@ -418,7 +441,8 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
       onSaved(); onClose();
     } catch (e: any) { setErr(e.message); }
   };
-  const sel = "h-9 w-full rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
+  const sel = "h-9 w-full rounded-lg border border-input bg-card px-2.5 text-sm shadow-card transition-[border-color,box-shadow] hover:border-border-strong focus:border-brand-400 focus:outline-none focus:ring-4 focus:ring-brand-500/15";
+  const lbl = "mb-1.5 block text-xs font-medium text-muted-foreground";
   const limitHint = "留空 = 继承用户组/全局默认,0 = 显式不限";
   // 生效预览:用户显式 > 用户组 > 全局默认(预算无全局层,组未设即不限)。
   const selGroup = userGroups.find((g) => g.id === userGroupId);
@@ -442,39 +466,40 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
             <SheetTitle>{edit ? "编辑用户" : "创建用户"}</SheetTitle>
             <SheetDescription>{edit ? `当前余额 ${edit.balance.toLocaleString()} tokens` : "密码留空将自动生成 16 位初始密码"}</SheetDescription>
           </SheetHeader>
-          <div className="flex-1 space-y-5 overflow-y-auto px-5 py-4">
+          <SheetBody>
             {edit && edit.password_changed === false && edit.initial_password && (
-              <div className="flex flex-wrap items-center gap-2 rounded-lg bg-indigo-500/10 px-3 py-2 text-sm text-indigo-600">
+              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-brand-200 bg-brand-50 px-3.5 py-2.5 text-[13px] text-brand-700">
+                <ShieldAlert className="h-4 w-4 shrink-0" />
                 <span>仍在使用初始密码:</span>
-                <span className="mono font-semibold text-indigo-700">{edit.initial_password}</span>
-                <Button size="sm" variant="ghost" className="h-7 gap-1 px-2 text-indigo-600"
+                <span className="mono font-semibold text-brand-700">{edit.initial_password}</span>
+                <Button size="sm" variant="ghost" className="ml-auto h-7 gap-1 px-2 text-brand-700"
                   onClick={async () => { if (await copyText(edit.initial_password!)) { setCopiedHint(true); setTimeout(() => setCopiedHint(false), 1500); } }}>
                   {copiedHint ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}{copiedHint ? "已复制" : "复制"}
                 </Button>
               </div>
             )}
             <SheetSection title="账号">
-              <div className="grid grid-cols-2 gap-3">
-                <div><label className="mb-1 block text-xs text-muted-foreground">用户名{edit ? "(不可改)" : " *"}</label>
+              <div className="grid grid-cols-2 gap-3.5">
+                <div><label className={lbl}>用户名{edit ? "(不可改)" : " *"}</label>
                   <Input placeholder="登录用户名" value={username} onChange={(e) => setUsername(e.target.value)} disabled={!!edit} autoFocus={!edit} /></div>
-                <div><label className="mb-1 block text-xs text-muted-foreground">{edit ? "密码(留空不改)" : "密码(留空自动生成)"}</label>
+                <div><label className={lbl}>{edit ? "密码(留空不改)" : "密码(留空自动生成)"}</label>
                   <Input type="password" placeholder={edit ? "留空保持不变" : "自动生成 16 位"} value={password} onChange={(e) => setPassword(e.target.value)} /></div>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div><label className="mb-1 block text-xs text-muted-foreground">邮箱(可选)</label>
+              <div className="grid grid-cols-2 gap-3.5">
+                <div><label className={lbl}>邮箱(可选)</label>
                   <Input placeholder="name@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
-                <div><label className="mb-1 block text-xs text-muted-foreground">手机号(可选)</label>
+                <div><label className={lbl}>手机号(可选)</label>
                   <Input placeholder="13800000000" value={phone} onChange={(e) => setPhone(e.target.value)} /></div>
               </div>
             </SheetSection>
             <SheetSection title="套餐" hint="决定能用什么 / 能用多少">
-              <div className="grid grid-cols-2 gap-3">
-                <div><label className="mb-1 block text-xs text-muted-foreground">模型组</label>
+              <div className="grid grid-cols-2 gap-3.5">
+                <div><label className={lbl}>模型组</label>
                   <select value={groupId} onChange={(e) => setGroupId(Number(e.target.value))} className={sel}>
                     <option value={0}>未绑定</option>
                     {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
                   </select></div>
-                <div><label className="mb-1 block text-xs text-muted-foreground">用户组</label>
+                <div><label className={lbl}>用户组</label>
                   <select value={userGroupId} onChange={(e) => setUserGroupId(Number(e.target.value))} className={sel}>
                     <option value={0}>未挂组</option>
                     {userGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
@@ -482,41 +507,44 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
               </div>
             </SheetSection>
             <SheetSection title="限额与预算" hint={limitHint}>
-              <div><label className="mb-1 block text-xs text-muted-foreground">并发上限</label>
+              <div><label className={lbl}>并发上限</label>
                 <Input placeholder={concPlaceholder} value={conc} onChange={(e) => setConc(e.target.value)} /></div>
-              <div className="grid grid-cols-2 gap-3">
-                <div><label className="mb-1 block text-xs text-muted-foreground">日预算 tokens</label>
+              <div className="grid grid-cols-2 gap-3.5">
+                <div><label className={lbl}>日预算 tokens</label>
                   <Input placeholder={budgetPlaceholder(selGroup?.budget_daily_tokens ?? null)} value={budgetDaily} onChange={(e) => setBudgetDaily(e.target.value)} /></div>
-                <div><label className="mb-1 block text-xs text-muted-foreground">月预算 tokens</label>
+                <div><label className={lbl}>月预算 tokens</label>
                   <Input placeholder={budgetPlaceholder(selGroup?.budget_monthly_tokens ?? null)} value={budgetMonthly} onChange={(e) => setBudgetMonthly(e.target.value)} /></div>
               </div>
-              <div className="rounded-lg bg-muted/50 px-3 py-2.5">
-                <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">生效预览{selGroup ? `(用户组:${selGroup.name})` : "(未挂组,按全局默认)"}</p>
-                <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
-                  <span>并发 <b className="font-semibold text-foreground">{fmtEff(effConc)}</b></span>
-                  <span className="text-muted-foreground/50">·</span>
-                  <span>RPM <b className="font-semibold text-foreground">{fmtEff(effRpm)}</b><span className="ml-0.5 text-[10px] text-muted-foreground/70">{selGroup ? "组" : "全局"}</span></span>
-                  <span className="text-muted-foreground/50">·</span>
-                  <span>TPM <b className="font-semibold text-foreground">{fmtEff(effTpm)}</b><span className="ml-0.5 text-[10px] text-muted-foreground/70">{selGroup ? "组" : "全局"}</span></span>
-                  <span className="text-muted-foreground/50">·</span>
-                  <span>日预算 <b className="font-semibold text-foreground">{fmtEff(effDaily)}</b>{effDaily !== 0 && selGroup?.budget_daily_tokens != null && budgetDaily.trim() === "" && <span className="ml-0.5 text-[10px] text-muted-foreground/70">组</span>}</span>
-                  <span className="text-muted-foreground/50">·</span>
-                  <span>月预算 <b className="font-semibold text-foreground">{fmtEff(effMonthly)}</b>{effMonthly !== 0 && selGroup?.budget_monthly_tokens != null && budgetMonthly.trim() === "" && <span className="ml-0.5 text-[10px] text-muted-foreground/70">组</span>}</span>
+              <div className="rounded-xl border border-brand-200/70 bg-brand-50/50 px-3.5 py-3">
+                <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold text-brand-700">
+                  <span className="brand-gradient h-1.5 w-1.5 rounded-full" aria-hidden />
+                  生效预览{selGroup ? `(用户组:${selGroup.name})` : "(未挂组,按全局默认)"}
+                </p>
+                <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-xs">
+                  <span>并发 <b className="font-semibold tabular-nums text-foreground">{fmtEff(effConc)}</b></span>
+                  <span>RPM <b className="font-semibold tabular-nums text-foreground">{fmtEff(effRpm)}</b><span className="ml-1 text-[10px] text-subtle-foreground">{selGroup ? "组" : "全局"}</span></span>
+                  <span>TPM <b className="font-semibold tabular-nums text-foreground">{fmtEff(effTpm)}</b><span className="ml-1 text-[10px] text-subtle-foreground">{selGroup ? "组" : "全局"}</span></span>
+                  <span>日预算 <b className="font-semibold tabular-nums text-foreground">{fmtEff(effDaily)}</b>{effDaily !== 0 && selGroup?.budget_daily_tokens != null && budgetDaily.trim() === "" && <span className="ml-1 text-[10px] text-subtle-foreground">组</span>}</span>
+                  <span>月预算 <b className="font-semibold tabular-nums text-foreground">{fmtEff(effMonthly)}</b>{effMonthly !== 0 && selGroup?.budget_monthly_tokens != null && budgetMonthly.trim() === "" && <span className="ml-1 text-[10px] text-subtle-foreground">组</span>}</span>
                 </div>
               </div>
             </SheetSection>
             <SheetSection title="额度">
-              <div><label className="mb-1 block text-xs text-muted-foreground">{edit ? "增减额度(可为负,0 不变)" : "赠送 tokens"}</label>
+              <div><label className={lbl}>{edit ? "增减额度(可为负,0 不变)" : "赠送 tokens"}</label>
                 <Input value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
             </SheetSection>
-            {err && <p className="text-sm text-destructive">{err}</p>}
-          </div>
-          <div className="flex justify-end gap-2 border-t px-5 py-3">
+            {err && (
+              <p className="flex items-start gap-1.5 rounded-lg bg-destructive/8 px-3 py-2 text-[13px] text-destructive">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{err}
+              </p>
+            )}
+          </SheetBody>
+          <SheetFooter>
             <Button variant="ghost" onClick={onClose}>取消</Button>
             <Button onClick={submit} disabled={!username.trim()}>
               {edit ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}{edit ? "保存" : "创建"}
             </Button>
-          </div>
+          </SheetFooter>
         </SheetContent>
       </Sheet>
 

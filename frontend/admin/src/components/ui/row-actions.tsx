@@ -47,10 +47,10 @@ export function RowActions({ actions, max = 2 }: RowActionsProps) {
               disabled={a.disabled}
               onClick={a.onClick}
               className={cn(
-                "inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors disabled:pointer-events-none disabled:opacity-50",
+                "inline-flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
                 a.variant === "destructive"
                   ? "hover:bg-destructive/10 hover:text-destructive"
-                  : "hover:bg-accent hover:text-foreground"
+                  : "hover:bg-brand-100 hover:text-brand-700"
               )}
             >
               {a.icon}
@@ -61,7 +61,7 @@ export function RowActions({ actions, max = 2 }: RowActionsProps) {
       ))}
       {overflow.length > 0 && (
         <DropdownMenu>
-          <DropdownMenuTrigger className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground">
+          <DropdownMenuTrigger className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground outline-none transition-colors duration-150 hover:bg-brand-100 hover:text-brand-700 focus-visible:ring-2 focus-visible:ring-ring">
             <MoreHorizontal className="h-4 w-4" />
           </DropdownMenuTrigger>
           <DropdownMenuContent>
