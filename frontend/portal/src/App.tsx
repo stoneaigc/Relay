@@ -490,7 +490,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             <path d="M40 32 L54 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
             <path d="M46 25 L54 32 L46 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
           </svg>
-          <span>Rel<span className="text-primary">ay</span></span>
+          <span>Relay</span>
         </div>
         <button className="md:hidden" onClick={() => setMobileOpen(false)}><X className="h-5 w-5" /></button>
       </div>
