@@ -273,10 +273,10 @@
       </div>
       <div id="reg-email-fields">
         <label for="r-email">邮箱</label>
-        <input id="r-email" type="email" autocomplete="email" required>
+        <input id="r-email" type="email" autocomplete="email">
         <label for="r-code">验证码</label>
         <div class="code-row">
-          <input id="r-code" autocomplete="one-time-code" required>
+          <input id="r-code" autocomplete="one-time-code">
           <button type="button" class="send-btn" id="r-send">发送验证码</button>
         </div>
       </div>
@@ -285,7 +285,7 @@
         <input id="p-phone" inputmode="numeric" maxlength="11" placeholder="11 位手机号" autocomplete="tel">
         <label for="p-code">短信验证码</label>
         <div class="code-row">
-          <input id="p-code" autocomplete="one-time-code" required>
+          <input id="p-code" autocomplete="one-time-code">
           <button type="button" class="send-btn" id="p-send">发送验证码</button>
         </div>
       </div>
@@ -338,11 +338,13 @@ const MODES = {
 };
 function showMode(m) {
   ["login", "register", "reset"].forEach((k) => { $("f-" + k).hidden = k !== m; });
-  document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.mode === m));
+  // 只作用于模式主 tab;注册方式子 tab(data-regmode,同 .tab 类)由各自的监听管理,
+  // 否则点「手机号注册」会以 undefined 触发 showMode → 三表单全隐藏 + MODES[undefined] 抛错(页面卡死)。
+  document.querySelectorAll(".tab[data-mode]").forEach((b) => b.classList.toggle("active", b.dataset.mode === m));
   $("title").textContent = MODES[m].title;
   $("subtitle").textContent = MODES[m].sub;
 }
-document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => showMode(b.dataset.mode)));
+document.querySelectorAll(".tab[data-mode]").forEach((b) => b.addEventListener("click", () => showMode(b.dataset.mode)));
 document.querySelectorAll("[data-goto]").forEach((b) => b.addEventListener("click", () => showMode(b.dataset.goto)));
 
 // ---- 登录:按角色把令牌写入对应应用的 localStorage 键,两套 API 鉴权零改动 ----
