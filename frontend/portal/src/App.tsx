@@ -4,7 +4,7 @@ import {
   KeyRound, Copy, RefreshCw, Plus, LogOut, Check,
   LayoutDashboard, Receipt, MessageSquare, Menu, X, SendHorizontal, Boxes,
   Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen,
-  Gauge, Zap, Timer, CalendarDays, KeySquare, Eye, EyeOff, ShieldCheck, Sparkles,
+  Gauge, Zap, Timer, CalendarDays, KeySquare, Eye, EyeOff, ShieldCheck, Sparkles, Square, Trash2,
 } from "lucide-react";
 import { api, getToken, clearToken, healthz, SITE_PREFIX, KeyInfo, ModelCard, QuotaInfo, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType } from "./api";
 import { copyText } from "./clipboard";
@@ -418,6 +418,7 @@ const NAV_ALL: { path: string; label: string; icon: any }[] = [
 
 function Dashboard({ onLogout }: { onLogout: () => void }) {
   const loc = useLocation();
+  const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [summary, setSummary] = useState<{ granted: number; used: number; balance: number } | null>(null);
   const [quota, setQuota] = useState<QuotaInfo | null>(null);
@@ -443,8 +444,9 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     : loc.pathname.startsWith("/docs") ? "docs" : "overview";
   // 奖励功能关闭时,强制回退到概览页
   const effectiveSection = section === "rewards" && !rewardsEnabled ? "overview" as Section : section;
-  const title = section === "chat" ? "对话" : section === "models" ? "模型广场" : section === "rewards" ? "奖励"
-    : section === "usage" ? "对话日志" : section === "docs" ? "API 文档" : "概览";
+  // 标题与内容一致(按 effectiveSection 而非原始路径判断),避免奖励关闭时标题/内容不一致。
+  const title = effectiveSection === "chat" ? "对话" : effectiveSection === "models" ? "模型广场" : effectiveSection === "rewards" ? "奖励"
+    : effectiveSection === "usage" ? "对话日志" : effectiveSection === "docs" ? "API 文档" : "概览";
 
   const loadUsage = async () => {
     try {
@@ -454,11 +456,20 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   };
   useEffect(() => { loadUsage(); }, [usagePage, usagePageSize]);
 
+  const [loadErr, setLoadErr] = useState("");
   const refresh = async () => {
-    try {
-      const [me, k, m, s, q] = await Promise.all([api.me(), api.keys(), api.models(), api.summary(), api.quota()]);
-      setPhone(me.phone || "—"); setKeys(k.data); setModels(m.data); setSummary(s); setQuota(q);
-    } catch (e: any) { if (String(e.message).includes("auth")) onLogout(); }
+    // 并行拉取但各自独立结算:单个接口失败不应让整页数据空白。
+    const [me, k, m, s, q] = await Promise.allSettled([api.me(), api.keys(), api.models(), api.summary(), api.quota()]);
+    const all = [me, k, m, s, q];
+    // 任一请求因鉴权失败 → 统一登出。
+    if (all.some((r) => r.status === "rejected" && String((r as PromiseRejectedResult).reason?.message || "").includes("auth"))) { onLogout(); return; }
+    if (me.status === "fulfilled") setPhone(me.value.phone || "—");
+    if (k.status === "fulfilled") setKeys(k.value.data);
+    if (m.status === "fulfilled") setModels(m.value.data);
+    if (s.status === "fulfilled") setSummary(s.value);
+    if (q.status === "fulfilled") setQuota(q.value);
+    const failed = all.filter((r) => r.status === "rejected").length;
+    setLoadErr(failed ? `有 ${failed} 项数据加载失败,其余内容已正常显示。` : "");
   };
   useEffect(() => { refresh(); }, []);
 
@@ -468,9 +479,15 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     return () => window.clearInterval(t);
   }, []);
 
+  // 配置未就绪前不重定向,避免深链 /rewards 在配置返回前被误判为「奖励已关闭」而跳回首页。
+  const [configLoaded, setConfigLoaded] = useState(false);
   useEffect(() => {
-    api.config().then((c) => setRewardsEnabled(c.rewards_enabled)).catch(() => {});
+    api.config().then((c) => setRewardsEnabled(c.rewards_enabled)).catch(() => {}).finally(() => setConfigLoaded(true));
   }, []);
+  // 奖励关闭时直接访问 /rewards:把地址栏也纠正回首页,与导航/标题/内容保持一致。
+  useEffect(() => {
+    if (configLoaded && section === "rewards" && !rewardsEnabled) navigate("/", { replace: true });
+  }, [configLoaded, section, rewardsEnabled, navigate]);
 
   useEffect(() => {
     api.series(seriesDays).then((ser) => setSeries(ser.data)).catch(() => {});
@@ -531,6 +548,13 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           <button className="md:hidden" onClick={() => setMobileOpen(true)}><Menu className="h-5 w-5" /></button>
           <span className="text-sm font-medium">{title}</span>
         </header>
+
+        {loadErr && (
+          <div className="flex shrink-0 flex-wrap items-center gap-3 border-b bg-destructive/5 px-4 py-2 text-xs text-destructive md:px-6">
+            <span>{loadErr}</span>
+            <Button variant="outline" size="sm" onClick={refresh}>重试</Button>
+          </div>
+        )}
 
         {effectiveSection === "chat" ? (
           <ChatView models={models.map((m) => m.name)} onSent={refresh} />
@@ -675,9 +699,13 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
 
 function ChatView({ models, onSent }: { models: string[]; onSent: () => void }) {
   const [model, setModel] = useState("");
-  const [msgs, setMsgs] = useState<ChatMsg[]>([]);
+  // 会话持久化到 sessionStorage:门户内切页(组件卸载)或刷新后回到对话仍保留上下文。
+  const [msgs, setMsgs] = useState<ChatMsg[]>(() => {
+    try { const raw = sessionStorage.getItem("relay_portal_chat"); return raw ? JSON.parse(raw) : []; } catch { return []; }
+  });
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   // 是否吸底:用户滚到接近底部时为 true,往上滚则停止自动吸底,滚回底部恢复。
   const stick = useRef(true);
@@ -689,6 +717,13 @@ function ChatView({ models, onSent }: { models: string[]; onSent: () => void }) 
 
   useEffect(() => { if (!model && models.length) setModel(models[0]); }, [models]);
   useEffect(() => { if (stick.current) scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight); }, [msgs]);
+  useEffect(() => {
+    try { sessionStorage.setItem("relay_portal_chat", JSON.stringify(msgs)); } catch { /* 配额/隐私模式错误可忽略 */ }
+  }, [msgs]);
+  // 卸载时中断进行中的流式请求,避免组件已卸载仍在回调更新状态。
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
+
+  const clearChat = () => { setMsgs([]); try { sessionStorage.removeItem("relay_portal_chat"); } catch { /* 忽略 */ } };
 
   const send = async () => {
     const text = input.trim();
@@ -697,6 +732,10 @@ function ChatView({ models, onSent }: { models: string[]; onSent: () => void }) 
     const next = [...msgs, { role: "user", content: text }];
     setMsgs([...next, { role: "assistant", content: "" }]);
     setInput(""); setBusy(true);
+    const ac = new AbortController();
+    abortRef.current = ac;
+    // 超时保护:流式长时间无进展时中断,避免请求永久挂起。
+    const timer = window.setTimeout(() => ac.abort(), 120_000);
     try {
       await chatStream(model, next, (d) => {
         setMsgs((cur) => {
@@ -709,14 +748,19 @@ function ChatView({ models, onSent }: { models: string[]; onSent: () => void }) 
           };
           return copy;
         });
-      });
+      }, ac.signal);
     } catch (e: any) {
+      const aborted = ac.signal.aborted;
       setMsgs((cur) => {
         const copy = [...cur];
-        copy[copy.length - 1] = { role: "assistant", content: "⚠️ " + e.message };
+        const last = copy[copy.length - 1];
+        // 主动停止/超时:保留已生成内容并标注;其它错误:展示原因。
+        copy[copy.length - 1] = aborted
+          ? { ...last, content: (last.content || "") + (last.content ? "\n\n" : "") + "⏹ 已停止生成" }
+          : { role: "assistant", content: "⚠️ " + e.message };
         return copy;
       });
-    } finally { setBusy(false); onSent(); }
+    } finally { window.clearTimeout(timer); abortRef.current = null; setBusy(false); onSent(); }
   };
 
   return (
@@ -727,6 +771,11 @@ function ChatView({ models, onSent }: { models: string[]; onSent: () => void }) 
           className="h-8 rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring">
           {models.map((m) => <option key={m} value={m}>{m}</option>)}
         </select>
+        {msgs.length > 0 && (
+          <Button variant="ghost" size="sm" className="ml-auto gap-1.5 text-muted-foreground" onClick={clearChat} disabled={busy}>
+            <Trash2 className="h-3.5 w-3.5" />清空对话
+          </Button>
+        )}
       </div>
 
       <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-auto">
@@ -762,9 +811,15 @@ function ChatView({ models, onSent }: { models: string[]; onSent: () => void }) 
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
             rows={1} placeholder="输入消息,Enter 发送,Shift+Enter 换行"
             className="max-h-40 min-h-[40px] flex-1 resize-none rounded-xl border border-input bg-card px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring" />
-          <Button size="icon" className="h-10 w-10 shrink-0" disabled={busy || !input.trim()} onClick={send}>
-            <SendHorizontal className="h-4 w-4" />
-          </Button>
+          {busy ? (
+            <Button size="icon" variant="outline" className="h-10 w-10 shrink-0" onClick={() => abortRef.current?.abort()} title="停止生成">
+              <Square className="h-4 w-4" />
+            </Button>
+          ) : (
+            <Button size="icon" className="h-10 w-10 shrink-0" disabled={!input.trim()} onClick={send}>
+              <SendHorizontal className="h-4 w-4" />
+            </Button>
+          )}
         </div>
       </div>
     </div>

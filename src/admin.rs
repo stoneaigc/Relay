@@ -343,6 +343,10 @@ pub async fn list_users(
                 "used_month": month_map.get(&uid).copied().unwrap_or(0),
                 "granted": used + balance,
                 "concurrency_limit": live_cl.or(u.concurrency_limit),
+                // 原始显式值(未与运行时生效值合并):编辑表单回显用,null = 继承。
+                // 若只有合并后的生效值,继承中的用户一打开编辑框就显示全局默认,
+                // 保存任意字段都会把继承静默固化为显式值。
+                "concurrency_limit_raw": u.concurrency_limit,
                 "group_id": live.as_ref().map(|x| x.group()).unwrap_or(u.group_id.unwrap_or(0)),
                 "user_group_id": u.user_group_id,
                 "user_group_name": ug_name,
@@ -525,6 +529,8 @@ pub async fn get_user(
         "balance": balance,
         "used_total": u.token_used_total,
         "concurrency_limit": live_cl.or(u.concurrency_limit),
+        // 同 list_users:编辑表单回显需原始显式值,null = 继承。
+        "concurrency_limit_raw": u.concurrency_limit,
         "multiplier": u.bill_multiplier,
         "rpm_limit": u.rpm_limit,
         "tpm_limit": u.tpm_limit,
@@ -562,6 +568,17 @@ pub async fn patch_user(
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
 
+    // 限额字段传负值(-1)= 清除该显式值,回落"继承用户组/全局默认"。
+    let cleared_limits = [
+        body.concurrency_limit,
+        body.rpm_limit,
+        body.tpm_limit,
+        body.budget_daily_tokens,
+        body.budget_monthly_tokens,
+    ]
+    .iter()
+    .any(|v| v.map(|x| x < 0).unwrap_or(false));
+
     storage::update_user(
         &state.db,
         id,
@@ -582,9 +599,12 @@ pub async fn patch_user(
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
-    // 用户组变更后,按解析链重算内存限额(用户显式值 > 组值 > 全局默认)。
-    if body.user_group_id.is_some() {
-        let gid = body.user_group_id.filter(|g| *g > 0);
+    // 用户组变更 / 限额被清除 时,按解析链重算内存限额(用户显式值 > 组值 > 全局默认)。
+    if body.user_group_id.is_some() || cleared_limits {
+        let gid = storage::get_user(&state.db, id)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .and_then(|r| r.user_group_id);
         recompute_members(&state, vec![id], gid).await?;
     }
     if let Some(delta) = body.add_tokens {
@@ -594,7 +614,8 @@ pub async fn patch_user(
     }
 
     if let Some(u) = state.user(&id) {
-        if let Some(cl) = body.concurrency_limit {
+        // 负值 = 已清除(交由上面的 recompute_members 按解析链回填),此处只处理显式非负值。
+        if let Some(cl) = body.concurrency_limit.filter(|v| *v >= 0) {
             // 0 = 显式不限(与解析链语义一致)。
             u.concurrency_limit
                 .store(if cl == 0 { u32::MAX } else { cl as u32 }, Ordering::Relaxed);
@@ -608,14 +629,18 @@ pub async fn patch_user(
         if let Some(m) = body.bill_multiplier {
             u.set_bill_multiplier(m);
         }
-        if body.rpm_limit.is_some() || body.tpm_limit.is_some() {
-            let rpm = body.rpm_limit.map(|v| v.max(0) as u32).unwrap_or_else(|| u.rpm_limit.load(Ordering::Relaxed));
-            let tpm = body.tpm_limit.map(|v| v.max(0) as u32).unwrap_or_else(|| u.tpm_limit.load(Ordering::Relaxed));
+        let rpm_in = body.rpm_limit.filter(|v| *v >= 0);
+        let tpm_in = body.tpm_limit.filter(|v| *v >= 0);
+        if rpm_in.is_some() || tpm_in.is_some() {
+            let rpm = rpm_in.map(|v| v as u32).unwrap_or_else(|| u.rpm_limit.load(Ordering::Relaxed));
+            let tpm = tpm_in.map(|v| v as u32).unwrap_or_else(|| u.tpm_limit.load(Ordering::Relaxed));
             u.set_limits(rpm, tpm);
         }
-        if body.budget_daily_tokens.is_some() || body.budget_monthly_tokens.is_some() {
-            let d = body.budget_daily_tokens.map(|v| v.max(0)).unwrap_or_else(|| u.budget_daily.load(Ordering::Relaxed));
-            let m = body.budget_monthly_tokens.map(|v| v.max(0)).unwrap_or_else(|| u.budget_monthly.load(Ordering::Relaxed));
+        let bd_in = body.budget_daily_tokens.filter(|v| *v >= 0);
+        let bm_in = body.budget_monthly_tokens.filter(|v| *v >= 0);
+        if bd_in.is_some() || bm_in.is_some() {
+            let d = bd_in.unwrap_or_else(|| u.budget_daily.load(Ordering::Relaxed));
+            let m = bm_in.unwrap_or_else(|| u.budget_monthly.load(Ordering::Relaxed));
             u.set_budgets(d, m);
         }
     }
@@ -1170,7 +1195,7 @@ pub async fn list_providers(
     admin_guard(&state, &headers)?;
     let page = q.get("page").and_then(|v| v.parse().ok());
     let page_size = q.get("page_size").and_then(|v| v.parse().ok());
-    let (data, total) = storage::list_providers(&state.db, page, page_size)
+    let (data, total) = storage::list_providers(&state.db, page, page_size, q.get("q").map(String::as_str))
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let ps = page_size.unwrap_or(20);
@@ -1906,6 +1931,9 @@ pub async fn add_route(
 #[derive(Deserialize)]
 pub struct AddRoutesBatch {
     pub routes: Vec<AddRoute>,
+    /// 批量默认语义缓存开关(单条 route 的 cache 优先)。
+    #[serde(default)]
+    pub cache: Option<bool>,
 }
 
 /// POST /admin/groups/:id/routes/batch —— 批量添加路由。
@@ -1919,7 +1947,7 @@ pub async fn add_routes_batch(
     let mut ids = Vec::new();
     for r in &body.routes {
         if r.public_name.trim().is_empty() { continue; }
-        let id = storage::add_route(&state.db, group_id, r.public_name.trim(), r.model_id, r.weight.unwrap_or(100), r.multiplier.unwrap_or(1.0), r.cache.unwrap_or(false))
+        let id = storage::add_route(&state.db, group_id, r.public_name.trim(), r.model_id, r.weight.unwrap_or(100), r.multiplier.unwrap_or(1.0), r.cache.or(body.cache).unwrap_or(false))
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
         ids.push(id);
@@ -2767,7 +2795,7 @@ pub struct SmsSettingsBody {
     /// GET | POST,默认 POST。
     #[serde(default)]
     pub gateway_method: Option<String>,
-    /// 请求头 JSON 字符串;空串或缺省 = 清除。
+    /// 请求头 JSON 字符串;缺省(未携带)= 保持已存值,空串或 {} = 清除自定义头。
     #[serde(default)]
     pub gateway_headers: Option<String>,
     pub gateway_body: String,
@@ -2803,10 +2831,16 @@ pub async fn save_sms_settings(
     storage::set_setting(&state.db, crate::settings::K_SMS_BODY_TEMPLATE, body.gateway_body.trim())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    match body.gateway_headers.as_deref().map(str::trim).filter(|s| !s.is_empty() && *s != "{}") {
+    match body.gateway_headers.as_deref().map(str::trim) {
+        // 填 "{}" 或清空 = 清除自定义请求头(入库空串 = 无自定义头)。
+        Some("") | Some("{}") => {
+            storage::set_setting(&state.db, crate::settings::K_SMS_HEADERS_ENC, "")
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
         Some(h) => {
-            // 合法性预检:必须是 JSON 对象,避免线上才报错。{} 表示无自定义头。
-            let parsed: Value = serde_json::from_str(if h == "{}" { "{}" } else { h })
+            // 合法性预检:必须是 JSON 对象,避免线上才报错。
+            let parsed: Value = serde_json::from_str(h)
                 .map_err(|_| ApiError::BadRequest("请求头必须是合法的 JSON 对象,如 {\"Authorization\":\"APPCODE xxx\"}(填 {} 清除)".into()))?;
             if !matches!(parsed, Value::Object(_)) {
                 return Err(ApiError::BadRequest("请求头必须是合法的 JSON 对象,如 {\"Authorization\":\"APPCODE xxx\"}(填 {} 清除)".into()));
@@ -2822,7 +2856,7 @@ pub async fn save_sms_settings(
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
         }
         None => {
-            // 缺省/留空 = 保持已存配置不变(前端仅在有改动时携带该字段)。
+            // 未携带该字段 = 保持已存配置不变(前端仅在有改动时携带)。
         }
     }
     Ok(Json(json!({ "ok": true, "dev": url.is_empty() })))

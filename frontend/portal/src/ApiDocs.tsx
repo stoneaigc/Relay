@@ -5,9 +5,11 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { copyText } from "./clipboard";
+import { SITE_PREFIX } from "./api";
 
+// 网关地址由当前页面地址推导(同源),避免硬编码 :9000 导致非默认端口/子路径部署时示例不可用。
 const BASE = typeof window !== "undefined"
-  ? `${window.location.protocol}//${window.location.hostname}:9000`
+  ? `${window.location.origin}${SITE_PREFIX}`
   : "http://localhost:9000";
 
 const OPENAI_CURL = `curl ${BASE}/v1/chat/completions \\

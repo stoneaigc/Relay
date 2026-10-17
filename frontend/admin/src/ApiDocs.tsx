@@ -5,8 +5,10 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { copyText } from "./clipboard";
+import { SITE_PREFIX } from "./api";
 
-const BASE = "http://localhost:9000";
+// 网关地址由当前页面地址推导(同源),避免硬编码 localhost:9000 导致部署后示例不可用。
+const BASE = `${window.location.origin}${SITE_PREFIX}`;
 
 const OPENAI_CURL = `curl ${BASE}/v1/chat/completions \\
   -H "Authorization: Bearer rk_live_xxx" \\

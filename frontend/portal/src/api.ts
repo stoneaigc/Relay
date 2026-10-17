@@ -178,7 +178,10 @@ export async function chatStream(
   });
   if (!res.ok || !res.body) {
     const t = await res.text();
-    try { throw new Error(JSON.parse(t)?.error?.message || t); } catch { throw new Error(t || res.statusText); }
+    let msg = t || res.statusText;
+    // 优先取后端结构化错误文案;解析失败则回退原文,避免把整段 JSON 直接抛给界面。
+    try { const j = JSON.parse(t); msg = j?.error?.message || j?.message || msg; } catch { /* 非 JSON,沿用原文 */ }
+    throw new Error(msg || "请求失败");
   }
   const reader = res.body.getReader();
   const dec = new TextDecoder();

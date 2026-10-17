@@ -50,6 +50,8 @@ export interface UserRow {
   used_month: number;
   granted: number;
   concurrency_limit: number | null;
+  /** 原始显式值(未与运行时生效值合并):编辑回显用,null = 继承用户组/全局 */
+  concurrency_limit_raw?: number | null;
   group_id: number;
   budget_daily_tokens: number | null;
   budget_monthly_tokens: number | null;
@@ -298,8 +300,9 @@ export const api = {
   deleteUserGroup: (id: number) => req(`/admin/api/user-groups/${id}`, { method: "DELETE" }),
 
   // ---- 上游供应商(Provider) ----
-  providers: (page?: number, page_size?: number): Promise<{ data: ProviderRow[]; page: number; page_size: number; total: number; total_pages: number }> =>
-    req(`/admin/api/providers?page=${page || 1}&page_size=${page_size || 20}`),
+  // q 非空时由服务端按名称/地址/展示名跨页搜索。
+  providers: (page?: number, page_size?: number, q?: string): Promise<{ data: ProviderRow[]; page: number; page_size: number; total: number; total_pages: number }> =>
+    req(`/admin/api/providers?page=${page || 1}&page_size=${page_size || 20}${q ? `&q=${encodeURIComponent(q)}` : ""}`),
   providerModels: (name: string): Promise<{ data: ProviderModelRow[] }> => req(`/admin/api/providers/${name}/models`),
   deleteProvider: (name: string) => req(`/admin/api/providers/${name}`, { method: "DELETE" }),
   updateProvider: (name: string, body: { base_url: string; api_key?: string; display_name?: string | null }) =>

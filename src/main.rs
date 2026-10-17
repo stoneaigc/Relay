@@ -32,6 +32,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use axum::{
     extract::Request,
+    http::{header, StatusCode, Uri},
     middleware::Next,
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -108,6 +109,47 @@ async fn strip_web_prefix(req: Request, next: Next) -> Response {
             next.run(req).await
         }
     }
+}
+
+/// SPA 兜底:未命中的子路径回退到 index.html,并按 URI 深度注入相对 `<base>`,
+/// 使 `base: "./"` 构建出的相对资源在「挂载点下第 2 层及更深」的 URL 上也能正确解析。
+/// 例:`/admin/groups/xxx` 的文档目录是 `/admin/groups/`,需注入 `<base href="../">`,
+/// `./assets/*.js` 才会回到 `/admin/assets/*.js`(否则落到 `/admin/groups/assets/*.js` → 404 白屏)。
+/// 用相对 base 而非绝对路径,以保持任意反代子路径挂载(如 /relay/admin/...)的兼容性。
+async fn spa_fallback(index_path: String, mount: String, uri: Uri) -> Response {
+    let html = match tokio::fs::read_to_string(&index_path).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!("读取 SPA 入口 {} 失败: {e}", index_path);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "spa index not found").into_response();
+        }
+    };
+    // 目录段 = 路径段去掉末尾「文件名」段(以 '/' 结尾时全为目录段);再剥掉挂载前缀段。
+    // 兼容两种 URI 形态:nest 已剥离前缀(/groups/xxx)与未剥离(/admin/groups/xxx)。
+    let full: Vec<&str> = uri.path().split('/').filter(|s| !s.is_empty()).collect();
+    let mut dirs: Vec<&str> = if uri.path().ends_with('/') || full.is_empty() {
+        full
+    } else {
+        full[..full.len() - 1].to_vec()
+    };
+    let ms: Vec<&str> = mount.split('/').filter(|s| !s.is_empty()).collect();
+    if !ms.is_empty() && dirs.len() >= ms.len() && dirs[..ms.len()] == ms[..] {
+        dirs.drain(..ms.len());
+    }
+    let html = if dirs.is_empty() {
+        html
+    } else {
+        html.replacen(
+            "<head>",
+            &format!("<head><base href=\"{}\">", "../".repeat(dirs.len())),
+            1,
+        )
+    };
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
 }
 
 /// 解析高峰/低谷时区:优先按 IANA 名解析为秒偏移(Asia/Shanghai → 28800);
@@ -462,9 +504,19 @@ async fn main() -> anyhow::Result<()> {
         ));
 
     // SPA 静态资源(未命中的子路径回退到 index.html,交给前端路由)。
+    // 兜底不走 ServeFile,而走 spa_fallback:按 URI 深度注入相对 <base>,修复挂载点下
+    // 第 2 层及更深 URL(如 /admin/groups/xxx)因相对资源解析错位导致的整页白屏。
     let spa = |dir: &str| {
-        tower_http::services::ServeDir::new(format!("frontend/{dir}/dist"))
-            .not_found_service(tower_http::services::ServeFile::new(format!("frontend/{dir}/dist/index.html")))
+        let root = format!("frontend/{dir}/dist");
+        let index = format!("{root}/index.html");
+        let mount = format!("/{dir}");
+        tower_http::services::ServeDir::new(root).not_found_service(axum::routing::get::<_, _, ()>(
+            move |uri: Uri| {
+                let index = index.clone();
+                let mount = mount.clone();
+                async move { spa_fallback(index, mount, uri).await }
+            },
+        ))
     };
 
     let app = Router::new()

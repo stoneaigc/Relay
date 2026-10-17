@@ -213,7 +213,11 @@ function Console({ onLogout }: { onLogout: () => void }) {
         </header>
         {isGroups ? (
           <div className="min-h-0 flex-1 bg-muted/50 p-4 md:p-6">
-            <Routes><Route path="/groups" element={<GroupsPanel />} /></Routes>
+            <Routes>
+              <Route path="/groups" element={<GroupsPanel />} />
+              {/* /groups 下的未知子路径(如 /groups/xxx)回落到上游池,避免整块空白。 */}
+              <Route path="*" element={<Navigate to="/groups" replace />} />
+            </Routes>
           </div>
         ) : (
           <div className="min-h-0 flex-1 overflow-auto bg-muted/50">
@@ -394,8 +398,9 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
       setUsername(edit?.username ?? ""); setPassword(""); setGroupId(edit?.group_id ?? 0);
       setUserGroupId(edit?.user_group_id ?? 0);
       setEmail(edit?.email ?? ""); setPhone(edit?.phone ?? "");
-      // null(继承)回显为空串,避免保存时把继承静默写成显式值;0(显式不限)必须原样回显。
-      setConc(edit?.concurrency_limit == null ? "" : String(edit.concurrency_limit));
+      // 回显用原始显式值(raw):null(继承)显示空串,保存时发 -1 继续保持继承。
+      // 不能用 concurrency_limit(生效值=解析链结果,继承时也非 null),否则继承被静默固化为显式值。
+      setConc(edit?.concurrency_limit_raw == null ? "" : String(edit.concurrency_limit_raw));
       setAmount(edit ? "0" : "10000000"); setErr("");
       setBudgetDaily(edit?.budget_daily_tokens == null ? "" : String(edit.budget_daily_tokens));
       setBudgetMonthly(edit?.budget_monthly_tokens == null ? "" : String(edit.budget_monthly_tokens));
@@ -419,12 +424,14 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
     }
     try {
       if (edit) {
+        // 语义:留空 = 清除显式限额(发 -1 哨兵,后端 bind NULL 回落继承);0 = 显式不限;正数 = 该值。
         const body: any = {
           email: email.trim(), phone: phone.trim(),
           group_id: groupId, user_group_id: userGroupId,
-          budget_daily_tokens: bd, budget_monthly_tokens: bm,
+          concurrency_limit: cl === undefined ? -1 : cl,
+          budget_daily_tokens: bd === undefined ? -1 : bd,
+          budget_monthly_tokens: bm === undefined ? -1 : bm,
         };
-        if (cl !== undefined) body.concurrency_limit = cl;
         if (password) body.password = password;
         if (Number(amount)) body.add_tokens = Number(amount);
         await api.patchUser(edit.id, body);
@@ -586,7 +593,12 @@ const GRAN_LABEL: Record<Gran, string> = { day: "按天", week: "按周", month:
 function TrendCard() {
   const [gran, setGran] = useState<Gran>("day");
   const [data, setData] = useState<OverviewSeriesPoint[] | null>(null);
-  useEffect(() => { setData(null); api.overviewSeries(gran).then((r) => setData(r.data)).catch(() => setData([])); }, [gran]);
+  const [err, setErr] = useState("");
+  const load = () => {
+    setErr(""); setData(null);
+    api.overviewSeries(gran).then((r) => setData(r.data)).catch((e: any) => setErr(e?.message || "加载失败"));
+  };
+  useEffect(() => { load(); }, [gran]);
 
   const fmtX = (ts: number) => {
     const d = new Date(ts * 1000);
@@ -615,7 +627,12 @@ function TrendCard() {
         </div>
       </CardHeader>
       <CardContent>
-        {data === null ? (
+        {err ? (
+          <div className="flex flex-col items-center gap-2 py-8">
+            <p className="text-sm text-destructive">趋势数据加载失败:{err}</p>
+            <Button size="sm" variant="outline" onClick={load}>重试</Button>
+          </div>
+        ) : data === null ? (
           <p className="py-10 text-center text-sm text-muted-foreground">加载中…</p>
         ) : total === 0 ? (
           <p className="py-10 text-center text-sm text-muted-foreground">该时间范围暂无消耗</p>
@@ -726,12 +743,23 @@ function MiniStat({ label, value, sub }: { label: string; value: string; sub?: s
 function OverviewPanel() {
   const [d, setD] = useState<OverviewResp | null>(null);
   const [cs, setCs] = useState<CacheStatsResp | null>(null);
-  useEffect(() => { api.overview().then(setD).catch(() => {}); }, []);
-  useEffect(() => { api.cacheStats().then(setCs).catch(() => {}); }, []);
+  const [err, setErr] = useState("");
+  const load = () => {
+    setErr("");
+    api.overview().then(setD).catch((e: any) => setErr(e?.message || "加载失败"));
+    api.cacheStats().then(setCs).catch(() => { /* 缓存统计失败不阻塞概览 */ });
+  };
+  useEffect(() => { load(); }, []);
   const fmt = (n: number | undefined | null) => (n ?? 0).toLocaleString();
   // 费用动态精度:小于 1 分钱时保留 3 位有效数字(0.0000305 -> "$0.0000305"),避免被抹成 $0.0000。
   const money = (n: number | undefined | null) => { const v = n ?? 0; return `$${v !== 0 && v < 0.01 ? v.toPrecision(3) : v < 100 ? v.toFixed(4) : v.toFixed(2)}`; };
   const t = d?.today;
+  if (err) return (
+    <div className="flex flex-col items-center gap-2 py-16">
+      <p className="text-sm text-destructive">概览加载失败:{err}</p>
+      <Button size="sm" variant="outline" onClick={load}>重试</Button>
+    </div>
+  );
   if (!d) return <p className="text-sm text-muted-foreground">加载中…</p>;
   return (
     <div className="space-y-5">
@@ -823,14 +851,19 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
   const [chart, setChart] = useState<UserRow | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [pwdDlg, setPwdDlg] = useState<{ username: string; password: string } | null>(null);
+  const [err, setErr] = useState("");
   const qRef = useRef("");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = async () => {
+    setErr("");
     try {
       const [u, g, ug] = await Promise.all([api.users(page, pageSize, qRef.current || undefined), api.groups(), api.userGroups()]);
       setRows(u.data); setGroups(g.data); setUserGroups(ug.data); setDefaults(ug.defaults); setTotal(u.total);
-    } catch (e: any) { if (String(e.message).includes("auth")) onAuthErr(); }
+    } catch (e: any) {
+      if (String(e.message).includes("auth")) onAuthErr();
+      else setErr(e.message || "加载失败");
+    }
   };
   useEffect(() => { load(); }, [page, pageSize]);
   // 卸载时清掉搜索防抖定时器,避免组件销毁后 setState。
@@ -936,6 +969,16 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
                   </TableCell>
                 </TableRow>
               ))}
+              {err && (
+                <TableRow><TableCell colSpan={12} className="py-10 text-center text-sm text-destructive">
+                  加载失败:{err} <Button size="sm" variant="outline" className="ml-2 h-7" onClick={load}>重试</Button>
+                </TableCell></TableRow>
+              )}
+              {!err && rows.length === 0 && (
+                <TableRow><TableCell colSpan={12} className="py-10 text-center text-sm text-muted-foreground">
+                  {q.trim() ? `没有匹配「${q.trim()}」的用户` : "还没有用户,点击右上角创建"}
+                </TableCell></TableRow>
+              )}
             </TableBody>
           </Table>
           <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={setPage} onPageSizeChange={(s) => { setPage(1); setPageSize(s); }} />
@@ -1057,8 +1100,10 @@ function UserGroupsPanel() {
               {rows.length === 0 && !err && (
                 <TableRow><TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">还没有用户组,创建后可在用户管理里批量套用限额</TableCell></TableRow>
               )}
-              {err && rows.length === 0 && (
-                <TableRow><TableCell colSpan={8} className="py-10 text-center text-sm text-destructive">{err}</TableCell></TableRow>
+              {err && (
+                <TableRow><TableCell colSpan={8} className="py-10 text-center text-sm text-destructive">
+                  加载失败:{err} <Button size="sm" variant="outline" className="ml-2 h-7" onClick={load}>重试</Button>
+                </TableCell></TableRow>
               )}
             </TableBody>
           </Table>
@@ -1250,8 +1295,10 @@ function KeysPanel() {
               {rows.length === 0 && !err && (
                 <TableRow><TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">暂无任何 API Key</TableCell></TableRow>
               )}
-              {err && rows.length === 0 && (
-                <TableRow><TableCell colSpan={7} className="py-10 text-center text-sm text-destructive">{err}</TableCell></TableRow>
+              {err && (
+                <TableRow><TableCell colSpan={7} className="py-10 text-center text-sm text-destructive">
+                  加载失败:{err} <Button size="sm" variant="outline" className="ml-2 h-7" onClick={load}>重试</Button>
+                </TableCell></TableRow>
               )}
             </TableBody>
           </Table>
@@ -1394,14 +1441,23 @@ function ModelsPanel() {
   const [provSelected, setProvSelected] = useState<Set<string>>(new Set());
   const [health, setHealth] = useState<Record<string, ProviderHealthItem>>({});
 
-  const loadProviders = async (p?: number) => {
+  const loadProviders = async (p?: number, kw?: string) => {
     const pg = p ?? page;
-    const r = await api.providers(pg);
+    const search = (kw ?? providerSearch).trim();
+    const r = await api.providers(pg, undefined, search || undefined);
     setProviders(r.data);
     setPageMeta({ total: r.total, total_pages: r.total_pages });
     setPage(pg);
   };
   useEffect(() => { loadProviders(1); }, []);
+  // 搜索词变化:防抖后回到第 1 页从服务端搜索(覆盖全部供应商,而非只过滤当前页)。
+  const firstSearch = useRef(true);
+  useEffect(() => {
+    if (firstSearch.current) { firstSearch.current = false; return; }
+    const t = setTimeout(() => { loadProviders(1, providerSearch); }, 300);
+    return () => clearTimeout(t);
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [providerSearch]);
 
   // 供应商健康徽标:30s 轮询;失败不打断主列表
   const loadHealth = async () => {
@@ -1531,8 +1587,12 @@ function ModelsPanel() {
             <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             <input value={providerSearch} onChange={(e) => setProviderSearch(e.target.value)} placeholder="搜索供应商名称或地址..." className="h-8 w-full rounded-lg border border-input bg-card pl-7 pr-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring" />
           </div>
-          {providers.length === 0 && <p className="text-sm text-muted-foreground">暂无上游供应商，点击「添加上游」开始</p>}
-          {providers.filter((p) => !providerSearch.trim() || p.name.toLowerCase().includes(providerSearch.toLowerCase()) || p.base_url.toLowerCase().includes(providerSearch.toLowerCase())).map((p) => (
+          {providers.length === 0 && (
+            <p className="text-sm text-muted-foreground">
+              {providerSearch.trim() ? `没有匹配「${providerSearch.trim()}」的上游` : "暂无上游供应商，点击「添加上游」开始"}
+            </p>
+          )}
+          {providers.map((p) => (
             <div key={p.name} className="rounded-lg border">
               {/* Provider 头部 */}
               <div className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-muted/50" onClick={() => toggleExpand(p.name)}>
@@ -2040,7 +2100,8 @@ function GroupsPanel() {
   const loadGroups = async () => {
     const [g, m] = await Promise.all([api.groups(), api.models()]);
     setGroups(g.data); setModels(m.data);
-    if (sel == null && g.data.length) setSel(g.data[0].id);
+    // 用函数式更新避免闭包捕获旧 sel:当前无选中(或选中已被删除)时自动落到首个组。
+    setSel((cur) => (cur == null && g.data.length ? g.data[0].id : cur));
   };
   const loadRoutes = async (gid: number) => { setRoutes((await api.routes(gid)).data); };
   const loadTimeRules = async (gid: number) => { setTimeRules((await api.timeRules(gid)).data); };
@@ -2052,7 +2113,7 @@ function GroupsPanel() {
   const delGroup = (g: GroupRow) => setConfirm({
     title: `删除模型组「${g.name}」?`,
     desc: "组内路由与时段规则会一并删除;绑定该组的用户将被解绑(group_id 置空),需重新绑定模型组后才能调用。",
-    action: async () => { await api.deleteGroup(g.id); setSel(null); loadGroups(); },
+    action: async () => { await api.deleteGroup(g.id); if (sel === g.id) setSel(null); await loadGroups(); },
   });
   const delRoute = (id: number) => setConfirm({
     title: "删除该路由?",
@@ -2554,18 +2615,20 @@ function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
   // 编辑模式:单个提交;批量模式:多条提交
   const submit = async () => {
     setErr(""); setSubmitting(true);
+    // 留空才用默认值;显式填 0 保留 0(权重/倍率 0 是合法值,不能被 || 吞掉)。
+    const numOr = (s: string, def: number) => { const t = s.trim(); if (t === "") return def; const n = Number(t); return Number.isFinite(n) && n >= 0 ? n : def; };
     try {
       if (edit) {
-        await api.updateRoute(edit.id, { public_name: publicName.trim(), model_id: Number(modelId), weight: Number(weight) || 100, multiplier: Number(mult) || 1, cache: useCache });
+        await api.updateRoute(edit.id, { public_name: publicName.trim(), model_id: Number(modelId), weight: numOr(weight, 100), multiplier: numOr(mult, 1), cache: useCache });
       } else if (selectedModels.size > 0) {
         const routes = [...selectedModels].map(id => {
           const row = routeRows.get(id);
-          return { public_name: row?.public_name || "", model_id: id, weight: Number(row?.weight) || 100, multiplier: Number(row?.multiplier) || 1 };
+          return { public_name: row?.public_name || "", model_id: id, weight: numOr(row?.weight ?? "", 100), multiplier: numOr(row?.multiplier ?? "", 1) };
         }).filter(r => r.public_name.trim());
         if (routes.length === 0) { setErr("请至少填写一个对外模型名"); setSubmitting(false); return; }
         await api.addRoutesBatch(groupId, { routes, cache: batchCache });
       } else {
-        await api.addRoute(groupId, { public_name: publicName.trim(), model_id: Number(modelId), weight: Number(weight) || 100, multiplier: Number(mult) || 1, cache: useCache });
+        await api.addRoute(groupId, { public_name: publicName.trim(), model_id: Number(modelId), weight: numOr(weight, 100), multiplier: numOr(mult, 1), cache: useCache });
       }
       onSaved(); onClose();
     } catch (e: any) { setErr(e.message); }
@@ -2783,11 +2846,31 @@ function TimeRuleDialog({ dlg, groupId, onClose, onSaved }: {
     const daysSpec = weekdaysFromBits();
     if (!daysSpec) { setErr("请至少选择一个星期"); return; }
     if (start === end) { setErr("开始与结束不能相同"); return; }
+    // 留空才用默认 1;显式填 0 保留 0(倍率 0 合法,不能被 || 吞掉)。
+    const mRaw = mult.trim();
+    const mNum = mRaw === "" ? 1 : Number(mRaw);
+    if (!Number.isFinite(mNum) || mNum < 0) { setErr("计费倍率需为非负数"); return; }
+    // 权重覆盖格式:[{"public_name":{"model_id": weight}}],权重须为非负整数。
+    const wmRaw = weightMap.trim();
+    let wm: string | null = null;
+    if (wmRaw !== "") {
+      try {
+        const v = JSON.parse(wmRaw);
+        if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error();
+        for (const inner of Object.values(v as Record<string, unknown>)) {
+          if (!inner || typeof inner !== "object" || Array.isArray(inner)) throw new Error();
+          for (const w of Object.values(inner as Record<string, unknown>)) {
+            if (typeof w !== "number" || !Number.isInteger(w) || w < 0) throw new Error();
+          }
+        }
+        wm = wmRaw;
+      } catch { setErr('权重覆盖需为 JSON 对象,如 {"模型名":{"1":100}}(权重为非负整数)'); return; }
+    }
     try {
       const body: TimeRulePayload = {
         name: name.trim(), weekdays: daysSpec, start_time: start, end_time: end,
-        multiplier: Number(mult) || 1, active,
-        weight_map: weightMap.trim() === "" ? null : weightMap.trim(),
+        multiplier: mNum, active,
+        weight_map: wm,
       };
       if (edit) await api.updateTimeRule(groupId, edit.id, body); else await api.addTimeRule(groupId, body);
       onSaved(); onClose();
@@ -2866,12 +2949,15 @@ function RewardsPanel() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
+  const [err, setErr] = useState("");
 
   const load = async () => {
-    setLoading(true);
+    setLoading(true); setErr("");
     try {
       const r = await api.rewards(filter === "all" ? undefined : filter, page, pageSize);
       setRows(r.data); setTotal(r.total);
+    } catch (e: any) {
+      setErr(e?.message || "加载失败");
     } finally { setLoading(false); }
   };
   useEffect(() => { load(); }, [filter, page, pageSize]);
@@ -2881,7 +2967,9 @@ function RewardsPanel() {
   const approve = async (c: RewardClaimRow) => {
     if (c.variable) { setApproveDlg(c); return; }
     setBusy(c.id);
-    try { await api.reviewReward(c.id, true); await load(); } finally { setBusy(null); }
+    try { await api.reviewReward(c.id, true); await load(); }
+    catch (e: any) { setErr(e?.message || "操作失败"); }
+    finally { setBusy(null); }
   };
 
   return (
@@ -2903,6 +2991,12 @@ function RewardsPanel() {
         </CardHeader>
         <CardContent>
           {loading ? <p className="text-sm text-muted-foreground">加载中…</p>
+            : err ? (
+              <div className="flex flex-col items-center gap-2 py-8">
+                <p className="text-sm text-destructive">加载失败:{err}</p>
+                <Button size="sm" variant="outline" onClick={load}>重试</Button>
+              </div>
+            )
             : rows.length === 0 ? <p className="text-sm text-muted-foreground">暂无申领</p> : (
             <Table>
               <TableHeader><TableRow>
@@ -3064,10 +3158,13 @@ function RewardTasksPanel() {
   const [loading, setLoading] = useState(true);
   const [edit, setEdit] = useState<RewardTaskRow | "new" | null>(null);
   const [del, setDel] = useState<RewardTaskRow | null>(null);
+  const [err, setErr] = useState("");
 
   const load = async () => {
-    setLoading(true);
-    try { setRows((await api.rewardTasks()).data); } finally { setLoading(false); }
+    setLoading(true); setErr("");
+    try { setRows((await api.rewardTasks()).data); }
+    catch (e: any) { setErr(e?.message || "加载失败"); }
+    finally { setLoading(false); }
   };
   useEffect(() => { load(); }, []);
 
@@ -3086,6 +3183,12 @@ function RewardTasksPanel() {
         </CardHeader>
         <CardContent>
           {loading ? <p className="text-sm text-muted-foreground">加载中…</p>
+            : err ? (
+              <div className="flex flex-col items-center gap-2 py-8">
+                <p className="text-sm text-destructive">加载失败:{err}</p>
+                <Button size="sm" variant="outline" onClick={load}>重试</Button>
+              </div>
+            )
             : rows.length === 0 ? <p className="text-sm text-muted-foreground">暂无任务,点「新建任务」添加。</p> : (
             <Table>
               <TableHeader><TableRow>
@@ -3634,7 +3737,7 @@ function CachePanel() {
               <TableHeader><TableRow><TableHead>时间</TableHead><TableHead>命中类型</TableHead><TableHead>相似度</TableHead><TableHead>模型</TableHead><TableHead>供应商</TableHead><TableHead className="text-right">节省 tokens</TableHead></TableRow></TableHeader>
               <TableBody>
                 {hits.map((h, i) => (
-                  <TableRow key={i}>
+                  <TableRow key={`${h.ts}-${h.model}-${i}`}>
                     <TableCell className="mono text-xs text-muted-foreground">{fmtTsShort(h.ts)}</TableCell>
                     <TableCell>
                       {h.hit_type === "exact" ? (
@@ -3769,9 +3872,15 @@ function SettingsPanel() {
   const [updateChecking, setUpdateChecking] = useState(false);
   const checkUpdate = async () => {
     setUpdateChecking(true);
-    try { setUpdateInfo(await api.versionCheck()); } catch { setUpdateInfo(null); } finally { setUpdateChecking(false); }
+    try { setUpdateInfo(await api.versionCheck()); }
+    catch (e: any) { setUpdateInfo({ current: version, latest: null, has_update: false, error: e?.message || "检查更新失败,请稍后重试" }); }
+    finally { setUpdateChecking(false); }
   };
   useEffect(() => { healthz().then((h) => setVersion(h.version)).catch(() => {}); }, []);
+
+  // 各设置卡的加载结果:未成功加载时禁用该卡「保存」,避免把前端硬编码默认值当成用户配置回写服务器。
+  const [loaded, setLoaded] = useState<Record<string, boolean>>({});
+  const markLoaded = (k: string, ok: boolean) => setLoaded((m) => ({ ...m, [k]: ok }));
 
   const load = async () => {
     setLoading(true);
@@ -3780,48 +3889,56 @@ function SettingsPanel() {
       setHost(r.smtp_host ?? ""); setPort(r.smtp_port || 465);
       setUsername(r.username ?? ""); setFrom(r.from ?? "");
       setHasPassword(r.has_password); setPassword(""); setErr(""); setNote("");
-    } catch (e: any) { setErr(e.message); } finally { setLoading(false); }
+      markLoaded("email", true);
+    } catch (e: any) { setErr(e.message); markLoaded("email", false); } finally { setLoading(false); }
   };
   useEffect(() => { load(); }, []);
 
-  useEffect(() => {
+  // 并行加载本面板的 7 张非邮箱设置卡。每张卡显式记录「是否加载成功」,
+  // 加载失败时保留默认值展示但禁用该卡「保存」,避免把前端硬编码默认值回写服务器。
+  const loadAll = async () => {
     api.fallbackSettings()
-      .then((r) => { setFbEnabled(r.fallback_enabled); setFbMaxRetries(r.max_retries); })
-      .catch(() => { /* 回退默认值 */ });
+      .then((r) => { setFbEnabled(r.fallback_enabled); setFbMaxRetries(r.max_retries); setFbErr(""); markLoaded("fallback", true); })
+      .catch((e: any) => { setFbErr(e?.message || "加载失败"); markLoaded("fallback", false); });
     api.cacheSettings()
       .then((r) => {
         setCacheEnabled(r.enabled); setCacheTtl(r.ttl_secs);
         setCacheThreshold(r.similarity_threshold); setCacheMultiTurn(r.multi_turn_max);
         setCacheBilling(r.billing_ratio ?? 0);
+        setCacheErr(""); markLoaded("cache", true);
       })
-      .catch(() => { /* 回退默认值 */ });
+      .catch((e: any) => { setCacheErr(e?.message || "加载失败"); markLoaded("cache", false); });
     api.embeddingSettings()
       .then((r) => {
         setEmbEnabled(r.enabled); setEmbBaseUrl(r.base_url); setEmbModel(r.model);
         setEmbHasKey(r.has_key); setEmbKey("");
+        setEmbErr(""); markLoaded("embedding", true);
       })
-      .catch(() => { /* 回退默认值 */ });
+      .catch((e: any) => { setEmbErr(e?.message || "加载失败"); markLoaded("embedding", false); });
     api.loggingSettings()
-      .then((r) => { setLogPreview(r.body_preview_max_bytes); setLogRetention(r.retention_days); })
-      .catch(() => { /* 回退默认值 */ });
+      .then((r) => { setLogPreview(r.body_preview_max_bytes); setLogRetention(r.retention_days); setLogErr(""); markLoaded("logging", true); })
+      .catch((e: any) => { setLogErr(e?.message || "加载失败"); markLoaded("logging", false); });
     api.portalSettings()
       .then((r) => {
         setPortalRewards(r.rewards_enabled);
         setPortalPhone(r.phone_register_enabled ?? true);
         setPortalKeyApproval(r.key_approval_required ?? false);
+        setPortalErr(""); markLoaded("portal", true);
       })
-      .catch(() => { /* 回退默认值 */ });
+      .catch((e: any) => { setPortalErr(e?.message || "加载失败"); markLoaded("portal", false); });
     api.adminKeys()
-      .then((r) => setAdmKeys(r.data))
-      .catch(() => { /* 加载失败不阻塞其它设置卡 */ });
+      .then((r) => { setAdmKeys(r.data); markLoaded("admKeys", true); })
+      .catch(() => { markLoaded("admKeys", false); });
     api.getSmsSettings()
       .then((r) => {
         setSmsUrl(r.gateway_url ?? ""); setSmsMethod(r.gateway_method || "POST");
         setSmsBody(r.gateway_body ?? ""); setSmsHeaders("");
         setSmsHasHeaders(!!r.has_headers); setSmsDev(!!r.dev);
+        setSmsErr(""); markLoaded("sms", true);
       })
-      .catch(() => { /* 回退默认值 */ });
-  }, []);
+      .catch((e: any) => { setSmsErr(e?.message || "加载失败"); markLoaded("sms", false); });
+  };
+  useEffect(() => { loadAll(); }, []);
 
   const enabled = host.trim().length > 0;
   const sel = "h-9 w-full rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
@@ -4011,8 +4128,24 @@ function SettingsPanel() {
     }
   };
 
+  // 加载失败的设置卡清单:展示提示并禁用对应「保存」,避免默认值回写。
+  const failedCards = Object.entries(loaded).filter(([, ok]) => !ok).map(([k]) => k);
+  const cardLabel: Record<string, string> = {
+    email: "邮箱配置", fallback: "降级配置", cache: "语义缓存", embedding: "向量嵌入",
+    logging: "日志策略", portal: "门户设置", admKeys: "管理员密钥", sms: "短信网关",
+  };
+  const retryAll = () => { load(); loadAll(); };
+
   return (
     <div className="space-y-5">
+      {failedCards.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm">
+          <span className="text-destructive">
+            以下设置卡加载失败，为避免把未加载的默认值覆盖到服务器，已禁用其「保存」：{failedCards.map((k) => cardLabel[k] || k).join("、")}。
+          </span>
+          <Button variant="outline" size="sm" onClick={retryAll}>重试加载</Button>
+        </div>
+      )}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
@@ -4043,7 +4176,7 @@ function SettingsPanel() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2 border-t pt-4">
-                <Button onClick={save} disabled={saving}>{saving ? "保存中…" : "保存配置"}</Button>
+                <Button onClick={save} disabled={saving || !loaded.email}>{saving ? "保存中…" : "保存配置"}</Button>
                 <div className="flex items-center gap-2">
                   <Input className="w-56" placeholder="测试收件邮箱" value={testTo} onChange={(e) => setTestTo(e.target.value)} />
                   <Button variant="outline" onClick={runTest} disabled={testing === "loading" || !host.trim() || !testTo.trim()}>
@@ -4094,7 +4227,7 @@ function SettingsPanel() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 border-t pt-4">
-            <Button onClick={saveFallback} disabled={fbSaving}>{fbSaving ? "保存中…" : "保存配置"}</Button>
+            <Button onClick={saveFallback} disabled={fbSaving || !loaded.fallback}>{fbSaving ? "保存中…" : "保存配置"}</Button>
             {fbNote && <span className="text-xs text-success">{fbNote}</span>}
             {fbErr && <span className="text-xs text-destructive">{fbErr}</span>}
           </div>
@@ -4154,7 +4287,7 @@ function SettingsPanel() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 border-t pt-4">
-            <Button onClick={saveCache} disabled={cacheSaving}>{cacheSaving ? "保存中…" : "保存配置"}</Button>
+            <Button onClick={saveCache} disabled={cacheSaving || !loaded.cache}>{cacheSaving ? "保存中…" : "保存配置"}</Button>
             {cacheNote && <span className="text-xs text-success">{cacheNote}</span>}
             {cacheErr && <span className="text-xs text-destructive">{cacheErr}</span>}
           </div>
@@ -4194,7 +4327,7 @@ function SettingsPanel() {
                 value={embKey} onChange={(e) => setEmbKey(e.target.value)} /></div>
           </div>
           <div className="flex flex-wrap items-center gap-2 border-t pt-4">
-            <Button onClick={saveEmbedding} disabled={embSaving}>{embSaving ? "保存中…" : "保存配置"}</Button>
+            <Button onClick={saveEmbedding} disabled={embSaving || !loaded.embedding}>{embSaving ? "保存中…" : "保存配置"}</Button>
             <Button variant="outline" onClick={testEmbeddingConn}
               disabled={embTesting === "loading" || !embBaseUrl.trim() || !embModel.trim()}>
               <Zap className="h-4 w-4" />{embTesting === "loading" ? "测试中…" : "测试连接"}
@@ -4232,7 +4365,7 @@ function SettingsPanel() {
                 onChange={(e) => setLogRetention(Number(e.target.value))} /></div>
           </div>
           <div className="flex flex-wrap items-center gap-2 border-t pt-4">
-            <Button onClick={saveLogging} disabled={logSaving}>{logSaving ? "保存中…" : "保存配置"}</Button>
+            <Button onClick={saveLogging} disabled={logSaving || !loaded.logging}>{logSaving ? "保存中…" : "保存配置"}</Button>
             {logNote && <span className="text-xs text-success">{logNote}</span>}
             {logErr && <span className="text-xs text-destructive">{logErr}</span>}
           </div>
@@ -4271,7 +4404,7 @@ function SettingsPanel() {
             <Switch checked={portalKeyApproval} onCheckedChange={setPortalKeyApproval} />
           </div>
           <div className="flex flex-wrap items-center gap-2 border-t pt-4">
-            <Button onClick={savePortal} disabled={portalSaving}>{portalSaving ? "保存中…" : "保存配置"}</Button>
+            <Button onClick={savePortal} disabled={portalSaving || !loaded.portal}>{portalSaving ? "保存中…" : "保存配置"}</Button>
             {portalNote && <span className="text-xs text-success">{portalNote}</span>}
             {portalErr && <span className="text-xs text-destructive">{portalErr}</span>}
           </div>
@@ -4311,7 +4444,7 @@ function SettingsPanel() {
                 value={smsBody} onChange={(e) => setSmsBody(e.target.value)} /></div>
           </div>
           <div className="flex flex-wrap items-center gap-2 border-t pt-4">
-            <Button onClick={saveSms} disabled={smsSaving}>{smsSaving ? "保存中…" : "保存配置"}</Button>
+            <Button onClick={saveSms} disabled={smsSaving || !loaded.sms}>{smsSaving ? "保存中…" : "保存配置"}</Button>
             <Button variant="outline" onClick={openSmsTest}><Send className="h-4 w-4" />发送测试短信</Button>
             {smsNote && <span className="text-xs text-success">{smsNote}</span>}
             {smsErr && <span className="text-xs text-destructive">{smsErr}</span>}
@@ -4762,9 +4895,7 @@ function UpstreamsPanel() {
     } catch (e: any) { setErr(e.message || "加载失败"); }
     finally { setLoading(false); }
   };
-  // 首屏 + 手动刷新
-  useEffect(() => { load(); }, []);
-  // failuresLimit 改变再拉一次
+  // 首屏 + failuresLimit 改变时刷新(挂载时只拉一次,避免重复请求)。
   useEffect(() => { load(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, [failuresLimit]);
   // 自动轮询
   useEffect(() => {

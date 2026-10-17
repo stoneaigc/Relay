@@ -697,17 +697,34 @@ pub async fn provider_api_key(pool: &Db, name: &str) -> anyhow::Result<Option<St
     Ok(dec_field(row.and_then(|r| r.get::<Option<String>, _>("api_key")).filter(|k| !k.is_empty())))
 }
 
-/// 列出所有 provider，附带模型数量。支持分页。
-pub async fn list_providers(pool: &Db, page: Option<u32>, page_size: Option<u32>) -> anyhow::Result<(Vec<serde_json::Value>, u64)> {
-    let total: i64 = q!("SELECT COUNT(*) as cnt FROM providers").fetch_one(pool).await?.get("cnt");
+/// 列出所有 provider，附带模型数量。支持分页与关键字搜索(name / base_url / 展示名)。
+pub async fn list_providers(pool: &Db, page: Option<u32>, page_size: Option<u32>, q: Option<&str>) -> anyhow::Result<(Vec<serde_json::Value>, u64)> {
+    let kw = q
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("%{}%", s.to_lowercase()));
+    let where_sql = if kw.is_some() {
+        " WHERE (LOWER(p.name) LIKE ? OR LOWER(p.base_url) LIKE ? OR LOWER(COALESCE(p.display_name, '')) LIKE ?)"
+    } else {
+        ""
+    };
+    let count_sql = format!("SELECT COUNT(*) as cnt FROM providers p{where_sql}");
+    let total: i64 = match &kw {
+        Some(p) => q!(&count_sql).bind(p).bind(p).bind(p).fetch_one(pool).await?.get("cnt"),
+        None => q!(&count_sql).fetch_one(pool).await?.get("cnt"),
+    };
     let limit = page_size.unwrap_or(20).clamp(1, 100) as i64;
     let current_page = page.unwrap_or(1).max(1);
     let offset = ((current_page - 1) as i64 * limit).max(0);
-    let rows = q!(
+    let rows_sql = format!(
         "SELECT p.name, p.kind, p.base_url, p.display_name,
                 (SELECT COUNT(*) FROM models m WHERE m.provider = p.name) as model_count
-         FROM providers p ORDER BY p.name LIMIT ? OFFSET ?"
-    ).bind(limit).bind(offset).fetch_all(pool).await?;
+         FROM providers p{where_sql} ORDER BY p.name LIMIT ? OFFSET ?"
+    );
+    let rows = match &kw {
+        Some(p) => q!(&rows_sql).bind(p).bind(p).bind(p).bind(limit).bind(offset).fetch_all(pool).await?,
+        None => q!(&rows_sql).bind(limit).bind(offset).fetch_all(pool).await?,
+    };
     Ok((rows.iter().map(|r| serde_json::json!({
         "name": r.get::<String,_>("name"),
         "kind": r.get::<String,_>("kind"),
@@ -1528,9 +1545,10 @@ pub async fn update_user(
     budget_monthly_tokens: Option<i64>,
     user_group_id: Option<i64>,
 ) -> anyhow::Result<()> {
+    // 限额类字段:负值哨兵(-1)= 清除该显式限额,回落"继承用户组/全局默认"(bind NULL)。
     if let Some(cl) = concurrency_limit {
         q!("UPDATE users SET concurrency_limit = ? WHERE id = ?")
-            .bind(cl)
+            .bind((cl >= 0).then_some(cl))
             .bind(id.to_string())
             .execute(pool)
             .await?;
@@ -1551,28 +1569,28 @@ pub async fn update_user(
     }
     if let Some(rpm) = rpm_limit {
         q!("UPDATE users SET rpm_limit = ? WHERE id = ?")
-            .bind(rpm)
+            .bind((rpm >= 0).then_some(rpm))
             .bind(id.to_string())
             .execute(pool)
             .await?;
     }
     if let Some(tpm) = tpm_limit {
         q!("UPDATE users SET tpm_limit = ? WHERE id = ?")
-            .bind(tpm)
+            .bind((tpm >= 0).then_some(tpm))
             .bind(id.to_string())
             .execute(pool)
             .await?;
     }
     if let Some(d) = budget_daily_tokens {
         q!("UPDATE users SET budget_daily_tokens = ? WHERE id = ?")
-            .bind(d)
+            .bind((d >= 0).then_some(d))
             .bind(id.to_string())
             .execute(pool)
             .await?;
     }
     if let Some(m) = budget_monthly_tokens {
         q!("UPDATE users SET budget_monthly_tokens = ? WHERE id = ?")
-            .bind(m)
+            .bind((m >= 0).then_some(m))
             .bind(id.to_string())
             .execute(pool)
             .await?;
@@ -3310,7 +3328,7 @@ mod tests {
         let (name, created) = find_or_create_provider_named(&db, "openai", "https://api.named.test/v1", Some("sk-n1"), Some("  生产网关  "))
             .await.unwrap();
         assert!(created);
-        let (rows, _) = list_providers(&db, None, None).await.unwrap();
+        let (rows, _) = list_providers(&db, None, None, None).await.unwrap();
         let row = rows.iter().find(|r| r["name"] == name).unwrap();
         assert_eq!(row["display_name"], "生产网关");
     }
@@ -3325,7 +3343,7 @@ mod tests {
             .await.unwrap();
         assert!(!created);
         assert_eq!(n1, n2);
-        let (rows, _) = list_providers(&db, None, None).await.unwrap();
+        let (rows, _) = list_providers(&db, None, None, None).await.unwrap();
         let row = rows.iter().find(|r| r["name"] == n1).unwrap();
         assert_eq!(row["display_name"], "第一个名字");
     }
@@ -3341,7 +3359,7 @@ mod tests {
             .await.unwrap();
         assert!(!created);
         assert_eq!(n1, n2);
-        let (rows, _) = list_providers(&db, None, None).await.unwrap();
+        let (rows, _) = list_providers(&db, None, None, None).await.unwrap();
         let row = rows.iter().find(|r| r["name"] == n1).unwrap();
         assert_eq!(row["display_name"], "补写的名字");
     }
@@ -3352,7 +3370,7 @@ mod tests {
         let (name, created) = find_or_create_provider_named(&db, "openai", "https://api.blank.test/v1", Some("sk-b1"), Some("   "))
             .await.unwrap();
         assert!(created);
-        let (rows, _) = list_providers(&db, None, None).await.unwrap();
+        let (rows, _) = list_providers(&db, None, None, None).await.unwrap();
         let row = rows.iter().find(|r| r["name"] == name).unwrap();
         assert!(row["display_name"].is_null());
     }
@@ -3363,12 +3381,12 @@ mod tests {
         let (name, _) = find_or_create_provider(&db, "openai", "https://api.upd.test/v1", Some("sk-u1"))
             .await.unwrap();
         update_provider(&db, &name, "https://api.upd.test/v1", None, Some("改名后的上游")).await.unwrap();
-        let (rows, _) = list_providers(&db, None, None).await.unwrap();
+        let (rows, _) = list_providers(&db, None, None, None).await.unwrap();
         let row = rows.iter().find(|r| r["name"] == name).unwrap();
         assert_eq!(row["display_name"], "改名后的上游");
         // 空白名不覆盖已有显示名。
         update_provider(&db, &name, "https://api.upd.test/v1", None, Some("  ")).await.unwrap();
-        let (rows, _) = list_providers(&db, None, None).await.unwrap();
+        let (rows, _) = list_providers(&db, None, None, None).await.unwrap();
         let row = rows.iter().find(|r| r["name"] == name).unwrap();
         assert_eq!(row["display_name"], "改名后的上游");
     }
@@ -3511,7 +3529,7 @@ mod tests {
     #[tokio::test]
     async fn list_providers_empty() {
         let db = test_db().await;
-        let (data, total) = list_providers(&db, None, None).await.unwrap();
+        let (data, total) = list_providers(&db, None, None, None).await.unwrap();
         assert_eq!(total, 0);
         assert!(data.is_empty());
     }
@@ -3524,7 +3542,7 @@ mod tests {
             let _ = find_or_create_provider(&db, "openai", &format!("https://api{i}.test.com/v1"), Some(&format!("sk-{i}")))
                 .await.unwrap();
         }
-        let (data, total) = list_providers(&db, None, None).await.unwrap();
+        let (data, total) = list_providers(&db, None, None, None).await.unwrap();
         assert_eq!(total, 5);
         assert_eq!(data.len(), 5);
     }
@@ -3536,7 +3554,7 @@ mod tests {
             let _ = find_or_create_provider(&db, "openai", &format!("https://api{i}.test.com/v1"), Some(&format!("sk-{i}")))
                 .await.unwrap();
         }
-        let (data, total) = list_providers(&db, Some(1), Some(5)).await.unwrap();
+        let (data, total) = list_providers(&db, Some(1), Some(5), None).await.unwrap();
         assert_eq!(total, 12);
         assert_eq!(data.len(), 5);
     }
@@ -3548,7 +3566,7 @@ mod tests {
             let _ = find_or_create_provider(&db, "openai", &format!("https://api{i}.test.com/v1"), Some(&format!("sk-{i}")))
                 .await.unwrap();
         }
-        let (data, total) = list_providers(&db, Some(2), Some(5)).await.unwrap();
+        let (data, total) = list_providers(&db, Some(2), Some(5), None).await.unwrap();
         assert_eq!(total, 12);
         assert_eq!(data.len(), 5);
     }
@@ -3560,7 +3578,7 @@ mod tests {
             let _ = find_or_create_provider(&db, "openai", &format!("https://api{i}.test.com/v1"), Some(&format!("sk-{i}")))
                 .await.unwrap();
         }
-        let (data, total) = list_providers(&db, Some(3), Some(5)).await.unwrap();
+        let (data, total) = list_providers(&db, Some(3), Some(5), None).await.unwrap();
         assert_eq!(total, 12);
         assert_eq!(data.len(), 2); // 12 = 5+5+2
     }
@@ -3572,7 +3590,7 @@ mod tests {
             let _ = find_or_create_provider(&db, "openai", &format!("https://api{i}.test.com/v1"), Some(&format!("sk-{i}")))
                 .await.unwrap();
         }
-        let (data, total) = list_providers(&db, Some(10), Some(20)).await.unwrap();
+        let (data, total) = list_providers(&db, Some(10), Some(20), None).await.unwrap();
         assert_eq!(total, 3);
         assert!(data.is_empty());
     }
@@ -3585,7 +3603,7 @@ mod tests {
         let _ = add_model(&db, &p, "model-a", None, None, None).await.unwrap();
         let _ = add_model(&db, &p, "model-b", None, None, None).await.unwrap();
         let _ = add_model(&db, &p, "model-c", None, None, None).await.unwrap();
-        let (data, _) = list_providers(&db, None, None).await.unwrap();
+        let (data, _) = list_providers(&db, None, None, None).await.unwrap();
         assert_eq!(data.len(), 1);
         assert_eq!(data[0]["model_count"], 3);
     }
@@ -3598,8 +3616,27 @@ mod tests {
                 .await.unwrap();
         }
         // page_size=0 应被 clamp 到 1
-        let (data, total) = list_providers(&db, Some(1), Some(0)).await.unwrap();
+        let (data, total) = list_providers(&db, Some(1), Some(0), None).await.unwrap();
         assert_eq!(total, 3);
         assert_eq!(data.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_providers_search_filters_across_pages() {
+        let db = test_db().await;
+        let _ = find_or_create_provider(&db, "openai", "https://api.alpha.test/v1", Some("sk-a"))
+            .await.unwrap();
+        for i in 0..10 {
+            let _ = find_or_create_provider(&db, "openai", &format!("https://api{i}.beta.test/v1"), Some(&format!("sk-b{i}")))
+                .await.unwrap();
+        }
+        // 关键字命中第 2 页的数据:服务端搜索应能跨页返回,而非只过滤当前页。
+        let (data, total) = list_providers(&db, Some(1), Some(5), Some("alpha")).await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0]["base_url"], "https://api.alpha.test/v1");
+        // 空/空白关键字等价于全量。
+        let (_, total) = list_providers(&db, None, None, Some("  ")).await.unwrap();
+        assert_eq!(total, 11);
     }
 }
