@@ -621,7 +621,7 @@ pub async fn run_chat(
         match kind {
             crate::config::ProviderKind::Openai => {
                 let resp = providers::openai::chat_completions(
-                    &state, base_url, api_key, upstream_model, req.clone(), stream,
+                    &state, base_url, api_key, upstream_model, req.clone(), stream, &r.headers,
                 )
                 .await;
                 match resp {
@@ -737,7 +737,7 @@ pub async fn run_chat(
             crate::config::ProviderKind::Anthropic => {
                 // OpenAI 入站 → Anthropic 上游:翻译请求 + 翻译响应。
                 let abody = crate::translate::openai_to_anthropic(&req, upstream_model, stream);
-                let resp = providers::anthropic::messages(&state, base_url, api_key, abody).await;
+                let resp = providers::anthropic::messages(&state, base_url, api_key, abody, &r.headers).await;
                 match resp {
                     Ok(resp) if stream => {
                         state.breaker_success(&ukey).await;
@@ -1332,7 +1332,7 @@ pub async fn run_messages(
             crate::config::ProviderKind::Anthropic => {
                 let mut areq = req.clone();
                 areq["model"] = json!(upstream_model);
-                let resp = providers::anthropic::messages(&state, base_url, api_key, areq).await;
+                let resp = providers::anthropic::messages(&state, base_url, api_key, areq, &r.headers).await;
                 match resp {
                     Ok(resp) if stream => {
                         state.breaker_success(&ukey).await;
@@ -1430,7 +1430,7 @@ pub async fn run_messages(
             }
             crate::config::ProviderKind::Openai => {
                 let obody = crate::translate::anthropic_to_openai_request(&req, upstream_model, stream);
-                let resp = providers::openai::chat_completions(&state, base_url, api_key, upstream_model, obody, stream).await;
+                let resp = providers::openai::chat_completions(&state, base_url, api_key, upstream_model, obody, stream, &r.headers).await;
                 match resp {
                     Ok(resp) if stream => {
                         state.breaker_success(&ukey).await;

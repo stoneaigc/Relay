@@ -13,6 +13,7 @@ pub async fn messages(
     base_url: &str,
     api_key: Option<&str>,
     body: Value,
+    extra_headers: &[(String, String)],
 ) -> Result<reqwest::Response, ApiError> {
     let url = format!("{}/messages", base_url.trim_end_matches('/'));
     // 流式标记从请求体读取(anthropic 转发无独立 stream 参数)。
@@ -26,6 +27,10 @@ pub async fn messages(
         .header("anthropic-version", "2023-06-01");
     if let Some(k) = api_key.filter(|k| !k.is_empty()) {
         rb = rb.header("x-api-key", k);
+    }
+    // 供应商自定义请求头。
+    for (k, v) in extra_headers {
+        rb = rb.header(k, v);
     }
     // 非流式请求设总超时;流式请求不设,连接建立后靠上游自然结束/对端断开兜底。
     if !stream {

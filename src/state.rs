@@ -1611,6 +1611,7 @@ mod tests {
             base_url: base_url.to_string(),
             api_key: api_key.map(|s| s.to_string()),
             concurrency: None,
+            headers: Vec::new(),
         };
         let routing = Routing {
             providers: HashMap::from([

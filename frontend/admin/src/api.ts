@@ -305,11 +305,11 @@ export const api = {
     req(`/admin/api/providers?page=${page || 1}&page_size=${page_size || 20}${q ? `&q=${encodeURIComponent(q)}` : ""}`),
   providerModels: (name: string): Promise<{ data: ProviderModelRow[] }> => req(`/admin/api/providers/${name}/models`),
   deleteProvider: (name: string) => req(`/admin/api/providers/${name}`, { method: "DELETE" }),
-  updateProvider: (name: string, body: { base_url: string; api_key?: string; display_name?: string | null }) =>
+  updateProvider: (name: string, body: { base_url: string; api_key?: string; display_name?: string | null; headers?: string }) =>
     req(`/admin/api/providers/${name}`, { method: "PUT", body: JSON.stringify(body) }),
 
   models: (): Promise<{ data: ModelRow[] }> => req("/admin/api/models"),
-  addModel: (body: { label?: string; kind: string; base_url: string; api_key?: string; upstream_model: string; input_price?: number | null; output_price?: number | null; display_name?: string }) =>
+  addModel: (body: { label?: string; kind: string; base_url: string; api_key?: string; upstream_model: string; input_price?: number | null; output_price?: number | null; display_name?: string; headers?: string }) =>
     req("/admin/api/models", { method: "POST", body: JSON.stringify(body) }),
   updateModel: (id: number, body: { kind: string; base_url: string; api_key?: string; upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null; context_length?: number | null; tags?: string }) =>
     req(`/admin/api/models/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
@@ -322,7 +322,7 @@ export const api = {
     req(`/admin/api/models/${id}/test`, { method: "POST" }),
   fetchModelList: (body: { kind: string; base_url: string; api_key?: string; provider?: string }): Promise<{ ok: boolean; models?: string[]; error?: string }> =>
     req("/admin/api/models/fetch-list", { method: "POST", body: JSON.stringify(body) }),
-  addModelsBatch: (body: { kind: string; base_url: string; api_key?: string; display_name?: string; models: { upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null }[] }): Promise<{ ok: boolean; provider?: string; provider_created?: boolean; added?: number; skipped?: number }> =>
+  addModelsBatch: (body: { kind: string; base_url: string; api_key?: string; display_name?: string; headers?: string; models: { upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null }[] }): Promise<{ ok: boolean; provider?: string; provider_created?: boolean; added?: number; skipped?: number }> =>
     req("/admin/api/models/batch", { method: "POST", body: JSON.stringify(body) }),
   addModelsToProvider: (name: string, models: { upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null }[]): Promise<{ ok: boolean; added?: number; skipped?: number }> =>
     req(`/admin/api/providers/${encodeURIComponent(name)}/models/batch`, { method: "POST", body: JSON.stringify({ models }) }),

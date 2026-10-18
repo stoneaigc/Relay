@@ -1,4 +1,4 @@
-﻿//! 优先级路由 + 故障转移链 集成测试。
+//! 优先级路由 + 故障转移链 集成测试。
 //! 测试 Routing::resolve_all 在不同策略和场景下的完整行为。
 
 use std::collections::HashMap;
@@ -16,18 +16,21 @@ fn make_test_routing() -> Routing {
         base_url: "https://api.openai.com/v1".into(),
         api_key: Some("sk-openai".into()),
         concurrency: None,
+        headers: Vec::new(),
     });
     providers.insert("p-deepseek".into(), ProviderConn {
         kind: ProviderKind::Openai,
         base_url: "https://api.deepseek.com/v1".into(),
         api_key: Some("sk-deepseek".into()),
         concurrency: None,
+        headers: Vec::new(),
     });
     providers.insert("p-anthropic".into(), ProviderConn {
         kind: ProviderKind::Openai,
         base_url: "https://api.anthropic.com/v1".into(),
         api_key: Some("sk-anthropic".into()),
         concurrency: None,
+        headers: Vec::new(),
     });
 
     let mut models = HashMap::new();

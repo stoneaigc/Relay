@@ -16,6 +16,7 @@ pub async fn chat_completions(
     upstream_model: &str,
     mut body: Value,
     stream: bool,
+    extra_headers: &[(String, String)],
 ) -> Result<reqwest::Response, ApiError> {
     body["model"] = json!(upstream_model);
     if stream {
@@ -28,6 +29,10 @@ pub async fn chat_completions(
     let mut rb = state.http.post(&url);
     if let Some(k) = api_key.filter(|k| !k.is_empty()) {
         rb = rb.bearer_auth(k);
+    }
+    // 供应商自定义请求头(如 x-opencode-session)。
+    for (k, v) in extra_headers {
+        rb = rb.header(k, v);
     }
     // 非流式请求设总超时;流式请求不设,连接建立后靠上游自然结束/对端断开兜底。
     if !stream {

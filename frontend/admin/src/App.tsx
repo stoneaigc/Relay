@@ -1434,6 +1434,8 @@ function ModelsPanel() {
   const [priceTarget, setPriceTarget] = useState<{ p: ProviderRow; m: ProviderModelRow } | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [test, setTest] = useState<Record<number, "loading" | { ok: boolean; msg: string }>>({});
+  // 供应商级一键测试结果(卡片行内展示,免逐个模型手测);"busy" = 批量进行中(防重入)。
+  const [provTest, setProvTest] = useState<Record<string, "busy" | { ok: boolean; msg: string }>>({});
   const [page, setPage] = useState(1);
   const [pageMeta, setPageMeta] = useState({ total: 0, total_pages: 1 });
   const [providerSearch, setProviderSearch] = useState("");
@@ -1567,6 +1569,40 @@ function ModelsPanel() {
     } catch (e: any) { setTest((t) => ({ ...t, [id]: { ok: false, msg: e.message } })); }
   };
 
+  // 供应商级一键测试:批量测试该供应商下全部模型(并发 5,复用单模型测试接口),
+  // 每个模型行的结果实时填充;完成后卡片头部显示通过数。
+  const runProvTest = async (p: ProviderRow) => {
+    if (provTest[p.name] === "busy") return;
+    setProvTest((t) => ({ ...t, [p.name]: "busy" }));
+    let models = providerModels[p.name];
+    if (!models) {
+      try {
+        models = (await api.providerModels(p.name)).data;
+        setProviderModels((prev) => ({ ...prev, [p.name]: models! }));
+      } catch (e: any) { setProvTest((t) => ({ ...t, [p.name]: { ok: false, msg: e.message } })); return; }
+    }
+    if (!models.length) { setProvTest((t) => ({ ...t, [p.name]: { ok: false, msg: "该供应商下没有模型" } })); return; }
+    setExpanded((s) => { const n = new Set(s); n.add(p.name); return n; });
+    const ids = models.map((m) => m.id);
+    let done = 0, okCount = 0;
+    const CONCURRENCY = 5;
+    const queue = [...ids];
+    const worker = async () => {
+      while (queue.length) {
+        const id = queue.shift()!;
+        try {
+          const r = await api.testModel(id);
+          if (r.ok) okCount++;
+          setTest((t) => ({ ...t, [id]: { ok: r.ok, msg: r.ok ? `${r.latency_ms}ms` : (r.error || "失败") } }));
+        } catch (e: any) { setTest((t) => ({ ...t, [id]: { ok: false, msg: e.message } })); }
+        done++;
+        setProvTest((t) => ({ ...t, [p.name]: { ok: true, msg: `测试中 ${done}/${ids.length}` } }));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, ids.length) }, worker));
+    setProvTest((t) => ({ ...t, [p.name]: { ok: okCount === ids.length, msg: `完成: ${okCount}/${ids.length} 通过` } }));
+  };
+
   return (
     <div className="space-y-5">
       <Card>
@@ -1613,6 +1649,19 @@ function ModelsPanel() {
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
+                  {(() => { const st = provTest[p.name]; if (!st || st === "busy") return null;
+                    return (
+                      <span className={cn("max-w-[280px] truncate text-xs", st.ok ? "text-emerald-600" : "text-destructive")}
+                        title={st.msg} data-testid="provider-test-result">
+                        {st.ok ? "✓ " : "✗ "}{st.msg}
+                      </span>
+                    ); })()}
+                  <button className="text-xs text-primary hover:underline disabled:opacity-50"
+                    disabled={provTest[p.name] === "busy"}
+                    title="批量测试该供应商下全部模型(结果逐行显示)"
+                    onClick={(e) => { e.stopPropagation(); runProvTest(p); }}>
+                    {provTest[p.name] === "busy" ? "测试中…" : "测试全部"}
+                  </button>
                   <Badge variant="muted">{p.kind}</Badge>
                   <span className="text-xs text-muted-foreground">{p.model_count} 个模型</span>
                   <button className="text-xs text-primary hover:underline" onClick={(e) => { e.stopPropagation(); setEditProvider(p); }}>编辑</button>
@@ -1737,6 +1786,7 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
   const [dn, setDn] = useState(provider.display_name || "");
   const [baseUrl, setBaseUrl] = useState(provider.base_url);
   const [apiKey, setApiKey] = useState("");
+  const [headers, setHeaders] = useState("");
   const [err, setErr] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
@@ -1749,7 +1799,7 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
   const submit = async () => {
     setErr(""); setSubmitting(true);
     try {
-      await api.updateProvider(provider.name, { base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, display_name: dn.trim() });
+      await api.updateProvider(provider.name, { base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, display_name: dn.trim(), headers: headers.trim() || undefined });
       onSaved();
     } catch (e: any) { setErr(e.message); }
     setSubmitting(false);
@@ -1796,6 +1846,8 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
             <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} /></div>
           <div><label className="mb-1 block text-xs text-muted-foreground">API Key</label>
             <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="留空保持原密钥" /></div>
+          <div><label className="mb-1 block text-xs text-muted-foreground">自定义请求头 (JSON 对象,随上游请求附带)</label>
+            <Input value={headers} onChange={(e) => setHeaders(e.target.value)} placeholder='留空保持不变;{} = 清除;如 {"x-opencode-session":"..."}' /></div>
           {err && <p className="text-sm text-destructive">{err}</p>}
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={onClose}>取消</Button>
@@ -1833,6 +1885,7 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
   const [provName, setProvName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [headers, setHeaders] = useState("");
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
   const [fetching, setFetching] = useState(false);
@@ -1845,7 +1898,7 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
   // 每次打开都重置为全新状态,避免上一次的填写与探测结果残留。
   useEffect(() => {
     if (!open) return;
-    setProvName(""); setKind("openai"); setTpl("custom"); setBaseUrl(""); setApiKey("");
+    setProvName(""); setKind("openai"); setTpl("custom"); setBaseUrl(""); setApiKey(""); setHeaders("");
     setFetchedModels([]); setSelectedModels(new Set()); setErr(""); setInputPrice(""); setOutputPrice("");
   }, [open]);
 
@@ -1885,9 +1938,9 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
       }
       if (selectedModels.size > 0) {
         const items = [...selectedModels].map((m) => ({ upstream_model: m, label: m, input_price: ip, output_price: op }));
-        await api.addModelsBatch({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, display_name: provName.trim() || undefined, models: items });
+        await api.addModelsBatch({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, display_name: provName.trim() || undefined, headers: headers.trim() || undefined, models: items });
       } else {
-        await api.addModel({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, upstream_model: "custom-model", input_price: ip, output_price: op, display_name: provName.trim() || undefined });
+        await api.addModel({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, upstream_model: "custom-model", input_price: ip, output_price: op, display_name: provName.trim() || undefined, headers: headers.trim() || undefined });
       }
       onSaved(); onClose();
     } catch (e: any) { setErr(e.message); }
@@ -1927,6 +1980,8 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
           </div>
           <div><label className="mb-1 block text-xs text-muted-foreground">API Key (可选)</label>
             <Input type="password" placeholder="sk-..." value={apiKey} onChange={(e) => setApiKey(e.target.value)} /></div>
+          <div><label className="mb-1 block text-xs text-muted-foreground">自定义请求头 (可选,JSON 对象,随上游请求附带)</label>
+            <Input placeholder='如 {"x-opencode-session":"..."}' value={headers} onChange={(e) => setHeaders(e.target.value)} /></div>
           <div className="grid grid-cols-2 gap-3">
             <div><label className="mb-1 block text-xs text-muted-foreground">输入单价 $/1M tokens (可选)</label>
               <Input type="number" min="0" step="0.000001" placeholder="留空用内置默认价表" value={inputPrice} onChange={(e) => setInputPrice(e.target.value)} /></div>

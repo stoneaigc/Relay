@@ -1243,6 +1243,25 @@ pub struct UpdateProvider {
     pub base_url: String,
     pub api_key: Option<String>,
     pub display_name: Option<String>,
+    /// 自定义请求头(JSON 对象);None=不改,空/{}=清除,其余=覆盖。
+    pub headers: Option<String>,
+}
+
+/// 校验供应商自定义请求头:None=None;空/{}=Some("")清除语义;合法 JSON 对象=Some(原文)。
+fn validate_provider_headers(h: Option<&str>) -> Result<Option<String>, ApiError> {
+    let Some(h) = h else { return Ok(None) };
+    let t = h.trim();
+    if t.is_empty() || t == "{}" {
+        return Ok(Some(String::new()));
+    }
+    let parsed: serde_json::Value = serde_json::from_str(t)
+        .map_err(|e| ApiError::BadRequest(format!("自定义请求头必须是合法 JSON 对象: {e}")))?;
+    if !parsed.is_object() {
+        return Err(ApiError::BadRequest(
+            "自定义请求头必须是 JSON 对象,如 {\"x-opencode-session\":\"...\"}".into(),
+        ));
+    }
+    Ok(Some(t.to_string()))
 }
 
 pub async fn update_provider(
@@ -1258,7 +1277,7 @@ pub async fn update_provider(
     if !valid_base_url(&body.base_url) {
         return Err(ApiError::BadRequest("base_url must be a valid http(s) URL".into()));
     }
-    storage::update_provider(&state.db, &name, body.base_url.trim(), body.api_key.as_deref(), body.display_name.as_deref())
+    storage::update_provider(&state.db, &name, body.base_url.trim(), body.api_key.as_deref(), body.display_name.as_deref(), validate_provider_headers(body.headers.as_deref())?.as_deref())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;
@@ -1313,6 +1332,8 @@ pub struct AddModel {
     pub kind: String,           // openai | anthropic
     pub base_url: String,
     pub api_key: Option<String>,
+    /// 供应商自定义请求头(JSON 对象,仅创建新供应商时写入)
+    pub headers: Option<String>,
     pub upstream_model: String, // 供应商上的真实模型名
     pub input_price: Option<f64>,  // 输入单价 $/1M tokens
     pub output_price: Option<f64>, // 输出单价 $/1M tokens
@@ -1338,8 +1359,8 @@ pub async fn add_model(
     if !price_ok(body.input_price) || !price_ok(body.output_price) {
         return Err(ApiError::BadRequest("prices must be finite and >= 0".into()));
     }
-    // 按 base_url 复用已有 provider，不重复创建;新建时写入自定义显示名
-    let (provider, _) = storage::find_or_create_provider_named(&state.db, &body.kind, &body.base_url, body.api_key.as_deref(), body.display_name.as_deref())
+    // 按 base_url 复用已有 provider，不重复创建;新建时写入自定义显示名与请求头
+    let (provider, _) = storage::find_or_create_provider_named(&state.db, &body.kind, &body.base_url, body.api_key.as_deref(), body.display_name.as_deref(), validate_provider_headers(body.headers.as_deref())?.as_deref())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let id = storage::add_model(&state.db, &provider, &body.upstream_model, body.label.as_deref(), body.input_price, body.output_price)
@@ -1355,6 +1376,8 @@ pub struct AddModelsBatch {
     pub base_url: String,
     pub api_key: Option<String>,
     pub display_name: Option<String>, // 供应商自定义显示名(新建时生效)
+    /// 供应商自定义请求头(JSON 对象,仅创建新供应商时写入)
+    pub headers: Option<String>,
     pub models: Vec<AddModelBatchItem>,
 }
 #[derive(Deserialize)]
@@ -1384,7 +1407,7 @@ pub async fn add_models_batch(
     if body.models.iter().any(|m| !price_ok(m.input_price) || !price_ok(m.output_price)) {
         return Err(ApiError::BadRequest("prices must be finite and >= 0".into()));
     }
-    let (provider, provider_created) = storage::find_or_create_provider_named(&state.db, &body.kind, &body.base_url, body.api_key.as_deref(), body.display_name.as_deref())
+    let (provider, provider_created) = storage::find_or_create_provider_named(&state.db, &body.kind, &body.base_url, body.api_key.as_deref(), body.display_name.as_deref(), validate_provider_headers(body.headers.as_deref())?.as_deref())
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let mut added = 0usize;
@@ -1441,37 +1464,37 @@ pub async fn add_models_to_provider_batch(
     Ok(Json(json!({ "ok": true, "added": added, "skipped": skipped })))
 }
 
-/// POST /admin/models/:id/test —— 向上游发最小请求校验连通性/密钥/模型名。
-pub async fn test_model(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(id): Path<i64>,
-) -> Result<Json<Value>, ApiError> {
-    admin_guard(&state, &headers)?;
-    let (kind, base_url, api_key, upstream) = {
-        let routing = state.routing.load();
-        let m = routing.models.get(&id).ok_or_else(|| ApiError::BadRequest("model not found".into()))?;
-        let p = routing.providers.get(&m.provider).ok_or_else(|| ApiError::BadRequest("provider missing".into()))?;
-        (p.kind, p.base_url.clone(), p.api_key.clone(), m.upstream_model.clone())
-    };
+/// 向上游发最小 chat 请求探测连通性/密钥/模型名,返回 (成功, 延迟ms, 失败原因)。
+/// 供单模型测试与供应商级一键测试共用。
+async fn probe_upstream(
+    http: &reqwest::Client,
+    kind: ProviderKind,
+    base_url: &str,
+    api_key: Option<String>,
+    upstream: &str,
+    extra_headers: &[(String, String)],
+) -> (bool, u64, Option<String>) {
     let key = api_key.filter(|k| !k.is_empty());
     let body = json!({ "model": upstream, "max_tokens": 1, "messages": [{ "role": "user", "content": "ping" }] });
     let started = std::time::Instant::now();
     let mut req = match kind {
         ProviderKind::Openai => {
-            let mut rb = state.http.post(format!("{}/chat/completions", base_url.trim_end_matches('/')));
+            let mut rb = http.post(format!("{}/chat/completions", base_url.trim_end_matches('/')));
             if let Some(k) = &key { rb = rb.bearer_auth(k); }
             rb
         }
         ProviderKind::Anthropic => {
-            let mut rb = state
-                .http
+            let mut rb = http
                 .post(format!("{}/messages", base_url.trim_end_matches('/')))
                 .header("anthropic-version", "2023-06-01");
             if let Some(k) = &key { rb = rb.header("x-api-key", k); }
             rb
         }
     };
+    // 供应商自定义请求头(如 x-opencode-session)。
+    for (k, v) in extra_headers {
+        req = req.header(k, v);
+    }
     req = req.json(&body);
 
     let resp = req
@@ -1481,14 +1504,36 @@ pub async fn test_model(
     let latency = started.elapsed().as_millis() as u64;
 
     match resp {
-        Ok(r) if r.status().is_success() => Ok(Json(json!({ "ok": true, "latency_ms": latency }))),
+        Ok(r) if r.status().is_success() => (true, latency, None),
         Ok(r) => {
             let code = r.status().as_u16();
             let body = r.text().await.unwrap_or_default();
             let snippet: String = body.chars().take(200).collect();
-            Ok(Json(json!({ "ok": false, "error": format!("HTTP {code}: {snippet}") })))
+            (false, latency, Some(format!("HTTP {code}: {snippet}")))
         }
-        Err(e) => Ok(Json(json!({ "ok": false, "error": e.to_string() }))),
+        Err(e) => (false, latency, Some(e.to_string())),
+    }
+}
+
+/// POST /admin/models/:id/test —— 向上游发最小请求校验连通性/密钥/模型名。
+pub async fn test_model(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let (kind, base_url, api_key, upstream, extra_headers) = {
+        let routing = state.routing.load();
+        let m = routing.models.get(&id).ok_or_else(|| ApiError::BadRequest("model not found".into()))?;
+        let p = routing.providers.get(&m.provider).ok_or_else(|| ApiError::BadRequest("provider missing".into()))?;
+        (p.kind, p.base_url.clone(), p.api_key.clone(), m.upstream_model.clone(), p.headers.clone())
+    };
+
+    let (ok, latency, err) = probe_upstream(&state.http, kind, &base_url, api_key, &upstream, &extra_headers).await;
+    if ok {
+        Ok(Json(json!({ "ok": true, "latency_ms": latency })))
+    } else {
+        Ok(Json(json!({ "ok": false, "error": err.unwrap_or_else(|| "unknown".into()) })))
     }
 }
 

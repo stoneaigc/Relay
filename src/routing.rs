@@ -14,6 +14,8 @@ pub struct ProviderConn {
     pub api_key: Option<String>,
     /// 该上游独立并发上限(None = 用全局 Defaults.upstream_concurrency, 0 = 不限)。
     pub concurrency: Option<u32>,
+    /// 供应商自定义请求头(如 opencode 要求的 x-opencode-session),随每次上游请求附带。
+    pub headers: Vec<(String, String)>,
 }
 
 /// 一个「模型」= 某供应商上的真实模型。
@@ -167,6 +169,8 @@ pub struct Resolved {
     pub kind: ProviderKind,
     pub base_url: String,
     pub api_key: Option<String>,
+    /// 供应商自定义请求头(随上游请求附带)。
+    pub headers: Vec<(String, String)>,
     pub upstream_model: String,
     pub multiplier: f64,
     /// 路由级语义缓存 opt-in(与全局开关/确定性判定 AND)。
@@ -331,6 +335,7 @@ impl Routing {
                 kind: p.kind,
                 base_url: p.base_url.clone(),
                 api_key: p.api_key.clone(),
+                headers: p.headers.clone(),
                 upstream_model: m.upstream_model.clone(),
                 // 计费倍率:模型倍率 × 时段倍率(无时段=×1.0)。handlers 直接用它计费,无需改计费链。
                 multiplier: t.multiplier * time_multiplier,

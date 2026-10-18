@@ -269,6 +269,9 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE providers ADD COLUMN IF NOT EXISTS display_name TEXT")
             .execute(pool)
             .await;
+        let _ = q!("ALTER TABLE providers ADD COLUMN IF NOT EXISTS headers TEXT")
+            .execute(pool)
+            .await;
         // Key 明文列:门户端随时查看/复制完整 Key(认证仍走 key_hash)。
         let _ = q!("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_plain TEXT")
             .execute(pool)
@@ -367,6 +370,8 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
             .await;
         // 供应商自定义显示名(空=按 base_url 域名展示)。
         let _ = q!("ALTER TABLE providers ADD COLUMN display_name TEXT").execute(pool).await;
+        // 供应商自定义请求头(JSON 对象,加密存储;随上游请求附带,如 x-opencode-session)。
+        let _ = q!("ALTER TABLE providers ADD COLUMN headers TEXT").execute(pool).await;
         // Key 明文列:门户端随时查看/复制完整 Key(认证仍走 key_hash)。
         let _ = q!("ALTER TABLE api_keys ADD COLUMN key_plain TEXT").execute(pool).await;
         // 分级密钥管控:模型范围 + 审批状态。
@@ -654,6 +659,7 @@ pub async fn find_or_create_provider_named(
     base_url: &str,
     api_key: Option<&str>,
     display_name: Option<&str>,
+    headers: Option<&str>,
 ) -> anyhow::Result<(String, bool)> {
     let dn = display_name.map(str::trim).filter(|s| !s.is_empty());
     let (name, created) = find_or_create_provider(pool, kind, base_url, api_key).await?;
@@ -664,6 +670,16 @@ pub async fn find_or_create_provider_named(
         } else {
             q!("UPDATE providers SET display_name = ? WHERE name = ? AND (display_name IS NULL OR display_name = '')")
                 .bind(dn).bind(&name).execute(pool).await?;
+        }
+    }
+    // 自定义请求头:创建时写入;已存在仅在从未配置过时补写(不覆盖管理员已有配置)。
+    if let Some(h) = headers.map(str::trim).filter(|s| !s.is_empty() && *s != "{}") {
+        if created {
+            q!("UPDATE providers SET headers = ? WHERE name = ?")
+                .bind(enc_field(Some(h))).bind(&name).execute(pool).await?;
+        } else {
+            q!("UPDATE providers SET headers = ? WHERE name = ? AND (headers IS NULL OR headers = '')")
+                .bind(enc_field(Some(h))).bind(&name).execute(pool).await?;
         }
     }
     Ok((name, created))
@@ -756,6 +772,7 @@ pub async fn update_provider(
     base_url: &str,
     api_key: Option<&str>,
     display_name: Option<&str>,
+    headers: Option<&str>,
 ) -> anyhow::Result<()> {
     let key = api_key.filter(|k| !k.is_empty());
     let dn = display_name.map(str::trim).filter(|s| !s.is_empty());
@@ -776,6 +793,17 @@ pub async fn update_provider(
             q!("UPDATE providers SET base_url = ? WHERE name = ?")
                 .bind(base_url).bind(name).execute(pool).await?;
         }
+    }
+    // 自定义请求头:None = 不改动;Some("")|Some("{}") = 清除;其余 = 已由调用方校验的 JSON 对象,加密写入。
+    if let Some(h) = headers {
+        let t = h.trim();
+        let enc = if t.is_empty() || t == "{}" {
+            None
+        } else {
+            enc_field(Some(t))
+        };
+        q!("UPDATE providers SET headers = ? WHERE name = ?")
+            .bind(enc).bind(name).execute(pool).await?;
     }
     Ok(())
 }
@@ -1202,13 +1230,27 @@ pub async fn set_user_group(pool: &Db, user_id: Uuid, group_id: Option<i64>) -> 
 pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
     let mut routing = Routing::default();
 
-    for r in q!("SELECT name, kind, base_url, api_key FROM providers").fetch_all(pool).await? {
+    for r in q!("SELECT name, kind, base_url, api_key, headers FROM providers").fetch_all(pool).await? {
         let kind = match r.get::<String, _>("kind").as_str() {
             "anthropic" => ProviderKind::Anthropic,
             _ => ProviderKind::Openai,
         };
+        // 自定义请求头:密文解密 → JSON 对象 → 键值对(非法/为空按无处理)。
+        let headers = r
+            .try_get::<Option<String>, _>("headers")
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .and_then(|s| dec_field(Some(s)))
+            .and_then(|s| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&s).ok())
+            .map(|map| {
+                map.into_iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+                    .collect::<Vec<(String, String)>>()
+            })
+            .unwrap_or_default();
         routing.providers.insert(r.get::<String, _>("name"), ProviderConn {
-            kind, base_url: r.get("base_url"), api_key: dec_field(r.get("api_key")), concurrency: None,
+            kind, base_url: r.get("base_url"), api_key: dec_field(r.get("api_key")), concurrency: None, headers,
         });
     }
     for r in q!("SELECT id, provider, upstream_model, label, input_price, output_price, context_length, tags FROM models").fetch_all(pool).await? {
@@ -3325,7 +3367,7 @@ mod tests {
     #[tokio::test]
     async fn named_provider_persists_display_name_on_create() {
         let db = test_db().await;
-        let (name, created) = find_or_create_provider_named(&db, "openai", "https://api.named.test/v1", Some("sk-n1"), Some("  生产网关  "))
+        let (name, created) = find_or_create_provider_named(&db, "openai", "https://api.named.test/v1", Some("sk-n1"), Some("  生产网关  "), None)
             .await.unwrap();
         assert!(created);
         let (rows, _) = list_providers(&db, None, None, None).await.unwrap();
@@ -3334,12 +3376,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn named_provider_persists_headers_on_create() {
+        let db = test_db().await;
+        let (name, created) = find_or_create_provider_named(&db, "openai", "https://api.hdr.test/v1", Some("sk-h1"), None, Some(r#"{"x-opencode-session":"sess-1"}"#))
+            .await.unwrap();
+        assert!(created);
+        // headers 走 load_routing 读取路径:解密 + 解析为键值对。
+        let routing = load_routing(&db).await.unwrap();
+        let conn = routing.providers.get(&name).unwrap();
+        assert_eq!(conn.headers, vec![("x-opencode-session".to_string(), "sess-1".to_string())]);
+    }
+
+    #[tokio::test]
     async fn named_provider_reuse_keeps_original_name() {
         let db = test_db().await;
-        let (n1, _) = find_or_create_provider_named(&db, "openai", "https://api.reuse.test/v1", Some("sk-r1"), Some("第一个名字"))
+        let (n1, _) = find_or_create_provider_named(&db, "openai", "https://api.reuse.test/v1", Some("sk-r1"), Some("第一个名字"), None)
             .await.unwrap();
         // 同 base_url+key 再次添加并带新名字:复用已有 provider,不覆盖其显示名。
-        let (n2, created) = find_or_create_provider_named(&db, "openai", "https://api.reuse.test/v1", Some("sk-r1"), Some("第二个名字"))
+        let (n2, created) = find_or_create_provider_named(&db, "openai", "https://api.reuse.test/v1", Some("sk-r1"), Some("第二个名字"), None)
             .await.unwrap();
         assert!(!created);
         assert_eq!(n1, n2);
@@ -3355,7 +3409,7 @@ mod tests {
         let (n1, _) = find_or_create_provider(&db, "openai", "https://api.fillblank.test/v1", Some("sk-f1"))
             .await.unwrap();
         // 复用时带名字:原显示名为空 → 补写。
-        let (n2, created) = find_or_create_provider_named(&db, "openai", "https://api.fillblank.test/v1", Some("sk-f1"), Some("补写的名字"))
+        let (n2, created) = find_or_create_provider_named(&db, "openai", "https://api.fillblank.test/v1", Some("sk-f1"), Some("补写的名字"), None)
             .await.unwrap();
         assert!(!created);
         assert_eq!(n1, n2);
@@ -3367,7 +3421,7 @@ mod tests {
     #[tokio::test]
     async fn named_provider_blank_name_falls_back_to_null() {
         let db = test_db().await;
-        let (name, created) = find_or_create_provider_named(&db, "openai", "https://api.blank.test/v1", Some("sk-b1"), Some("   "))
+        let (name, created) = find_or_create_provider_named(&db, "openai", "https://api.blank.test/v1", Some("sk-b1"), Some("   "), None)
             .await.unwrap();
         assert!(created);
         let (rows, _) = list_providers(&db, None, None, None).await.unwrap();
@@ -3380,12 +3434,12 @@ mod tests {
         let db = test_db().await;
         let (name, _) = find_or_create_provider(&db, "openai", "https://api.upd.test/v1", Some("sk-u1"))
             .await.unwrap();
-        update_provider(&db, &name, "https://api.upd.test/v1", None, Some("改名后的上游")).await.unwrap();
+        update_provider(&db, &name, "https://api.upd.test/v1", None, Some("改名后的上游"), None).await.unwrap();
         let (rows, _) = list_providers(&db, None, None, None).await.unwrap();
         let row = rows.iter().find(|r| r["name"] == name).unwrap();
         assert_eq!(row["display_name"], "改名后的上游");
         // 空白名不覆盖已有显示名。
-        update_provider(&db, &name, "https://api.upd.test/v1", None, Some("  ")).await.unwrap();
+        update_provider(&db, &name, "https://api.upd.test/v1", None, Some("  "), None).await.unwrap();
         let (rows, _) = list_providers(&db, None, None, None).await.unwrap();
         let row = rows.iter().find(|r| r["name"] == name).unwrap();
         assert_eq!(row["display_name"], "改名后的上游");
