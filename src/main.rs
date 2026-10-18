@@ -506,11 +506,13 @@ async fn main() -> anyhow::Result<()> {
     // SPA 静态资源(未命中的子路径回退到 index.html,交给前端路由)。
     // 兜底不走 ServeFile,而走 spa_fallback:按 URI 深度注入相对 <base>,修复挂载点下
     // 第 2 层及更深 URL(如 /admin/groups/xxx)因相对资源解析错位导致的整页白屏。
+    // 注意用 fallback() 而非 not_found_service():后者用 SetStatus 把响应强制成 404,
+    // 会让 SPA 路由入口在监控/反代语义下被误判为不可用。
     let spa = |dir: &str| {
         let root = format!("frontend/{dir}/dist");
         let index = format!("{root}/index.html");
         let mount = format!("/{dir}");
-        tower_http::services::ServeDir::new(root).not_found_service(axum::routing::get::<_, _, ()>(
+        tower_http::services::ServeDir::new(root).fallback(axum::routing::get::<_, _, ()>(
             move |uri: Uri| {
                 let index = index.clone();
                 let mount = mount.clone();
