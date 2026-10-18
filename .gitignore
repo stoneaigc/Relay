@@ -30,3 +30,6 @@ config/local.toml
 .omc/
 .trae/
 .ai-memory/
+
+# TS 增量构建缓存
+*.tsbuildinfo
