@@ -1434,8 +1434,8 @@ function ModelsPanel() {
   const [priceTarget, setPriceTarget] = useState<{ p: ProviderRow; m: ProviderModelRow } | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [test, setTest] = useState<Record<number, "loading" | { ok: boolean; msg: string }>>({});
-  // 供应商级一键测试结果(卡片行内展示,免逐个模型手测);"busy" = 批量进行中(防重入)。
-  const [provTest, setProvTest] = useState<Record<string, "busy" | { ok: boolean; msg: string }>>({});
+  // 供应商级一键测试结果(卡片行内展示,免逐个模型手测);running = 批量进行中(防重入)。
+  const [provTest, setProvTest] = useState<Record<string, { ok: boolean; msg: string; running?: boolean }>>({});
   const [page, setPage] = useState(1);
   const [pageMeta, setPageMeta] = useState({ total: 0, total_pages: 1 });
   const [providerSearch, setProviderSearch] = useState("");
@@ -1572,10 +1572,10 @@ function ModelsPanel() {
   // 供应商级一键测试:批量测试该供应商下全部模型(并发 5,复用单模型测试接口),
   // 每个模型行的结果实时填充;完成后卡片头部显示通过数。
   const runProvTest = async (p: ProviderRow) => {
-    if (provTest[p.name] === "busy") return;
-    setProvTest((t) => ({ ...t, [p.name]: "busy" }));
+    if (provTest[p.name]?.running) return;
     let models = providerModels[p.name];
     if (!models) {
+      setProvTest((t) => ({ ...t, [p.name]: { ok: true, msg: "0", running: true } }));
       try {
         models = (await api.providerModels(p.name)).data;
         setProviderModels((prev) => ({ ...prev, [p.name]: models! }));
@@ -1596,11 +1596,11 @@ function ModelsPanel() {
           setTest((t) => ({ ...t, [id]: { ok: r.ok, msg: r.ok ? `${r.latency_ms}ms` : (r.error || "失败") } }));
         } catch (e: any) { setTest((t) => ({ ...t, [id]: { ok: false, msg: e.message } })); }
         done++;
-        setProvTest((t) => ({ ...t, [p.name]: { ok: true, msg: `测试中 ${done}/${ids.length}` } }));
+        setProvTest((t) => ({ ...t, [p.name]: { ok: true, msg: `${done}/${ids.length}`, running: true } }));
       }
     };
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, ids.length) }, worker));
-    setProvTest((t) => ({ ...t, [p.name]: { ok: okCount === ids.length, msg: `完成: ${okCount}/${ids.length} 通过` } }));
+    setProvTest((t) => ({ ...t, [p.name]: { ok: okCount === ids.length, msg: `${okCount}/${ids.length} 通过` } }));
   };
 
   return (
@@ -1648,22 +1648,40 @@ function ModelsPanel() {
                     <div className="text-xs text-muted-foreground">{p.base_url}</div>
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  {(() => { const st = provTest[p.name]; if (!st || st === "busy") return null;
-                    return (
-                      <span className={cn("max-w-[280px] truncate text-xs", st.ok ? "text-emerald-600" : "text-destructive")}
-                        title={st.msg} data-testid="provider-test-result">
-                        {st.ok ? "✓ " : "✗ "}{st.msg}
-                      </span>
-                    ); })()}
-                  <button className="text-xs text-primary hover:underline disabled:opacity-50"
-                    disabled={provTest[p.name] === "busy"}
-                    title="批量测试该供应商下全部模型(结果逐行显示)"
-                    onClick={(e) => { e.stopPropagation(); runProvTest(p); }}>
-                    {provTest[p.name] === "busy" ? "测试中…" : "测试全部"}
-                  </button>
+                <div className="flex shrink-0 items-center gap-2">
+                  {/* 元信息组 + 操作组:三个操作(测试/编辑/删除)连续排列,不隔断 */}
                   <Badge variant="muted">{p.kind}</Badge>
                   <span className="text-xs text-muted-foreground">{p.model_count} 个模型</span>
+                  {(() => {
+                    const st = provTest[p.name];
+                    if (st?.running) return (
+                      <span className="inline-flex h-7 items-center gap-1.5 rounded-md border border-input bg-card px-2.5 text-xs tabular-nums text-muted-foreground" data-testid="provider-test-result">
+                        <RefreshCw className="h-3 w-3 animate-spin" />{st.msg}
+                      </span>
+                    );
+                    if (st) {
+                      const m = st.msg.match(/(\d+)\s*\/\s*(\d+)/);
+                      const passed = m ? +m[1] : null, total = m ? +m[2] : null;
+                      const tone = st.ok ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600"
+                        : total != null && passed! > 0 ? "border-amber-500/30 bg-amber-500/10 text-amber-600"
+                        : "border-destructive/30 bg-destructive/10 text-destructive";
+                      return (
+                        <span className={cn("inline-flex h-7 items-center gap-1 rounded-md border px-2.5 text-xs font-medium tabular-nums", tone)}
+                          title={st.ok ? `全部通过: ${st.msg}` : `部分/全部失败: ${st.msg}`} data-testid="provider-test-result">
+                          {st.ok ? <Check className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
+                          {passed != null ? `${passed}/${total}` : (st.ok ? "通过" : "失败")}
+                        </span>
+                      );
+                    }
+                    return null;
+                  })()}
+                  <Button variant="outline" size="sm" className="h-7 gap-1.5 px-2.5"
+                    disabled={!!provTest[p.name]?.running}
+                    title="批量测试该供应商下全部模型(结果逐行显示)"
+                    onClick={(e) => { e.stopPropagation(); runProvTest(p); }}>
+                    <Activity className={cn("h-3.5 w-3.5", provTest[p.name]?.running && "animate-pulse")} />
+                    {provTest[p.name]?.running ? "测试中" : "测试全部"}
+                  </Button>
                   <button className="text-xs text-primary hover:underline" onClick={(e) => { e.stopPropagation(); setEditProvider(p); }}>编辑</button>
                   <button className="text-xs text-destructive hover:underline" onClick={(e) => { e.stopPropagation(); delProvider(p); }}>删除</button>
                 </div>
@@ -1902,19 +1920,57 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
     setFetchedModels([]); setSelectedModels(new Set()); setErr(""); setInputPrice(""); setOutputPrice("");
   }, [open]);
 
-  const TEMPLATES: Record<string, { kind: string; base_url: string }> = {
-    custom: { kind: "", base_url: "" },
-    anthropic: { kind: "anthropic", base_url: "https://api.anthropic.com" },
-    openai: { kind: "openai", base_url: "https://api.openai.com/v1" },
-    deepseek: { kind: "openai", base_url: "https://api.deepseek.com/v1" },
-    qwen: { kind: "openai", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
-    zhipu: { kind: "openai", base_url: "https://open.bigmodel.cn/api/paas/v4" },
-    moonshot: { kind: "openai", base_url: "https://api.moonshot.cn/v1" },
-    ollama: { kind: "openai", base_url: "http://localhost:11434/v1" },
-  };
+  // 预置模板:国产主流厂商 + Coding Plan 套餐端点 + 国际/聚合 + 本地。选中即自动填 kind/base_url。
+  const TEMPLATE_GROUPS: { group: string; items: { key: string; label: string; kind: string; base_url: string; note?: string }[] }[] = [
+    {
+      group: "国产 API",
+      items: [
+        { key: "deepseek", label: "DeepSeek", kind: "openai", base_url: "https://api.deepseek.com/v1" },
+        { key: "qwen", label: "通义千问", kind: "openai", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+        { key: "zhipu", label: "智谱 GLM", kind: "openai", base_url: "https://open.bigmodel.cn/api/paas/v4" },
+        { key: "moonshot", label: "Moonshot Kimi", kind: "openai", base_url: "https://api.moonshot.cn/v1" },
+        { key: "minimax", label: "MiniMax", kind: "openai", base_url: "https://api.minimaxi.com/v1" },
+        { key: "doubao", label: "豆包·火山方舟", kind: "openai", base_url: "https://ark.cn-beijing.volces.com/api/v3" },
+        { key: "qianfan", label: "百度千帆", kind: "openai", base_url: "https://qianfan.baidubce.com/v2" },
+        { key: "spark", label: "讯飞星火", kind: "openai", base_url: "https://spark-api-open.xf-yun.com/v1" },
+        { key: "hunyuan", label: "腾讯混元", kind: "openai", base_url: "https://api.hunyuan.cloud.tencent.com/v1" },
+        { key: "siliconflow", label: "硅基流动", kind: "openai", base_url: "https://api.siliconflow.cn/v1" },
+      ],
+    },
+    {
+      group: "Coding Plan 套餐",
+      items: [
+        { key: "glm-coding-a", label: "GLM Coding", kind: "anthropic", base_url: "https://open.bigmodel.cn/api/anthropic", note: "Anthropic" },
+        { key: "glm-coding-o", label: "GLM Coding", kind: "openai", base_url: "https://open.bigmodel.cn/api/coding/paas/v4", note: "OpenAI" },
+        { key: "kimi-code-cn", label: "Kimi Code 中国", kind: "anthropic", base_url: "https://api.kimi.com/coding", note: "Anthropic" },
+        { key: "kimi-code-gl", label: "Kimi Code 海外", kind: "anthropic", base_url: "https://api.kimi.ai/coding", note: "Anthropic" },
+      ],
+    },
+    {
+      group: "国际 / 聚合",
+      items: [
+        { key: "openai", label: "OpenAI", kind: "openai", base_url: "https://api.openai.com/v1" },
+        { key: "anthropic", label: "Anthropic", kind: "anthropic", base_url: "https://api.anthropic.com" },
+        { key: "openrouter", label: "OpenRouter", kind: "openai", base_url: "https://openrouter.ai/api/v1" },
+        { key: "groq", label: "Groq", kind: "openai", base_url: "https://api.groq.com/openai/v1" },
+      ],
+    },
+    {
+      group: "本地 / 私有",
+      items: [
+        { key: "ollama", label: "Ollama", kind: "openai", base_url: "http://localhost:11434/v1" },
+        { key: "lmstudio", label: "LM Studio", kind: "openai", base_url: "http://localhost:1234/v1" },
+        { key: "custom", label: "自定义", kind: "openai", base_url: "" },
+      ],
+    },
+  ];
+  const ALL_TPL: Record<string, { kind: string; base_url: string }> = Object.fromEntries(
+    TEMPLATE_GROUPS.flatMap((g) => g.items.map((i) => [i.key, { kind: i.kind, base_url: i.base_url }])),
+  );
   const applyTemplate = (key: string) => {
     setTpl(key);
-    if (key !== "custom") { const t = TEMPLATES[key]; setKind(t.kind); setBaseUrl(t.base_url); }
+    const t = ALL_TPL[key];
+    if (t) { setKind(t.kind); setBaseUrl(t.base_url); }
   };
 
   const doFetch = async () => {
@@ -1959,23 +2015,36 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
         <div className="space-y-3">
           <div><label className="mb-1 block text-xs text-muted-foreground">名称 (可选,留空按域名显示)</label>
             <Input placeholder="如: 生产网关 / fit2cloud 主力" value={provName} onChange={(e) => setProvName(e.target.value)} /></div>
-          <div><label className="mb-1 block text-xs text-muted-foreground">供应商模板</label>
-            <select value={tpl} onChange={(e) => applyTemplate(e.target.value)} className={sel}>
-              <option value="custom">自定义</option>
-              <option value="deepseek">DeepSeek</option>
-              <option value="openai">OpenAI</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="qwen">通义千问</option>
-              <option value="zhipu">智谱 GLM</option>
-              <option value="moonshot">Moonshot Kimi</option>
-              <option value="ollama">Ollama 本地</option>
-            </select></div>
+          {/* 模板选择:分组芯片网格,点选即自动填协议与 Base URL */}
+          <div className="space-y-2.5">
+            {TEMPLATE_GROUPS.map((g) => (
+              <div key={g.group}>
+                <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-subtle-foreground">{g.group}</div>
+                <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
+                  {g.items.map((i) => (
+                    <button type="button" key={i.key}
+                      className={cn("rounded-lg border p-2 text-left transition-colors",
+                        tpl === i.key ? "border-primary bg-primary/5 ring-1 ring-primary" : "border-input hover:border-primary/40 hover:bg-muted/50")}
+                      onClick={() => applyTemplate(i.key)}>
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-xs font-semibold">{i.label}</span>
+                        {i.note && <span className="rounded bg-muted px-1 py-px text-[10px] text-muted-foreground">{i.note}</span>}
+                      </div>
+                      <div className="mono mt-0.5 truncate text-[10px] text-muted-foreground" title={i.base_url}>
+                        {i.base_url ? i.base_url.replace(/^https?:\/\//, "") : "手动填写"}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <div><label className="mb-1 block text-xs text-muted-foreground">协议</label>
               <select value={kind} onChange={(e) => setKind(e.target.value)} className={sel}>
                 <option value="openai">openai 兼容</option><option value="anthropic">anthropic</option>
               </select></div>
-            <div><label className="mb-1 block text-xs text-muted-foreground">Base URL</label>
+            <div><label className="mb-1 block text-xs text-muted-foreground">Base URL (选模板自动填,可改)</label>
               <Input placeholder="https://api.deepseek.com/v1" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} /></div>
           </div>
           <div><label className="mb-1 block text-xs text-muted-foreground">API Key (可选)</label>
