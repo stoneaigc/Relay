@@ -39,6 +39,10 @@ pub struct ModelDef {
 #[derive(Clone)]
 pub struct Target {
     pub model_id: i64,
+    /// 优先级档位:数值越大越先被使用;同档内才按策略分流。
+    /// 只有更高档全部不可用时才降到下一档(故障转移)。
+    pub priority: u32,
+    /// 档内分流权重(策略为加权随机/加权轮询时生效)。
     pub weight: u32,
     pub multiplier: f64,
     /// 路由级语义缓存 opt-in(与全局开关/确定性判定 AND)。
@@ -107,21 +111,17 @@ pub struct TimeRule {
     pub active: bool,
 }
 
-/// 组级负载策略算法。
+/// 组级负载策略算法(仅决定「同一优先级档内」的分流方式)。
+/// 优先级档位是路由属性(见 Target.priority),不占策略名额。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Strategy {
-    /// 加权随机(默认):按 weight 概率随机挑一个,失败后按权重序 failover。
+    /// 加权随机(默认):档内按 weight 概率随机挑一个,失败后按权重序 failover。
     WeightedRandom,
-    /// 加权轮询。
+    /// 加权轮询:档内按权重轮盘轮转(权重全 1 即简单轮询)。
     WeightedRoundRobin,
-    /// 简单轮询。
-    RoundRobin,
-    /// 优先级:按 weight 降序(越大越优先),失败自动切下一个。
-    Priority,
-    /// 成本优先:按预估单价升序选最便宜,同价随机(未定价殿后);不健康候选由请求侧熔断器跳过。
-    CostAware,
-    /// 延迟优先:按窗口内 P50 延迟升序选最快,无数据候选殿后且随机分摊;同值随机。
-    LatencyAware,
+    /// 智能自适应:档内按「延迟 + 成本」综合得分升序(得分越低越优),
+    /// 无数据候选取有数据候选的中位分,并以 10% 概率探索(冷启动也能拿到流量)。
+    Auto,
 }
 
 impl Strategy {
@@ -129,22 +129,19 @@ impl Strategy {
         match self {
             Strategy::WeightedRandom => "weighted_random",
             Strategy::WeightedRoundRobin => "weighted_round_robin",
-            Strategy::RoundRobin => "round_robin",
-            Strategy::Priority => "priority",
-            Strategy::CostAware => "cost_aware",
-            Strategy::LatencyAware => "latency_aware",
+            Strategy::Auto => "auto",
         }
     }
 }
 
-/// 把配置串解析为 Strategy;未知值回退到加权随机。
+/// 把配置串解析为 Strategy;旧策略名做一次语义等价映射,未知值回退到加权随机。
+/// - priority → weighted_random(优先级已改为路由属性)
+/// - round_robin → weighted_round_robin(权重全 1 即简单轮询)
+/// - cost_aware / latency_aware → auto(两者已合并)
 pub fn strategy_from_str(s: &str) -> Strategy {
     match s {
-        "weighted_round_robin" => Strategy::WeightedRoundRobin,
-        "round_robin" => Strategy::RoundRobin,
-        "priority" => Strategy::Priority,
-        "cost_aware" => Strategy::CostAware,
-        "latency_aware" => Strategy::LatencyAware,
+        "weighted_round_robin" | "round_robin" => Strategy::WeightedRoundRobin,
+        "auto" | "cost_aware" | "latency_aware" => Strategy::Auto,
         _ => Strategy::WeightedRandom,
     }
 }
@@ -161,6 +158,8 @@ pub struct Routing {
     pub time_rules: HashMap<i64, Vec<TimeRule>>,
     /// group_id -> (对外模型名 -> 目标列表)。按名精确路由,同名多条即加权。
     pub groups: HashMap<i64, HashMap<String, Vec<Target>>>,
+    /// 用户组 -> 有序绑定的模型组 id(下标即优先级,0=最高)。两级寻址第一级。
+    pub user_group_models: HashMap<i64, Vec<i64>>,
 }
 
 /// 解析结果:实际要打到哪个上游。
@@ -309,17 +308,24 @@ impl Routing {
         let strategy = self.group_strategy.get(&group_id).copied().unwrap_or(Strategy::WeightedRandom);
         // 时段覆盖权重时,不透传原权重给排序,单独构造一份带覆盖权重的 targets 快照。
         let weighted_targets: Option<Vec<Target>> = rule.as_ref().map(|_| {
-            targets.iter().map(|t| Target { model_id: t.model_id, weight: eff_weight(t), multiplier: t.multiplier, cache_enabled: t.cache_enabled }).collect()
+            targets.iter().map(|t| Target { model_id: t.model_id, priority: t.priority, weight: eff_weight(t), multiplier: t.multiplier, cache_enabled: t.cache_enabled }).collect()
         });
         let sort_targets: &[Target] = weighted_targets.as_deref().unwrap_or(targets);
-        let order = match strategy {
-            Strategy::WeightedRandom => shuffle_weighted(sort_targets),
-            Strategy::RoundRobin => order_round_robin(group_id, sort_targets, rr_counter, true),
-            Strategy::WeightedRoundRobin => order_round_robin(group_id, sort_targets, rr_counter, false),
-            Strategy::Priority => order_by_priority(sort_targets),
-            Strategy::CostAware => order_by_cost(sort_targets, &self.models),
-            Strategy::LatencyAware => order_by_latency(sort_targets, &self.models, lat_p50),
-        };
+        // 先按优先级分档(高→低,只有高档全不可用才降档),档内再按策略排序。
+        let mut order: Vec<usize> = Vec::with_capacity(sort_targets.len());
+        for (tier_rank, idxs) in priority_tiers(sort_targets).into_iter().enumerate() {
+            let tier: Vec<Target> = idxs.iter().map(|&i| sort_targets[i].clone()).collect();
+            let in_tier = match strategy {
+                // 加权轮询只对最高档做严格轮转;更低档只在容灾时用,保持随机次序即可。
+                Strategy::WeightedRoundRobin if tier_rank == 0 => {
+                    order_round_robin(group_id, &tier, rr_counter)
+                }
+                Strategy::WeightedRoundRobin => shuffle_weighted(&tier),
+                Strategy::WeightedRandom => shuffle_weighted(&tier),
+                Strategy::Auto => order_by_auto(&tier, &self.models, lat_p50),
+            };
+            order.extend(in_tier.into_iter().map(|j| idxs[j]));
+        }
         let mut seen: std::collections::HashSet<(ProviderKind, String, String)> = std::collections::HashSet::new();
         let mut out: Vec<Resolved> = Vec::new();
         for idx in order {
@@ -349,6 +355,114 @@ impl Routing {
             return Err(ApiError::NoTarget(requested.to_string()));
         }
         Ok(out)
+    }
+
+    /// 两级寻址:按用户组绑定的有序模型组列表解析对外模型。
+    /// 语义:先按组优先级,首个含该模型的组用它自己的负载策略解析;候选链按组优先级
+    /// 跨组拼接(高优先级组在前),同名上游跨组去重,形成跨组 failover。
+    /// group_ids 为空 → ModelNotAllowed;所有组都无此模型 → ModelNotFound;有路由但无有效上游 → NoTarget。
+    pub fn resolve_priority(
+        &self,
+        group_ids: &[i64],
+        requested: &str,
+        rr_counter: &dashmap::DashMap<i64, std::sync::atomic::AtomicU32>,
+        lat_p50: &dashmap::DashMap<String, u64>,
+        tz_offset_secs: i32,
+        now: Option<chrono::DateTime<Utc>>,
+    ) -> Result<Vec<Resolved>, ApiError> {
+        if group_ids.is_empty() {
+            return Err(ApiError::ModelNotAllowed(requested.to_string()));
+        }
+        let mut had_name = false;
+        let mut seen: std::collections::HashSet<(ProviderKind, String, String)> = std::collections::HashSet::new();
+        let mut out: Vec<Resolved> = Vec::new();
+        for gid in group_ids {
+            // 预检:该组确实含此对外模型名才进入解析(否则尝试下一优先级的组)。
+            let contains = self
+                .groups
+                .get(gid)
+                .and_then(|g| g.get(requested))
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            if !contains {
+                continue;
+            }
+            had_name = true;
+            let mut cands = self.resolve_all(*gid, requested, rr_counter, lat_p50, tz_offset_secs, now)?;
+            for r in cands.drain(..) {
+                if seen.insert((r.kind, r.base_url.clone(), r.upstream_model.clone())) {
+                    out.push(r);
+                }
+            }
+        }
+        if out.is_empty() {
+            return Err(if had_name {
+                ApiError::NoTarget(requested.to_string())
+            } else {
+                ApiError::ModelNotFound(requested.to_string())
+            });
+        }
+        Ok(out)
+    }
+
+    /// 多个模型组的对外模型名并集(排序去重),供 /v1/models 与门户选择器。
+    pub fn model_names_union(&self, group_ids: &[i64]) -> Vec<String> {
+        let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for gid in group_ids {
+            if let Some(m) = self.groups.get(gid) {
+                set.extend(m.keys().cloned());
+            }
+        }
+        let mut v: Vec<String> = set.into_iter().collect();
+        v.sort();
+        v
+    }
+
+    /// 多个模型组的模型卡片并集:同名合并(上游数累加,倍率/价格取最优,标签/展示名取并集,
+    /// 高优先级组的展示名与标签排前),供门户「模型广场」。
+    pub fn model_cards_union(&self, group_ids: &[i64]) -> Vec<ModelCard> {
+        let mut merged: HashMap<String, ModelCard> = HashMap::new();
+        for gid in group_ids {
+            for c in self.group_model_cards(*gid) {
+                merged
+                    .entry(c.name.clone())
+                    .and_modify(|m| {
+                        m.upstreams += c.upstreams;
+                        m.multiplier = m.multiplier.min(c.multiplier);
+                        m.cache = m.cache || c.cache;
+                        m.context_length = match (m.context_length, c.context_length) {
+                            (Some(a), Some(b)) => Some(a.max(b)),
+                            (None, b) => b,
+                            (a, None) => a,
+                        };
+                        for l in &c.labels {
+                            if !m.labels.iter().any(|x| x.eq_ignore_ascii_case(l)) {
+                                m.labels.push(l.clone());
+                            }
+                        }
+                        for t in &c.tags {
+                            if !m.tags.contains(t) {
+                                m.tags.push(t.clone());
+                            }
+                        }
+                        // 价格 NaN = 存在未定价部署;任一合并来源 NaN 则结果 NaN。
+                        m.input_price = if m.input_price.is_nan() || c.input_price.is_nan() {
+                            f64::NAN
+                        } else {
+                            m.input_price.min(c.input_price)
+                        };
+                        m.output_price = if m.output_price.is_nan() || c.output_price.is_nan() {
+                            f64::NAN
+                        } else {
+                            m.output_price.min(c.output_price)
+                        };
+                    })
+                    .or_insert(c);
+            }
+        }
+        let mut cards: Vec<ModelCard> = merged.into_values().collect();
+        cards.sort_by(|a, b| a.name.cmp(&b.name));
+        cards
     }
 
     /// 返回该组当前时间命中的时段规则(第一个命中),并给出「星期几 + 时分」的判断参数。
@@ -440,11 +554,23 @@ fn shuffle_weighted(targets: &[Target]) -> Vec<usize> {
     order
 }
 
-/// 优先级排序:按 weight 降序(越大越优先),返回索引排列。
-fn order_by_priority(targets: &[Target]) -> Vec<usize> {
-    let mut idx: Vec<usize> = (0..targets.len()).collect();
-    idx.sort_by(|&a, &b| targets[b].weight.cmp(&targets[a].weight));
-    idx
+/// 按 priority 分档:返回「档位从高到低」的索引分组,同档内保持原序。
+/// 档位语义:只有更高档的候选全部失败时才降档,因此各档的权重互不影响。
+fn priority_tiers(targets: &[Target]) -> Vec<Vec<usize>> {
+    let mut prios: Vec<u32> = targets.iter().map(|t| t.priority).collect();
+    prios.sort_unstable_by(|a, b| b.cmp(a));
+    prios.dedup();
+    prios
+        .into_iter()
+        .map(|p| {
+            targets
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.priority == p)
+                .map(|(i, _)| i)
+                .collect()
+        })
+        .collect()
 }
 
 /// 原地 Fisher-Yates 洗牌(用 rand::random,不引入额外 trait 依赖)。
@@ -456,98 +582,113 @@ fn fisher_yates_shuffle<T>(v: &mut [T]) {
 }
 
 /// 单个目标的成本基数:两侧单价之和 × 计费倍率(负倍率按 0 计)。
-/// 价格经 pricing::resolve_prices(手动定价优先,回退内置价表);任一侧未定价 = INFINITY 殿后。
-fn target_cost(t: &Target, models: &HashMap<i64, ModelDef>) -> f64 {
-    let Some(m) = models.get(&t.model_id) else {
-        return f64::INFINITY;
-    };
+/// 价格经 pricing::resolve_prices(手动定价优先,回退内置价表);任一侧未定价 = None。
+fn target_cost(t: &Target, models: &HashMap<i64, ModelDef>) -> Option<f64> {
+    let m = models.get(&t.model_id)?;
     let (i, o) = pricing::resolve_prices(&m.upstream_model, m.input_price, m.output_price);
     match (i, o) {
-        (Some(i), Some(o)) => (i + o) * t.multiplier.max(0.0),
-        _ => f64::INFINITY,
+        (Some(i), Some(o)) => Some((i + o) * t.multiplier.max(0.0)),
+        _ => None,
     }
 }
 
-/// 成本优先排序:先整体洗牌(同价随机),再按成本基数稳定升序(未定价殿后)。
-fn order_by_cost(targets: &[Target], models: &HashMap<i64, ModelDef>) -> Vec<usize> {
-    let mut keyed: Vec<(usize, f64)> = targets
-        .iter()
-        .enumerate()
-        .map(|(i, t)| (i, target_cost(t, models)))
-        .collect();
-    fisher_yates_shuffle(&mut keyed);
-    keyed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    keyed.into_iter().map(|(i, _)| i).collect()
-}
-
-/// 单个目标的 P50 延迟基数:经模型查供应商名,再查快照;无数据 = u64::MAX 殿后。
-fn target_latency(t: &Target, models: &HashMap<i64, ModelDef>, lat_p50: &dashmap::DashMap<String, u64>) -> u64 {
+/// 单个目标的 P50 延迟基数:经模型查供应商名,再查快照;无数据 = None。
+fn target_latency(t: &Target, models: &HashMap<i64, ModelDef>, lat_p50: &dashmap::DashMap<String, u64>) -> Option<u64> {
     models
         .get(&t.model_id)
         .and_then(|m| lat_p50.get(&m.provider).map(|e| *e.value()))
-        .unwrap_or(u64::MAX)
 }
 
-/// 延迟优先排序:先整体洗牌(无数据/同值随机分摊),再按 P50 升序稳定排列(无数据殿后)。
-fn order_by_latency(
+/// 取中位数(None 不参与);样本为空返回 None。
+fn median(vals: &mut Vec<f64>) -> Option<f64> {
+    if vals.is_empty() {
+        return None;
+    }
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Some(vals[vals.len() / 2])
+}
+
+/// 智能自适应排序:综合「延迟 + 成本」打分,得分越低越优。
+/// - 延迟取窗口内 P50(ms),成本取 (输入+输出) 单价 × 计费倍率。
+/// - 两项各自按候选内的最大值归一化后各占 50%。
+/// - **无数据的候选取「有数据候选的中位数」作为占位分**,而不是排到最后:
+///   否则新供应商/新模型永远拿不到流量,也就永远产生不了数据(冷启动死锁)。
+/// - **冷启动探索**:无延迟数据的候选以 10% 概率被直接提到队首,保证能产生延迟样本
+///   (仅靠中位数占位,在成本不同时仍会被永久压住)。
+/// - 同分随机(先洗牌再稳定排序)。
+fn order_by_auto(
     targets: &[Target],
     models: &HashMap<i64, ModelDef>,
     lat_p50: &dashmap::DashMap<String, u64>,
 ) -> Vec<usize> {
-    let mut keyed: Vec<(usize, u64)> = targets
-        .iter()
-        .enumerate()
-        .map(|(i, t)| (i, target_latency(t, models, lat_p50)))
+    let n = targets.len();
+    if n <= 1 {
+        return (0..n).collect();
+    }
+    let lats: Vec<Option<f64>> = targets.iter().map(|t| target_latency(t, models, lat_p50).map(|v| v as f64)).collect();
+    let costs: Vec<Option<f64>> = targets.iter().map(|t| target_cost(t, models)).collect();
+    let med_lat = median(&mut lats.iter().flatten().copied().collect());
+    let med_cost = median(&mut costs.iter().flatten().copied().collect());
+    // 归一化基准取「填充后」的最大值,保证 0..1 区间。
+    let max_lat = lats.iter().map(|v| v.or(med_lat)).flatten().fold(0.0f64, f64::max);
+    let max_cost = costs.iter().map(|v| v.or(med_cost)).flatten().fold(0.0f64, f64::max);
+    let norm = |v: Option<f64>, med: Option<f64>, max: f64| -> f64 {
+        match v.or(med) {
+            Some(x) if max > 0.0 => (x / max).clamp(0.0, 1.0),
+            _ => 0.5, // 全无数据:中性分,交由洗牌随机分摊
+        }
+    };
+    let mut keyed: Vec<(usize, f64)> = (0..n)
+        .map(|i| {
+            let score = 0.5 * norm(lats[i], med_lat, max_lat) + 0.5 * norm(costs[i], med_cost, max_cost);
+            (i, score)
+        })
         .collect();
     fisher_yates_shuffle(&mut keyed);
-    keyed.sort_by(|a, b| a.1.cmp(&b.1));
-    keyed.into_iter().map(|(i, _)| i).collect()
+    keyed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut order: Vec<usize> = keyed.into_iter().map(|(i, _)| i).collect();
+    // 冷启动探索:无延迟数据的候选按 10% 概率置顶,避免"无数据 → 无流量 → 永远无数据"。
+    let unknown: Vec<usize> = (0..n).filter(|&i| lats[i].is_none()).collect();
+    if !unknown.is_empty() && rand::random::<f64>() < 0.1 {
+        let pick = unknown[rand::random::<usize>() % unknown.len()];
+        order.retain(|&i| i != pick);
+        order.insert(0, pick);
+    }
+    order
 }
 
-/// 轮询类负载策略:生成候选顺序,第一条为「本次命中的目标」,其后为 failover 次序。
-/// - `simple_mode=true`(对应简单轮询):不看权重,每次按游标逐条轮流。
-/// - `simple_mode=false`(对应加权轮询):按命中顺序排列,再由 resolve_all 按权重轮盘驱动游标。
-/// `group_id` 用于在 `rr_counter` 中取/建该组的游标。
+/// 加权轮询:构造「权重轮盘」[i0×w0, i1×w1, ...],游标取模选中命中项,
+/// 命中项排第一,其余按原始下标排后作为 failover 次序。
+/// `group_id` 用于在 `rr_counter` 中取/建该组的游标(档内轮转互不干扰)。
 fn order_round_robin(
     group_id: i64,
     targets: &[Target],
     rr_counter: &dashmap::DashMap<i64, std::sync::atomic::AtomicU32>,
-    simple_mode: bool,
 ) -> Vec<usize> {
     let n = targets.len();
     if n <= 1 {
         return (0..n).collect();
     }
     use std::sync::atomic::Ordering;
-    let counter = rr_counter.entry(group_id).or_insert_with(|| std::sync::atomic::AtomicU32::new(0));
-    if simple_mode {
-        // 简单轮询:按裸下标轮流。
-        let idx = (counter.fetch_add(1, Ordering::Relaxed) as usize) % n;
-        let mut order: Vec<usize> = (0..n).collect();
-        order.rotate_left(idx);
-        order
-    } else {
-        // 加权轮询:构造「权重轮盘」[i0×w0, i1×w1, ...],游标对该组权重和取模选中命中项。
-        let wheel: Vec<usize> = targets
-            .iter()
-            .enumerate()
-            .flat_map(|(i, t)| std::iter::repeat(i).take(t.weight.max(1) as usize))
-            .collect();
-        if wheel.is_empty() {
-            return (0..n).collect();
-        }
-        let sum = wheel.len() as u64;
-        let pick = (counter.fetch_add(1, Ordering::Relaxed) as u64) % sum;
-        let first = wheel[pick as usize];
-        // 命中项放第一,其余按原始下标靠后(failover 次序)。
-        let mut order: Vec<usize> = vec![first];
-        for i in 0..n {
-            if i != first {
-                order.push(i);
-            }
-        }
-        order
+    let wheel: Vec<usize> = targets
+        .iter()
+        .enumerate()
+        .flat_map(|(i, t)| std::iter::repeat(i).take(t.weight.max(1) as usize))
+        .collect();
+    if wheel.is_empty() {
+        return (0..n).collect();
     }
+    let counter = rr_counter.entry(group_id).or_insert_with(|| std::sync::atomic::AtomicU32::new(0));
+    let sum = wheel.len() as u64;
+    let pick = (counter.fetch_add(1, Ordering::Relaxed) as u64) % sum;
+    let first = wheel[pick as usize];
+    let mut order: Vec<usize> = vec![first];
+    for i in 0..n {
+        if i != first {
+            order.push(i);
+        }
+    }
+    order
 }
 
 #[cfg(test)]
@@ -560,10 +701,16 @@ mod tests {
     fn strategy_from_str_known() {
         assert_eq!(strategy_from_str("weighted_random"), Strategy::WeightedRandom);
         assert_eq!(strategy_from_str("weighted_round_robin"), Strategy::WeightedRoundRobin);
-        assert_eq!(strategy_from_str("round_robin"), Strategy::RoundRobin);
-        assert_eq!(strategy_from_str("priority"), Strategy::Priority);
-        assert_eq!(strategy_from_str("cost_aware"), Strategy::CostAware);
-        assert_eq!(strategy_from_str("latency_aware"), Strategy::LatencyAware);
+        assert_eq!(strategy_from_str("auto"), Strategy::Auto);
+    }
+
+    /// 旧策略名必须映射到语义等价的新策略,保证存量配置不会突变。
+    #[test]
+    fn strategy_from_str_legacy_mapping() {
+        assert_eq!(strategy_from_str("priority"), Strategy::WeightedRandom);
+        assert_eq!(strategy_from_str("round_robin"), Strategy::WeightedRoundRobin);
+        assert_eq!(strategy_from_str("cost_aware"), Strategy::Auto);
+        assert_eq!(strategy_from_str("latency_aware"), Strategy::Auto);
     }
 
     #[test]
@@ -574,60 +721,40 @@ mod tests {
 
     #[test]
     fn strategy_as_str_roundtrip() {
-        let strategies = [Strategy::WeightedRandom, Strategy::WeightedRoundRobin, Strategy::RoundRobin, Strategy::Priority, Strategy::CostAware, Strategy::LatencyAware];
+        let strategies = [Strategy::WeightedRandom, Strategy::WeightedRoundRobin, Strategy::Auto];
         for s in &strategies {
             assert_eq!(strategy_from_str(s.as_str()), *s);
         }
     }
 
-    // ---- order_by_priority ----
+    // ---- priority_tiers(优先级分档) ----
 
     #[test]
-    fn priority_single_target() {
-        let targets = vec![Target { model_id: 1, weight: 100, multiplier: 1.0, cache_enabled: false }];
-        let order = order_by_priority(&targets);
-        assert_eq!(order, vec![0]);
-    }
-
-    #[test]
-    fn priority_descending_by_weight() {
+    fn tiers_group_by_priority_desc() {
         let targets = vec![
-            Target { model_id: 1, weight: 10, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 2, weight: 50, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 3, weight: 30, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, priority: 10, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 3, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 4, weight: 1, priority: 5, multiplier: 1.0, cache_enabled: false },
         ];
-        let order = order_by_priority(&targets);
-        // 50 > 30 > 10 → indices 1, 2, 0
-        assert_eq!(order, vec![1, 2, 0]);
+        let tiers = priority_tiers(&targets);
+        // 档位 10 > 5 > 0,档内保持原序
+        assert_eq!(tiers, vec![vec![1], vec![3], vec![0, 2]]);
     }
 
     #[test]
-    fn priority_equal_weights_stable_order() {
+    fn tiers_single_tier_when_all_equal() {
         let targets = vec![
-            Target { model_id: 1, weight: 100, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 2, weight: 100, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 3, weight: 100, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 1, weight: 1, priority: 3, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, priority: 3, multiplier: 1.0, cache_enabled: false },
         ];
-        let order = order_by_priority(&targets);
-        // 相同权重时保持原序(0,1,2)
-        assert_eq!(order, vec![0, 1, 2]);
+        assert_eq!(priority_tiers(&targets), vec![vec![0, 1]]);
     }
 
     #[test]
-    fn priority_empty_targets() {
+    fn tiers_empty_targets() {
         let targets: Vec<Target> = vec![];
-        let order = order_by_priority(&targets);
-        assert!(order.is_empty());
-    }
-
-    #[test]
-    fn priority_zero_weight() {
-        let targets = vec![
-            Target { model_id: 1, weight: 0, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 2, weight: 50, multiplier: 1.0, cache_enabled: false },
-        ];
-        let order = order_by_priority(&targets);
-        assert_eq!(order, vec![1, 0]);
+        assert!(priority_tiers(&targets).is_empty());
     }
 
     // ---- shuffle_weighted 基本性质 ----
@@ -635,9 +762,9 @@ mod tests {
     #[test]
     fn shuffle_weighted_covers_all() {
         let targets = vec![
-            Target { model_id: 1, weight: 10, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 2, weight: 20, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 3, weight: 30, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 1, weight: 10, priority: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 20, priority: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 3, weight: 30, priority: 0, multiplier: 1.0, cache_enabled: false },
         ];
         let order = shuffle_weighted(&targets);
         assert_eq!(order.len(), 3);
@@ -648,104 +775,16 @@ mod tests {
 
     #[test]
     fn shuffle_weighted_single() {
-        let targets = vec![Target { model_id: 1, weight: 100, multiplier: 1.0, cache_enabled: false }];
+        let targets = vec![Target { model_id: 1, weight: 100, priority: 0, multiplier: 1.0, cache_enabled: false }];
         let order = shuffle_weighted(&targets);
         assert_eq!(order, vec![0]);
     }
 
-    // ---- order_by_cost ----
+    // ---- order_by_auto(智能自适应) ----
 
     fn mdl(upstream: &str, input_price: Option<f64>, output_price: Option<f64>) -> ModelDef {
         ModelDef { provider: "p".into(), upstream_model: upstream.into(), label: None, input_price, output_price, context_length: None, tags: None }
     }
-
-    #[test]
-    fn cost_order_ascending_by_price() {
-        let mut models = HashMap::new();
-        models.insert(1, mdl("gpt-4o-mini", None, None)); // 0.15+0.6 = 0.75
-        models.insert(2, mdl("gpt-4o", None, None)); // 2.5+10.0 = 12.5
-        models.insert(3, mdl("custom-x", None, None)); // 未定价
-        let targets = vec![
-            Target { model_id: 2, weight: 1, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 3, weight: 1, multiplier: 1.0, cache_enabled: false },
-        ];
-        let order = order_by_cost(&targets, &models);
-        assert_eq!(order, vec![1, 0, 2]);
-    }
-
-    #[test]
-    fn cost_order_multiplier_aware() {
-        let mut models = HashMap::new();
-        models.insert(1, mdl("gpt-4o-mini", None, None)); // 0.75 × 1.0
-        models.insert(2, mdl("gpt-4o", None, None)); // 12.5 × 0.05 = 0.625
-        let targets = vec![
-            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 2, weight: 1, multiplier: 0.05, cache_enabled: false },
-        ];
-        let order = order_by_cost(&targets, &models);
-        assert_eq!(order, vec![1, 0]);
-    }
-
-    #[test]
-    fn cost_order_unpriced_last() {
-        let mut models = HashMap::new();
-        models.insert(1, mdl("custom-a", None, None));
-        models.insert(2, mdl("gpt-4o-mini", None, None));
-        // 模型未登记也应视为未定价
-        let targets = vec![
-            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 2, weight: 1, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 99, weight: 1, multiplier: 1.0, cache_enabled: false },
-        ];
-        let order = order_by_cost(&targets, &models);
-        // 唯一定价者第一;两个未定价(INFINITY)之间同价随机,只能断言集合
-        assert_eq!(order[0], 1);
-        let mut tail = order[1..].to_vec();
-        tail.sort();
-        assert_eq!(tail, vec![0, 2]);
-    }
-
-    #[test]
-    fn cost_order_covers_all() {
-        let mut models = HashMap::new();
-        models.insert(1, mdl("gpt-4o-mini", None, None));
-        models.insert(2, mdl("gpt-4o", None, None));
-        models.insert(3, mdl("custom-x", None, None));
-        let targets = vec![
-            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 2, weight: 1, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 3, weight: 1, multiplier: 1.0, cache_enabled: false },
-        ];
-        let order = order_by_cost(&targets, &models);
-        let mut sorted = order.clone();
-        sorted.sort();
-        assert_eq!(sorted, vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn cost_order_manual_price_overrides() {
-        let mut models = HashMap::new();
-        // 手动定价 0.0/0.0 = 免费,应排最前(而非回退内置表)
-        models.insert(1, mdl("gpt-4o", Some(0.0), Some(0.0)));
-        models.insert(2, mdl("gpt-4o-mini", None, None)); // 0.75
-        let targets = vec![
-            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 2, weight: 1, multiplier: 1.0, cache_enabled: false },
-        ];
-        let order = order_by_cost(&targets, &models);
-        assert_eq!(order, vec![0, 1]);
-    }
-
-    #[test]
-    fn cost_order_empty_targets() {
-        let models: HashMap<i64, ModelDef> = HashMap::new();
-        let targets: Vec<Target> = vec![];
-        let order = order_by_cost(&targets, &models);
-        assert!(order.is_empty());
-    }
-
-    // ---- order_by_latency ----
 
     fn lat_map(pairs: &[(&str, u64)]) -> dashmap::DashMap<String, u64> {
         let m = dashmap::DashMap::new();
@@ -755,72 +794,215 @@ mod tests {
         m
     }
 
+    fn prov_model(prov: &str, upstream: &str) -> ModelDef {
+        let mut m = mdl(upstream, None, None);
+        m.provider = prov.into();
+        m
+    }
+
     #[test]
-    fn latency_order_ascending_by_p50() {
+    fn auto_prefers_fastest_when_cost_equal() {
         let mut models = HashMap::new();
-        for (id, prov, name) in [(1i64, "p-openai", "gpt-4o"), (2, "p-deepseek", "deepseek-chat"), (3, "p-anthropic", "claude")] {
-            let mut m = mdl(name, None, None);
-            m.provider = prov.into();
-            models.insert(id, m);
+        models.insert(1, prov_model("p-slow", "gpt-4o-mini"));
+        models.insert(2, prov_model("p-fast", "gpt-4o-mini"));
+        let lat = lat_map(&[("p-slow", 800), ("p-fast", 200)]);
+        let targets = vec![
+            Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+        ];
+        let order = order_by_auto(&targets, &models, &lat);
+        assert_eq!(order[0], 1);
+    }
+
+    #[test]
+    fn auto_prefers_cheaper_when_latency_equal() {
+        let mut models = HashMap::new();
+        models.insert(1, prov_model("p1", "gpt-4o"));
+        models.insert(2, prov_model("p2", "gpt-4o-mini"));
+        let lat = lat_map(&[("p1", 300), ("p2", 300)]);
+        let targets = vec![
+            Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+        ];
+        let order = order_by_auto(&targets, &models, &lat);
+        assert_eq!(order[0], 1);
+    }
+
+    /// 回归:无数据候选不能被永久排在最后(否则新上游永远拿不到流量 → 冷启动死锁)。
+    #[test]
+    fn auto_cold_start_candidate_can_be_selected() {
+        let mut models = HashMap::new();
+        models.insert(1, prov_model("p-known", "gpt-4o-mini"));
+        models.insert(2, prov_model("p-new", "gpt-4o-mini"));
+        let lat = lat_map(&[("p-known", 800)]); // p-new 无数据
+        let targets = vec![
+            Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+        ];
+        let mut new_first = 0;
+        for _ in 0..200 {
+            if order_by_auto(&targets, &models, &lat)[0] == 1 {
+                new_first += 1;
+            }
         }
-        let lat = lat_map(&[("p-openai", 800), ("p-deepseek", 200), ("p-anthropic", 450)]);
-        let targets = vec![
-            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 2, weight: 1, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 3, weight: 1, multiplier: 1.0, cache_enabled: false },
-        ];
-        let order = order_by_latency(&targets, &models, &lat);
-        // P50 升序:deepseek(200) < anthropic(450) < openai(800)
-        assert_eq!(order, vec![1, 2, 0]);
+        assert!(new_first > 0, "无数据候选 200 次里一次都没被选中,冷启动死锁复现");
     }
 
     #[test]
-    fn latency_order_no_data_last() {
+    fn auto_all_unknown_covers_all() {
         let mut models = HashMap::new();
-        let mut m1 = mdl("gpt-4o", None, None);
-        m1.provider = "p-openai".into();
-        models.insert(1, m1);
-        let mut m2 = mdl("custom-x", None, None);
-        m2.provider = "p-none".into(); // 快照里没有该供应商
-        models.insert(2, m2);
-        let lat = lat_map(&[("p-openai", 800)]);
-        let targets = vec![
-            Target { model_id: 2, weight: 1, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
-        ];
-        let order = order_by_latency(&targets, &models, &lat);
-        // 有数据的在前,无数据(u64::MAX)殿后
-        assert_eq!(order, vec![1, 0]);
-    }
-
-    #[test]
-    fn latency_order_empty_snapshot_covers_all() {
-        let mut models = HashMap::new();
-        let mut m1 = mdl("gpt-4o", None, None);
-        m1.provider = "p-openai".into();
-        models.insert(1, m1);
-        let mut m2 = mdl("deepseek-chat", None, None);
-        m2.provider = "p-deepseek".into();
-        models.insert(2, m2);
+        models.insert(1, prov_model("p1", "gpt-4o-mini"));
+        models.insert(2, prov_model("p2", "gpt-4o-mini"));
         let lat = dashmap::DashMap::new();
         let targets = vec![
-            Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false },
-            Target { model_id: 2, weight: 1, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
         ];
-        let order = order_by_latency(&targets, &models, &lat);
-        // 全部无数据:同值随机,但必须覆盖全部索引
-        let mut sorted = order.clone();
+        let mut sorted = order_by_auto(&targets, &models, &lat);
         sorted.sort();
         assert_eq!(sorted, vec![0, 1]);
     }
 
     #[test]
-    fn latency_order_single_target() {
-        let models = HashMap::new();
+    fn auto_multiplier_affects_cost() {
+        let mut models = HashMap::new();
+        models.insert(1, prov_model("p1", "gpt-4o"));
+        models.insert(2, prov_model("p2", "gpt-4o"));
+        let lat = lat_map(&[("p1", 300), ("p2", 300)]);
+        let targets = vec![
+            Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, priority: 0, multiplier: 0.1, cache_enabled: false },
+        ];
+        assert_eq!(order_by_auto(&targets, &models, &lat)[0], 1);
+    }
+
+    #[test]
+    fn auto_empty_and_single() {
+        let models: HashMap<i64, ModelDef> = HashMap::new();
         let lat = dashmap::DashMap::new();
-        let targets = vec![Target { model_id: 1, weight: 1, multiplier: 1.0, cache_enabled: false }];
-        let order = order_by_latency(&targets, &models, &lat);
-        assert_eq!(order, vec![0]);
+        assert!(order_by_auto(&[], &models, &lat).is_empty());
+        let one = vec![Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false }];
+        assert_eq!(order_by_auto(&one, &models, &lat), vec![0]);
+    }
+
+    // ---- resolve_priority(两级寻址) ----
+
+    /// 构造两组路由的测试路由图:
+    /// 组 1:同名 "pub" → 上游 A(openai/http://a/ma);组 2:同名 "pub" → 上游 B(anthropic/http://b/mb);
+    /// 组 2 另有 "only-b" → 上游 B。组 1 策略 priority,组 2 策略 round_robin(验证组级策略各自生效)。
+    fn two_level_routing() -> Routing {
+        let conn = |kind: ProviderKind, base: &str| ProviderConn {
+            kind,
+            base_url: base.to_string(),
+            api_key: None,
+            concurrency: None,
+            headers: Vec::new(),
+        };
+        let mut providers = HashMap::new();
+        providers.insert("pa".to_string(), conn(ProviderKind::Openai, "http://a"));
+        providers.insert("pb".to_string(), conn(ProviderKind::Anthropic, "http://b"));
+        let mut models = HashMap::new();
+        let mut ma = mdl("ma", None, None);
+        ma.provider = "pa".into();
+        models.insert(1i64, ma);
+        let mut mb = mdl("mb", None, None);
+        mb.provider = "pb".into();
+        models.insert(2i64, mb);
+        let mut g1: HashMap<String, Vec<Target>> = HashMap::new();
+        g1.insert("pub".to_string(), vec![Target { model_id: 1, weight: 100, priority: 0, multiplier: 1.0, cache_enabled: false }]);
+        let mut g2: HashMap<String, Vec<Target>> = HashMap::new();
+        g2.insert("pub".to_string(), vec![Target { model_id: 2, weight: 100, priority: 0, multiplier: 1.0, cache_enabled: false }]);
+        g2.insert("only-b".to_string(), vec![Target { model_id: 2, weight: 100, priority: 0, multiplier: 1.0, cache_enabled: false }]);
+        let mut groups = HashMap::new();
+        groups.insert(1i64, g1);
+        groups.insert(2i64, g2);
+        let mut group_strategy = HashMap::new();
+        group_strategy.insert(1i64, Strategy::WeightedRandom);
+        group_strategy.insert(2i64, Strategy::WeightedRoundRobin);
+        Routing {
+            providers,
+            models,
+            group_names: HashMap::new(),
+            group_strategy,
+            time_rules: HashMap::new(),
+            groups,
+            user_group_models: HashMap::new(),
+        }
+    }
+
+    fn rr() -> dashmap::DashMap<i64, std::sync::atomic::AtomicU32> {
+        dashmap::DashMap::new()
+    }
+
+    #[test]
+    fn priority_first_group_wins_then_failover_chain() {
+        let r = two_level_routing();
+        // 用户组绑定 [组1, 组2]:首候选必须来自高优先级的组 1,组 2 拼接为容灾链。
+        let out = r.resolve_priority(&[1, 2], "pub", &rr(), &dashmap::DashMap::new(), 0, None).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].upstream_model, "ma");
+        assert_eq!(out[1].upstream_model, "mb");
+    }
+
+    #[test]
+    fn priority_order_flips_with_binding_order() {
+        let r = two_level_routing();
+        // 绑定顺序反过来 [组2, 组1]:首候选来自组 2。
+        let out = r.resolve_priority(&[2, 1], "pub", &rr(), &dashmap::DashMap::new(), 0, None).unwrap();
+        assert_eq!(out[0].upstream_model, "mb");
+        assert_eq!(out[1].upstream_model, "ma");
+    }
+
+    #[test]
+    fn priority_skips_group_without_model() {
+        let r = two_level_routing();
+        // "only-b" 只在组 2:即使组 1 优先级更高,也直接落到组 2。
+        let out = r.resolve_priority(&[1, 2], "only-b", &rr(), &dashmap::DashMap::new(), 0, None).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].upstream_model, "mb");
+    }
+
+    #[test]
+    fn priority_empty_groups_not_allowed() {
+        let r = two_level_routing();
+        match r.resolve_priority(&[], "pub", &rr(), &dashmap::DashMap::new(), 0, None) {
+            Err(e) => assert!(matches!(e, ApiError::ModelNotAllowed(_))),
+            Ok(_) => panic!("expected ModelNotAllowed"),
+        }
+    }
+
+    #[test]
+    fn priority_unknown_model_not_found() {
+        let r = two_level_routing();
+        match r.resolve_priority(&[1, 2], "nope", &rr(), &dashmap::DashMap::new(), 0, None) {
+            Err(e) => assert!(matches!(e, ApiError::ModelNotFound(_))),
+            Ok(_) => panic!("expected ModelNotFound"),
+        }
+    }
+
+    #[test]
+    fn priority_cross_group_dedup_same_upstream() {
+        // 两组指向同一 (kind, base_url, upstream_model):只保留高优先级组的那份。
+        let mut r = two_level_routing();
+        // 把组 2 的 "pub" 也指到模型 1(供应商 pa/http://a/ma)。
+        r.groups.get_mut(&2).unwrap().insert(
+            "pub".to_string(),
+            vec![Target { model_id: 1, weight: 100, priority: 0, multiplier: 1.0, cache_enabled: false }],
+        );
+        let out = r.resolve_priority(&[1, 2], "pub", &rr(), &dashmap::DashMap::new(), 0, None).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].upstream_model, "ma");
+    }
+
+    #[test]
+    fn union_names_and_cards_merge() {
+        let r = two_level_routing();
+        let names = r.model_names_union(&[1, 2]);
+        assert_eq!(names, vec!["only-b".to_string(), "pub".to_string()]);
+        let cards = r.model_cards_union(&[1, 2]);
+        let pub_card = cards.iter().find(|c| c.name == "pub").unwrap();
+        // 同名合并:上游数 = 组1(1) + 组2(1)。
+        assert_eq!(pub_card.upstreams, 2);
     }
 }
 

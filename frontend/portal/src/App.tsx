@@ -30,6 +30,13 @@ const APP_BASE = (() => {
 
 const fmtDay = (ts: number) => { const d = new Date(ts * 1000); return `${d.getMonth() + 1}/${d.getDate()}`; };
 
+/** Key 脱敏展示:仅保留前缀与后缀,中间以 **** 遮蔽(与管理端同一规则)。 */
+function maskKey(plain: string): string {
+  const n = plain.length;
+  if (n <= 12) return n <= 6 ? "*".repeat(n) : plain.slice(0, 4) + "****" + plain.slice(n - 2);
+  return plain.slice(0, 12) + "****" + plain.slice(n - 4);
+}
+
 /** 复制到剪贴板,并给出 ~1.4s 的“已复制”反馈状态;复制失败(HTTP 环境异常等)不误报。 */
 function useCopy(): [boolean, (t: string) => void] {
   const [copied, setCopied] = useState(false);
@@ -1112,7 +1119,9 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
           <div className="mb-1 text-xs text-muted-foreground">API Key</div>
           {active?.key_plain ? (
             <div className="flex items-center gap-2">
-              <div className="mono flex-1 rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all">{active.key_prefix}</div>
+              <div className="mono flex-1 rounded-lg border bg-muted/50 px-3 py-2 text-xs break-all" title="仅保留前缀与后缀,完整 Key 点右侧复制">
+                {maskKey(active.key_plain)}
+              </div>
               <CopyButton value={active.key_plain} label="复制 API Key" />
             </div>
           ) : (

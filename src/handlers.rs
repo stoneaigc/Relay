@@ -146,7 +146,8 @@ pub async fn list_models(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let auth = authenticate(&state, &headers)?;
-    let names = state.routing.load().group_model_names(auth.user.group());
+    let routing = state.routing.load();
+    let names = routing.model_names_union(&auth.user.resolve_group_ids(&routing));
     // 分级密钥管控:Key 被限制模型范围时,/v1/models 只返回白名单内的模型。
     let names: Vec<&String> = match &auth.key_scope {
         Some(allowed) => names.iter().filter(|n| allowed.iter().any(|a| a == *n)).collect(),
@@ -435,9 +436,11 @@ pub async fn run_chat(
         }
     };
 
-    // 路由解析:按用户所在模型组,把对外模型名解析到全部候选上游。
-    // failover:依次尝试每个候选;仅可重试错误(Unavailable)才切换到下一目标。
-    let candidates = match state.routing.load().resolve_all(user.group(), &model, &state.round_robin, &state.latency_p50, state.tz_offset_secs, None) {
+    // 路由解析:两级寻址——先按用户组绑定的有序模型组(或回落用户直属组)选定组,
+    // 再在组内按该组负载策略把对外模型名解析到全部候选上游。
+    // failover:依次尝试每个候选(跨组按组优先级拼接);仅可重试错误(Unavailable)才切换到下一目标。
+    let routing = state.routing.load();
+    let candidates = match routing.resolve_priority(&user.resolve_group_ids(&routing), &model, &state.round_robin, &state.latency_p50, state.tz_offset_secs, None) {
         Ok(c) => c,
         Err(e) => {
             fail_global!();
@@ -1149,7 +1152,9 @@ pub async fn run_messages(
         None => { fail_global!(); return Err(ApiError::TooManyRequests); }
     };
 
-    let candidates = match state.routing.load().resolve_all(user.group(), &model, &state.round_robin, &state.latency_p50, state.tz_offset_secs, None) {
+    // 两级寻址:先按用户组绑定的有序模型组(或回落用户直属组)选定组,再在组内按该组负载策略解析候选。
+    let routing = state.routing.load();
+    let candidates = match routing.resolve_priority(&user.resolve_group_ids(&routing), &model, &state.round_robin, &state.latency_p50, state.tz_offset_secs, None) {
         Ok(c) => c,
         Err(e) => { fail_global!(); return Err(e); }
     };

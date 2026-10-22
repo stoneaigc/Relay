@@ -489,7 +489,7 @@ pub async fn create_user(
         .or(ug.as_ref().and_then(|g| g.tpm_limit))
         .map(|v| v.max(0) as u32)
         .unwrap_or(default_tpm);
-    let us = Arc::new(UserState::new(id, grant, 0, limit, 0, 1.0, gid.unwrap_or(0)));
+    let us = Arc::new(UserState::new(id, grant, 0, limit, 0, 1.0, gid.unwrap_or(0), ugid.unwrap_or(0)));
     us.set_limits(rpm, tpm);
     us.set_budgets(
         body.budget_daily_tokens
@@ -729,6 +729,22 @@ pub struct UserGroupBody {
     pub tpm_limit: Option<i64>,
     pub budget_daily_tokens: Option<i64>,
     pub budget_monthly_tokens: Option<i64>,
+    /// 绑定的有序模型组 id 列表(下标即优先级,0=最高);None=不改动绑定。
+    /// 非空绑定后,组内用户请求按两级寻址:先按此优先级选组,再在组内按该组负载策略分流。
+    pub model_group_ids: Option<Vec<i64>>,
+}
+
+/// 校验绑定的模型组 id 全部存在;通过则写库并重建内存路由图。
+async fn apply_model_group_bindings(state: &AppState, user_group_id: i64, ids: &[i64]) -> Result<(), ApiError> {
+    for gid in ids {
+        if !state.routing.load().groups.contains_key(gid) {
+            return Err(ApiError::BadRequest(format!("模型组不存在: {gid}")));
+        }
+    }
+    storage::set_user_group_model_groups(&state.db, user_group_id, ids)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    rebuild_routing(state).await
 }
 
 /// POST /admin/user-groups
@@ -753,6 +769,9 @@ pub async fn create_user_group(
     )
     .await
     .map_err(|_| ApiError::BadRequest("用户组名称已存在".into()))?;
+    if let Some(ids) = &body.model_group_ids {
+        apply_model_group_bindings(&state, id, ids).await?;
+    }
     Ok(Json(json!({ "id": id })))
 }
 
@@ -780,6 +799,9 @@ pub async fn update_user_group(
     )
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if let Some(ids) = &body.model_group_ids {
+        apply_model_group_bindings(&state, id, ids).await?;
+    }
     // 组限额变更 → 组内所有用户的内存限额按解析链重算。
     let members = current_group_members(&state, id).await?;
     recompute_members(&state, members, Some(id)).await?;
@@ -798,6 +820,8 @@ pub async fn delete_user_group(
     storage::delete_user_group(&state.db, id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // 绑定已随组删除 → 重建路由图。
+    rebuild_routing(&state).await?;
     // 组员已全部解挂 → 内存限额回落全局默认。
     recompute_members(&state, members, None).await?;
     Ok(Json(json!({ "ok": true })))
@@ -831,6 +855,8 @@ async fn recompute_members(
     };
     for uid in members {
         let Some(u) = state.user(&uid) else { continue };
+        // 同步内存中的用户组归属(路由两级寻址第一级依赖它)。
+        u.set_user_group(group_id.unwrap_or(0));
         let row = storage::get_user(&state.db, uid)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -907,7 +933,7 @@ pub async fn user_usage(
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
     let (page, page_size, offset) = normalize_page(q.page, q.page_size);
-    let (rows, total) = storage::usage_rows_page(&state.db, Some(id), page_size as i64, offset as i64)
+    let (rows, total) = storage::usage_rows_page(&state.db, Some(id), page_size as i64, offset as i64, None, None, None, None)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({
@@ -919,17 +945,46 @@ pub async fn user_usage(
     })))
 }
 
-/// GET /admin/usage?page=&page_size= —— 全局用量
+/// GET /admin/usage?page=&page_size= —— 全局用量(支持 模型/状态/时间区间 多维筛选)。
+#[derive(Deserialize)]
+pub struct UsageQuery {
+    #[serde(default)]
+    pub page: Option<u32>,
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    /// 精确模型名。
+    #[serde(default)]
+    pub model: Option<String>,
+    /// true=仅成功(2xx/3xx),false=仅失败;缺省=全部。
+    #[serde(default)]
+    pub status: Option<bool>,
+    /// Unix 秒区间(含边界)。
+    #[serde(default)]
+    pub start: Option<i64>,
+    #[serde(default)]
+    pub end: Option<i64>,
+}
+
+/// GET /admin/usage —— 全局用量明细。
 pub async fn global_usage(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    axum::extract::Query(q): axum::extract::Query<PageQuery>,
+    axum::extract::Query(q): axum::extract::Query<UsageQuery>,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
     let (page, page_size, offset) = normalize_page(q.page, q.page_size);
-    let (rows, total) = storage::usage_rows_page(&state.db, None, page_size as i64, offset as i64)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let (rows, total) = storage::usage_rows_page(
+        &state.db,
+        None,
+        page_size as i64,
+        offset as i64,
+        q.model.as_deref(),
+        q.status,
+        q.start,
+        q.end,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({
         "data": rows,
         "page": page,
@@ -1940,6 +1995,9 @@ pub async fn list_routes(
 pub struct AddRoute {
     pub public_name: String,
     pub model_id: i64,
+    /// 优先级档位(数值越大越优先;缺省 0)。同档内才按组策略分流。
+    #[serde(default)]
+    pub priority: Option<i64>,
     pub weight: Option<i64>,
     pub multiplier: Option<f64>,
     /// 路由级语义缓存 opt-in(缺省 false,与全局开关/确定性判定 AND)。
@@ -1963,6 +2021,7 @@ pub async fn add_route(
         group_id,
         body.public_name.trim(),
         body.model_id,
+        body.priority.unwrap_or(0).max(0),
         body.weight.unwrap_or(100),
         body.multiplier.unwrap_or(1.0),
         body.cache.unwrap_or(false),
@@ -1992,7 +2051,7 @@ pub async fn add_routes_batch(
     let mut ids = Vec::new();
     for r in &body.routes {
         if r.public_name.trim().is_empty() { continue; }
-        let id = storage::add_route(&state.db, group_id, r.public_name.trim(), r.model_id, r.weight.unwrap_or(100), r.multiplier.unwrap_or(1.0), r.cache.or(body.cache).unwrap_or(false))
+        let id = storage::add_route(&state.db, group_id, r.public_name.trim(), r.model_id, r.priority.unwrap_or(0).max(0), r.weight.unwrap_or(100), r.multiplier.unwrap_or(1.0), r.cache.or(body.cache).unwrap_or(false))
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
         ids.push(id);
@@ -2008,6 +2067,9 @@ pub struct PatchRoute {
     pub public_name: Option<String>,
     #[serde(default)]
     pub model_id: Option<i64>,
+    /// 优先级档位(缺省=不改动)。
+    #[serde(default)]
+    pub priority: Option<i64>,
     #[serde(default)]
     pub weight: Option<i64>,
     #[serde(default)]
@@ -2029,6 +2091,11 @@ pub async fn update_route(
     if body.public_name.is_some() && public_name.is_none() {
         return Err(ApiError::BadRequest("public_name cannot be empty".into()));
     }
+    if let Some(p) = body.priority {
+        if p < 0 {
+            return Err(ApiError::BadRequest("priority must be >= 0".into()));
+        }
+    }
     if let Some(w) = body.weight {
         if w < 0 {
             return Err(ApiError::BadRequest("weight must be >= 0".into()));
@@ -2039,10 +2106,10 @@ pub async fn update_route(
             return Err(ApiError::BadRequest("multiplier must be a finite number >= 0".into()));
         }
     }
-    if body.public_name.is_none() && body.model_id.is_none() && body.weight.is_none() && body.multiplier.is_none() && body.cache.is_none() {
+    if body.public_name.is_none() && body.model_id.is_none() && body.priority.is_none() && body.weight.is_none() && body.multiplier.is_none() && body.cache.is_none() {
         return Err(ApiError::BadRequest("at least one field required".into()));
     }
-    storage::patch_route(&state.db, id, public_name, body.model_id, body.weight, body.multiplier, body.cache)
+    storage::patch_route(&state.db, id, public_name, body.model_id, body.priority, body.weight, body.multiplier, body.cache)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;
@@ -2171,6 +2238,9 @@ pub struct ImportRoute {
     pub kind: String,
     pub base_url: String,
     pub upstream_model: String,
+    /// 优先级档位(缺省 0,兼容旧导出 JSON)。
+    #[serde(default)]
+    pub priority: i64,
     #[serde(default = "import_default_weight")]
     pub weight: i64,
     #[serde(default = "import_default_multiplier")]
@@ -2203,7 +2273,7 @@ pub struct ImportBody {
 struct ResolvedGroup {
     name: String,
     strategy: String,
-    routes: Vec<(String, i64, i64, f64, bool)>,
+    routes: Vec<(String, i64, i64, i64, f64, bool)>,
     rules: Vec<storage::TimeRuleInput>,
     missing: Vec<Value>,
     action: &'static str,
@@ -2233,7 +2303,7 @@ async fn resolve_import(state: &AppState, body: &ImportBody) -> Result<Vec<Resol
                 .await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             match model_id {
-                Some(mid) => routes.push((pn, mid, r.weight, r.multiplier, r.cache.unwrap_or(false))),
+                Some(mid) => routes.push((pn, mid, r.priority.max(0), r.weight, r.multiplier, r.cache.unwrap_or(false))),
                 None => missing.push(json!({
                     "public_name": pn, "kind": r.kind,
                     "base_url": r.base_url, "upstream_model": r.upstream_model,
@@ -2727,16 +2797,45 @@ pub async fn save_portal_settings(
 
 // ---- 分级密钥管控:门户用户 API Key 的范围配置/审批/吊销(仅管理员可操作) ----
 
-/// GET /admin/api/keys —— 全量用户 Key 列表(明文/哈希不回显)。
+/// GET /admin/api/keys 的查询参数(分页 + 状态/属主过滤)。
+#[derive(Deserialize)]
+pub struct KeysQuery {
+    #[serde(default)]
+    pub page: Option<u32>,
+    #[serde(default)]
+    pub page_size: Option<u32>,
+    /// 全部 | enabled(启用) | pending(待审批) | revoked(已吊销)。
+    #[serde(default)]
+    pub status: Option<String>,
+    /// 属主用户名/手机号模糊搜索。
+    #[serde(default)]
+    pub kw: Option<String>,
+}
+
+/// GET /admin/api/keys —— 用户 Key 分页列表(明文/哈希不回显,仅返回脱敏形态)。
 pub async fn list_all_keys(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<KeysQuery>,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
-    let items = storage::list_all_keys(&state.db)
+    let status = match q.status.as_deref() {
+        Some("enabled") | Some("0") => Some(0i64),
+        Some("pending") | Some("1") => Some(1),
+        Some("revoked") | Some("2") => Some(2),
+        _ => None,
+    };
+    let (page, page_size, offset) = normalize_page(q.page, q.page_size);
+    let (items, total) = storage::list_all_keys_page(&state.db, status, q.kw.as_deref(), page_size as i64, offset as i64)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(json!({ "data": items })))
+    Ok(Json(json!({
+        "data": items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages(total, page_size),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -2800,14 +2899,14 @@ pub async fn patch_key(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// DELETE /admin/api/keys/:id —— 管理员吊销用户 Key,即时失效。
+/// DELETE /admin/api/keys/:id —— 管理员吊销用户 Key:硬删除(密钥行移除,即时且不可恢复)。
 pub async fn revoke_key_admin(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
-    if let Some(h) = storage::revoke_key_by_id(&state.db, &id)
+    if let Some(h) = storage::delete_key_by_id(&state.db, &id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
     {

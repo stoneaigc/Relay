@@ -161,6 +161,24 @@ pub fn generate_key() -> (String, String, String) {
     (plaintext, hash, prefix)
 }
 
+/// 密钥脱敏展示:仅保留前缀与后缀,中间以 **** 遮蔽(行业通用形态,如 rk_live_ab12****9f2e)。
+/// 过短(≤12 字符)的串退化为前 4 后 2,避免遮蔽后剩余信息量不足或负长度。
+pub fn mask_key(plain: &str) -> String {
+    let chars: Vec<char> = plain.chars().collect();
+    let n = chars.len();
+    if n <= 12 {
+        if n <= 6 {
+            return "*".repeat(n);
+        }
+        let head: String = chars[..4].iter().collect();
+        let tail: String = chars[n - 2..].iter().collect();
+        return format!("{}****{}", head, tail);
+    }
+    let head: String = chars[..12].iter().collect();
+    let tail: String = chars[n - 4..].iter().collect();
+    format!("{}****{}", head, tail)
+}
+
 /// 生成 64 位十六进制强随机密钥(32 字节熵),用于 JWT 签名(零配置启动时自动生成并持久化)。
 pub fn generate_jwt_secret() -> String {
     use rand::RngCore;
@@ -317,6 +335,10 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE group_routes ADD COLUMN IF NOT EXISTS cache_enabled BIGINT NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
+        // 路由优先级档位(数值越大越优先;旧库补列)。
+        let _ = q!("ALTER TABLE group_routes ADD COLUMN IF NOT EXISTS priority BIGINT NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
         // 周期预算(charged tokens,可空=不限)。
         let _ = q!("ALTER TABLE users ADD COLUMN IF NOT EXISTS budget_daily_tokens BIGINT")
             .execute(pool)
@@ -392,6 +414,10 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE group_routes ADD COLUMN cache_enabled INTEGER NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
+        // 路由优先级档位(旧库补列,已存在则忽略错误)。
+        let _ = q!("ALTER TABLE group_routes ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
         // 请求链路:旧库补 request_id 列(已存在则忽略错误)。
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN request_id TEXT")
             .execute(pool)
@@ -423,6 +449,34 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
             .execute(pool)
             .await;
     }
+    // 用户组 ↔ 模型组绑定表(两种后端同语法;旧库补建,已存在则跳过)。
+    let _ = q!(
+        "CREATE TABLE IF NOT EXISTS user_group_model_groups (
+          user_group_id BIGINT NOT NULL,
+          group_id      BIGINT NOT NULL,
+          priority      BIGINT NOT NULL DEFAULT 0,
+          created_at    TEXT NOT NULL,
+          UNIQUE (user_group_id, group_id)
+        )"
+    )
+    .execute(pool)
+    .await;
+    // 负载策略收敛迁移(幂等):旧「priority」策略把 weight 当优先级用,
+    // 迁移为「priority 路由字段 + weighted_random」;cost/latency 合并为 auto;round_robin 并入加权轮询。
+    // 先迁移路由字段再改策略串,保证二次启动时条件不再命中。
+    let _ = q!("UPDATE group_routes SET priority = weight \
+                WHERE group_id IN (SELECT id FROM model_groups WHERE strategy = 'priority')")
+        .execute(pool)
+        .await;
+    let _ = q!("UPDATE model_groups SET strategy = 'weighted_random' WHERE strategy = 'priority'")
+        .execute(pool)
+        .await;
+    let _ = q!("UPDATE model_groups SET strategy = 'auto' WHERE strategy IN ('cost_aware', 'latency_aware')")
+        .execute(pool)
+        .await;
+    let _ = q!("UPDATE model_groups SET strategy = 'weighted_round_robin' WHERE strategy = 'round_robin'")
+        .execute(pool)
+        .await;
     // api_keys.key_plain 旧明文迁移:统一加密为字段密文(幂等;已加密/NULL 行跳过)。
     // 0.3.4 之前为明文或 NULL;NULL(0.3.4 清空过)无法恢复,门户端以掩码+「刷新 Key」兜底。
     let legacy = q!("SELECT id, key_plain FROM api_keys WHERE key_plain IS NOT NULL")
@@ -525,7 +579,7 @@ pub async fn load_into_memory(
     keys: &DashMap<String, KeyEntry>,
 ) -> anyhow::Result<()> {
     let rows = q!(
-        "SELECT u.id, u.status, u.token_balance, u.token_used_total, u.concurrency_limit, u.bill_multiplier, u.group_id, u.rpm_limit, u.tpm_limit, u.budget_daily_tokens, u.budget_monthly_tokens, \
+        "SELECT u.id, u.status, u.token_balance, u.token_used_total, u.concurrency_limit, u.bill_multiplier, u.group_id, u.user_group_id, u.rpm_limit, u.tpm_limit, u.budget_daily_tokens, u.budget_monthly_tokens, \
                 ug.max_concurrency AS ug_concurrency, ug.rpm_limit AS ug_rpm, ug.tpm_limit AS ug_tpm, \
                 ug.budget_daily_tokens AS ug_budget_daily, ug.budget_monthly_tokens AS ug_budget_monthly \
          FROM users u LEFT JOIN user_groups ug ON ug.id = u.user_group_id",
@@ -540,6 +594,7 @@ pub async fn load_into_memory(
         let cl: Option<i64> = r.get("concurrency_limit");
         let mult: f64 = r.try_get("bill_multiplier").unwrap_or(1.0);
         let group_id: i64 = r.try_get::<Option<i64>, _>("group_id").ok().flatten().unwrap_or(0);
+        let user_group_id: i64 = r.try_get::<Option<i64>, _>("user_group_id").ok().flatten().unwrap_or(0);
         let ug_cl = r.try_get::<Option<i64>, _>("ug_concurrency").ok().flatten();
         let ug_rpm = r.try_get::<Option<i64>, _>("ug_rpm").ok().flatten();
         let ug_tpm = r.try_get::<Option<i64>, _>("ug_tpm").ok().flatten();
@@ -548,7 +603,7 @@ pub async fn load_into_memory(
         let limit = if cl_resolved == 0 { u32::MAX } else { cl_resolved };
         let rpm = cl_free_resolve(r.try_get::<Option<i64>, _>("rpm_limit").ok().flatten(), ug_rpm, cfg.defaults.rpm_limit);
         let tpm = cl_free_resolve(r.try_get::<Option<i64>, _>("tpm_limit").ok().flatten(), ug_tpm, cfg.defaults.tpm_limit);
-        let us = Arc::new(UserState::new(id, balance, used_total, limit, status as u8, mult, group_id));
+        let us = Arc::new(UserState::new(id, balance, used_total, limit, status as u8, mult, group_id, user_group_id));
         us.set_limits(rpm, tpm);
         let ug_bd = r.try_get::<Option<i64>, _>("ug_budget_daily").ok().flatten();
         let ug_bm = r.try_get::<Option<i64>, _>("ug_budget_monthly").ok().flatten();
@@ -1021,19 +1076,20 @@ pub async fn active_group_id(pool: &Db) -> anyhow::Result<Option<i64>> {
     Ok(row.map(|r| r.get::<i64, _>("id")))
 }
 
-pub async fn add_route(pool: &Db, group_id: i64, public_name: &str, model_id: i64, weight: i64, multiplier: f64, cache_enabled: bool) -> anyhow::Result<i64> {
+pub async fn add_route(pool: &Db, group_id: i64, public_name: &str, model_id: i64, priority: i64, weight: i64, multiplier: f64, cache_enabled: bool) -> anyhow::Result<i64> {
     let r = q!(
-        "INSERT INTO group_routes (group_id, public_name, model_id, weight, multiplier, cache_enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id")
-        .bind(group_id).bind(public_name).bind(model_id).bind(weight).bind(multiplier).bind(cache_enabled as i64).bind(now_iso())
+        "INSERT INTO group_routes (group_id, public_name, model_id, priority, weight, multiplier, cache_enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id")
+        .bind(group_id).bind(public_name).bind(model_id).bind(priority).bind(weight).bind(multiplier).bind(cache_enabled as i64).bind(now_iso())
         .fetch_one(pool).await?;
     Ok(r.get::<i64, _>("id"))
 }
 
 /// 真部分更新:只 SET 传入的字段(动态拼 SET 子句,经 pq 适配占位符,SQLite/Postgres 双后端兼容)。
-pub async fn patch_route(pool: &Db, id: i64, public_name: Option<&str>, model_id: Option<i64>, weight: Option<i64>, multiplier: Option<f64>, cache_enabled: Option<bool>) -> anyhow::Result<()> {
+pub async fn patch_route(pool: &Db, id: i64, public_name: Option<&str>, model_id: Option<i64>, priority: Option<i64>, weight: Option<i64>, multiplier: Option<f64>, cache_enabled: Option<bool>) -> anyhow::Result<()> {
     let mut sets: Vec<&str> = Vec::new();
     if public_name.is_some() { sets.push("public_name = ?"); }
     if model_id.is_some() { sets.push("model_id = ?"); }
+    if priority.is_some() { sets.push("priority = ?"); }
     if weight.is_some() { sets.push("weight = ?"); }
     if multiplier.is_some() { sets.push("multiplier = ?"); }
     if cache_enabled.is_some() { sets.push("cache_enabled = ?"); }
@@ -1043,6 +1099,7 @@ pub async fn patch_route(pool: &Db, id: i64, public_name: Option<&str>, model_id
     let mut q = sqlx::query(&sql);
     if let Some(pn) = public_name { q = q.bind(pn.to_string()); }
     if let Some(mid) = model_id { q = q.bind(mid); }
+    if let Some(p) = priority { q = q.bind(p); }
     if let Some(w) = weight { q = q.bind(w); }
     if let Some(m) = multiplier { q = q.bind(m); }
     if let Some(c) = cache_enabled { q = q.bind(c as i64); }
@@ -1077,13 +1134,15 @@ pub async fn delete_route(pool: &Db, id: i64) -> anyhow::Result<()> {
 
 pub async fn list_routes(pool: &Db, group_id: i64) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = q!(
-        "SELECT r.id, r.public_name, r.model_id, r.weight, r.multiplier, r.cache_enabled, m.provider, m.upstream_model, m.label
+        "SELECT r.id, r.public_name, r.model_id, r.priority, r.weight, r.multiplier, r.cache_enabled, m.provider, m.upstream_model, m.label
          FROM group_routes r JOIN models m ON m.id = r.model_id
-         WHERE r.group_id = ? ORDER BY r.public_name")
+         WHERE r.group_id = ? ORDER BY r.priority DESC, r.public_name")
         .bind(group_id).fetch_all(pool).await?;
     Ok(rows.iter().map(|r| serde_json::json!({
         "id": r.get::<i64,_>("id"), "public_name": r.get::<String,_>("public_name"),
-        "model_id": r.get::<i64,_>("model_id"), "weight": r.get::<i64,_>("weight"),
+        "model_id": r.get::<i64,_>("model_id"),
+        "priority": r.try_get::<i64,_>("priority").unwrap_or(0),
+        "weight": r.get::<i64,_>("weight"),
         "multiplier": r.try_get::<f64,_>("multiplier").unwrap_or(1.0),
         "cache_enabled": r.try_get::<i64,_>("cache_enabled").unwrap_or(0) != 0,
         "provider": r.get::<String,_>("provider"), "upstream_model": r.get::<String,_>("upstream_model"),
@@ -1164,15 +1223,16 @@ pub async fn find_model_by_target(pool: &Db, kind: &str, base_url: &str, upstrea
 /// 导出用:组内路由附 (kind, base_url, upstream_model) 三元组,不含任何 api_key。
 pub async fn list_routes_export(pool: &Db, group_id: i64) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = q!(
-        "SELECT r.public_name, r.weight, r.multiplier, m.upstream_model, p.kind, p.base_url
+        "SELECT r.public_name, r.priority, r.weight, r.multiplier, m.upstream_model, p.kind, p.base_url
          FROM group_routes r JOIN models m ON m.id = r.model_id JOIN providers p ON p.name = m.provider
-         WHERE r.group_id = ? ORDER BY r.public_name")
+         WHERE r.group_id = ? ORDER BY r.priority DESC, r.public_name")
         .bind(group_id).fetch_all(pool).await?;
     Ok(rows.iter().map(|r| serde_json::json!({
         "public_name": r.get::<String,_>("public_name"),
         "kind": r.get::<String,_>("kind"),
         "base_url": r.get::<String,_>("base_url"),
         "upstream_model": r.get::<String,_>("upstream_model"),
+        "priority": r.try_get::<i64,_>("priority").unwrap_or(0),
         "weight": r.get::<i64,_>("weight"),
         "multiplier": r.try_get::<f64,_>("multiplier").unwrap_or(1.0),
         "cache_enabled": r.try_get::<i64,_>("cache_enabled").unwrap_or(0) != 0,
@@ -1180,13 +1240,13 @@ pub async fn list_routes_export(pool: &Db, group_id: i64) -> anyhow::Result<Vec<
 }
 
 /// 导入单组(事务):同名组存在则整组覆盖(删路由/时段规则后重建并更新策略),否则新建。
-/// routes 元素为 (public_name, model_id, weight, multiplier, cache_enabled),model_id 由上层按三元组解析;
+/// routes 元素为 (public_name, model_id, priority, weight, multiplier, cache_enabled),model_id 由上层按三元组解析;
 /// rules 复用 TimeRuleInput,其中 group_id 被忽略(以实际导入组为准)。返回 (组id, 是否覆盖)。
 pub async fn import_group(
     pool: &Db,
     name: &str,
     strategy: &str,
-    routes: &[(String, i64, i64, f64, bool)],
+    routes: &[(String, i64, i64, i64, f64, bool)],
     rules: &[TimeRuleInput],
 ) -> anyhow::Result<(i64, bool)> {
     let mut tx = pool.begin().await?;
@@ -1205,9 +1265,9 @@ pub async fn import_group(
             .fetch_one(&mut *tx).await?;
         (r.get::<i64, _>("id"), false)
     };
-    for (public_name, model_id, weight, multiplier, cache_enabled) in routes {
-        q!("INSERT INTO group_routes (group_id, public_name, model_id, weight, multiplier, cache_enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-            .bind(id).bind(public_name).bind(model_id).bind(weight).bind(multiplier).bind(*cache_enabled as i64).bind(now_iso())
+    for (public_name, model_id, priority, weight, multiplier, cache_enabled) in routes {
+        q!("INSERT INTO group_routes (group_id, public_name, model_id, priority, weight, multiplier, cache_enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(id).bind(public_name).bind(model_id).bind(priority).bind(weight).bind(multiplier).bind(*cache_enabled as i64).bind(now_iso())
             .execute(&mut *tx).await?;
     }
     for rule in rules {
@@ -1270,12 +1330,13 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
         routing.group_strategy.insert(id, crate::routing::strategy_from_str(r.try_get("strategy").unwrap_or(None).unwrap_or("weighted_random")));
         routing.groups.entry(id).or_default();
     }
-    for r in q!("SELECT group_id, public_name, model_id, weight, multiplier, cache_enabled FROM group_routes").fetch_all(pool).await? {
+    for r in q!("SELECT group_id, public_name, model_id, priority, weight, multiplier, cache_enabled FROM group_routes").fetch_all(pool).await? {
         let gid: i64 = r.get("group_id");
         routing.groups.entry(gid).or_default()
             .entry(r.get::<String, _>("public_name")).or_default()
             .push(Target {
                 model_id: r.get("model_id"),
+                priority: r.try_get::<i64, _>("priority").unwrap_or(0).max(0) as u32,
                 weight: r.get::<i64, _>("weight") as u32,
                 multiplier: r.try_get("multiplier").unwrap_or(1.0),
                 cache_enabled: r.try_get::<i64, _>("cache_enabled").unwrap_or(0) != 0,
@@ -1299,6 +1360,18 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
             weight_map: wm,
             active: r.try_get::<i64, _>("active").unwrap_or(1) != 0,
         });
+    }
+    // 用户组 → 有序模型组绑定(两级寻址第一级);过滤掉指向已删除模型组的脏行。
+    for r in q!("SELECT user_group_id, group_id FROM user_group_model_groups ORDER BY user_group_id, priority").fetch_all(pool).await? {
+        let gid: i64 = r.get("group_id");
+        if !routing.groups.contains_key(&gid) {
+            continue;
+        }
+        routing
+            .user_group_models
+            .entry(r.get::<i64, _>("user_group_id"))
+            .or_default()
+            .push(gid);
     }
     Ok(routing)
 }
@@ -1710,11 +1783,23 @@ pub async fn list_user_groups(pool: &Db) -> anyhow::Result<Vec<serde_json::Value
     )
     .fetch_all(pool)
     .await?;
+    // 绑定的模型组(按 priority 升序 = 优先级从高到低),一次性查出后按用户组归拢。
+    let binds = q!("SELECT user_group_id, group_id FROM user_group_model_groups ORDER BY user_group_id, priority")
+        .fetch_all(pool)
+        .await?;
+    let mut bind_map: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+    for b in binds {
+        bind_map
+            .entry(b.get::<i64, _>("user_group_id"))
+            .or_default()
+            .push(b.get::<i64, _>("group_id"));
+    }
     Ok(rows
         .iter()
         .map(|r| {
+            let id = r.get::<i64, _>("id");
             serde_json::json!({
-                "id": r.get::<i64, _>("id"),
+                "id": id,
                 "name": r.get::<String, _>("name"),
                 "max_concurrency": r.try_get::<Option<i64>, _>("max_concurrency").unwrap_or(None),
                 "rpm_limit": r.try_get::<Option<i64>, _>("rpm_limit").unwrap_or(None),
@@ -1722,10 +1807,29 @@ pub async fn list_user_groups(pool: &Db) -> anyhow::Result<Vec<serde_json::Value
                 "budget_daily_tokens": r.try_get::<Option<i64>, _>("budget_daily_tokens").unwrap_or(None),
                 "budget_monthly_tokens": r.try_get::<Option<i64>, _>("budget_monthly_tokens").unwrap_or(None),
                 "member_count": r.try_get::<i64, _>("member_count").unwrap_or(0),
+                "model_group_ids": bind_map.get(&id).cloned().unwrap_or_default(),
                 "created_at": r.get::<String, _>("created_at"),
             })
         })
         .collect())
+}
+
+/// 覆盖式设置用户组绑定的模型组(有序:数组下标即优先级,0=最高)。
+pub async fn set_user_group_model_groups(pool: &Db, user_group_id: i64, group_ids: &[i64]) -> anyhow::Result<()> {
+    q!("DELETE FROM user_group_model_groups WHERE user_group_id = ?")
+        .bind(user_group_id)
+        .execute(pool)
+        .await?;
+    for (i, gid) in group_ids.iter().enumerate() {
+        q!("INSERT INTO user_group_model_groups (user_group_id, group_id, priority, created_at) VALUES (?, ?, ?, ?)")
+            .bind(user_group_id)
+            .bind(gid)
+            .bind(i as i64)
+            .bind(now_iso())
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
 }
 
 pub async fn user_group_exists(pool: &Db, id: i64) -> anyhow::Result<bool> {
@@ -1816,9 +1920,13 @@ pub async fn update_user_group(
     Ok(())
 }
 
-/// 删除用户组;组内用户自动解挂(user_group_id=NULL,回落全局默认)。
+/// 删除用户组;组内用户自动解挂(user_group_id=NULL,回落全局默认),绑定一并清除。
 pub async fn delete_user_group(pool: &Db, id: i64) -> anyhow::Result<()> {
     q!("UPDATE users SET user_group_id = NULL WHERE user_group_id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    q!("DELETE FROM user_group_model_groups WHERE user_group_id = ?")
         .bind(id)
         .execute(pool)
         .await?;
@@ -2474,36 +2582,83 @@ pub async fn list_keys(pool: &Db, user_id: Uuid) -> anyhow::Result<Vec<KeyRow>> 
 
 // ---- API Key 管理端(分级密钥管控:范围配置/审批/吊销) ----
 
-/// 全量 Key 列表(管理端,含属主用户名;明文/哈希不回显)。上限 500 条。
-pub async fn list_all_keys(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
-    let rows = q!(
-        "SELECT k.id, k.user_id, u.username, u.phone, k.interface_kind, k.key_prefix, k.revoked, k.status, k.allowed_models, k.created_at
-         FROM api_keys k LEFT JOIN users u ON u.id = k.user_id
-         ORDER BY k.created_at DESC LIMIT 500",
-    )
+/// Key 列表(管理端,含属主用户名;明文/哈希不回显,仅返回脱敏形态)。
+/// `status` 过滤:None=全部,Some(0)=启用,Some(1)=待审批,Some(2)=已吊销;
+/// `kw` 模糊匹配属主用户名/手机号(空串=不过滤,'%' || '' || '%' 恒真,统一占位路径)。
+pub async fn list_all_keys_page(
+    pool: &Db,
+    status: Option<i64>,
+    kw: Option<&str>,
+    page_size: i64,
+    offset: i64,
+) -> anyhow::Result<(Vec<serde_json::Value>, i64)> {
+    let kw = kw.unwrap_or("");
+    let status_clause = match status {
+        Some(2) => " AND k.revoked = 1".to_string(),
+        Some(s) => format!(" AND k.revoked = 0 AND k.status = {s}"),
+        None => String::new(),
+    };
+    let where_clause = format!(
+        " WHERE (u.username LIKE '%' || ? || '%' OR u.phone LIKE '%' || ? || '%'){status_clause}"
+    );
+    let total: i64 = q!(&format!(
+        "SELECT COUNT(*) AS c FROM api_keys k LEFT JOIN users u ON u.id = k.user_id{where_clause}"
+    ))
+    .bind(kw)
+    .bind(kw)
+    .fetch_one(pool)
+    .await?
+    .get("c");
+    let order_limit = format!("{where_clause} ORDER BY k.created_at DESC LIMIT {page_size} OFFSET {offset}");
+    let rows = q!(&format!(
+        "SELECT k.id, k.user_id, u.username, u.phone, k.interface_kind, k.key_prefix, k.key_plain, k.revoked, k.status, k.allowed_models, k.created_at
+         FROM api_keys k LEFT JOIN users u ON u.id = k.user_id{order_limit}"
+    ))
+    .bind(kw)
+    .bind(kw)
     .fetch_all(pool)
     .await?;
-    Ok(rows
-        .iter()
-        .map(|r| {
-            let allowed_raw: Option<String> = r.try_get("allowed_models").unwrap_or(None);
-            let allowed: Vec<String> = allowed_raw
-                .map(|s| s.split(',').map(str::trim).filter(|m| !m.is_empty()).map(str::to_string).collect())
-                .unwrap_or_default();
-            serde_json::json!({
-                "id": r.get::<String, _>("id"),
-                "user_id": r.get::<String, _>("user_id"),
-                "username": r.try_get::<Option<String>, _>("username").unwrap_or(None),
-                "phone": r.try_get::<Option<String>, _>("phone").unwrap_or(None),
-                "interface_kind": r.get::<String, _>("interface_kind"),
-                "key_prefix": r.get::<String, _>("key_prefix"),
-                "revoked": r.get::<i64, _>("revoked") != 0,
-                "status": r.try_get::<i64, _>("status").unwrap_or(0),
-                "allowed_models": allowed,
-                "created_at": r.get::<String, _>("created_at"),
+    Ok((
+        rows.iter()
+            .map(|r| {
+                let allowed_raw: Option<String> = r.try_get("allowed_models").unwrap_or(None);
+                let allowed: Vec<String> = allowed_raw
+                    .map(|s| s.split(',').map(str::trim).filter(|m| !m.is_empty()).map(str::to_string).collect())
+                    .unwrap_or_default();
+                // 脱敏形态:优先由密文解出明文计算(前缀+后缀);解密失败退回存量 key_prefix。
+                let stored_prefix: String = r.get("key_prefix");
+                let masked = dec_field(r.try_get::<Option<String>, _>("key_plain").unwrap_or(None))
+                    .map(|p| mask_key(&p))
+                    .unwrap_or_else(|| stored_prefix.clone());
+                serde_json::json!({
+                    "id": r.get::<String, _>("id"),
+                    "user_id": r.get::<String, _>("user_id"),
+                    "username": r.try_get::<Option<String>, _>("username").unwrap_or(None),
+                    "phone": r.try_get::<Option<String>, _>("phone").unwrap_or(None),
+                    "interface_kind": r.get::<String, _>("interface_kind"),
+                    "key_prefix": stored_prefix,
+                    "key_masked": masked,
+                    "revoked": r.get::<i64, _>("revoked") != 0,
+                    "status": r.try_get::<i64, _>("status").unwrap_or(0),
+                    "allowed_models": allowed,
+                    "created_at": r.get::<String, _>("created_at"),
+                })
             })
-        })
-        .collect())
+            .collect(),
+        total,
+    ))
+}
+
+/// 硬删除一把 Key(吊销=删除语义):先取 key_hash 供内存清理,再删行。
+pub async fn delete_key_by_id(pool: &Db, id: &str) -> anyhow::Result<Option<String>> {
+    let row = q!("SELECT key_hash FROM api_keys WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    let Some(row) = row else { return Ok(None) };
+    let hash: String = row.get("key_hash");
+    q!("DELETE FROM api_keys WHERE id = ?").bind(id).execute(pool).await?;
+    Ok(Some(hash))
 }
 
 /// 按哈希取单把 Key(审批通过后回填内存用)。
@@ -2608,43 +2763,75 @@ pub async fn usage_rows(
 }
 
 /// 分页版用量日志。返回(当前页, 总条数)。kind=请求终结方式("cache"精确命中/"semantic"语义命中/其余直连)。
+/// 用量明细分页(全局或单用户),支持多维度筛选:
+/// `model` 精确匹配模型名;`status_ok` Some(true)=仅成功(2xx/3xx),Some(false)=仅失败;
+/// `start_ts`/`end_ts` Unix 秒区间(含边界);均 Optional,组合生效。
 pub async fn usage_rows_page(
     pool: &Db,
     user_id: Option<Uuid>,
     page_size: i64,
     offset: i64,
+    model: Option<&str>,
+    status_ok: Option<bool>,
+    start_ts: Option<i64>,
+    end_ts: Option<i64>,
 ) -> anyhow::Result<(Vec<serde_json::Value>, i64)> {
-    let total: i64 = if let Some(uid) = user_id {
-        q!("SELECT COUNT(*) AS c FROM usage_logs WHERE user_id = ?")
-            .bind(uid.to_string())
-            .fetch_one(pool)
-            .await?
-            .get("c")
-    } else {
-        q!("SELECT COUNT(*) AS c FROM usage_logs").fetch_one(pool).await?.get("c")
-    };
-    let rows = if let Some(uid) = user_id {
-        q!(
-            "SELECT u.user_id, u.model, u.provider, u.input_tokens, u.output_tokens, u.charged_tokens, u.cost_usd, u.bill_multiplier, u.status, u.created_at, rl.final_kind AS kind, rl.latency_ms AS latency_ms
-             FROM usage_logs u LEFT JOIN request_logs rl ON rl.request_id = u.request_id
-             WHERE u.user_id = ? ORDER BY u.id DESC LIMIT ? OFFSET ?",
-        )
-        .bind(uid.to_string())
-        .bind(page_size)
-        .bind(offset)
-        .fetch_all(pool)
+    // 统一占位路径:created_at 存储约定为 "@unix秒" 字符串,区间比较走剥离 @ 后的数值。
+    let mut having_user = String::new();
+    if user_id.is_some() {
+        having_user = " AND u.user_id = ?".to_string();
+    }
+    let mut where_clause = format!(" WHERE 1=1{having_user}");
+    if model.is_some() {
+        where_clause.push_str(" AND u.model = ?");
+    }
+    if status_ok.is_some() {
+        where_clause.push_str(if status_ok == Some(true) {
+            " AND (u.status >= 200 AND u.status < 400)"
+        } else {
+            " AND (u.status IS NULL OR u.status < 200 OR u.status >= 400)"
+        });
+    }
+    if start_ts.is_some() {
+        where_clause.push_str(" AND CAST(REPLACE(u.created_at, '@', '') AS BIGINT) >= ?");
+    }
+    if end_ts.is_some() {
+        where_clause.push_str(" AND CAST(REPLACE(u.created_at, '@', '') AS BIGINT) <= ?");
+    }
+    let total_sql = format!("SELECT COUNT(*) AS c FROM usage_logs u{where_clause}");
+    let rows_sql = format!(
+        "SELECT u.user_id, u.model, u.provider, u.input_tokens, u.output_tokens, u.charged_tokens, u.cost_usd, u.bill_multiplier, u.status, u.created_at, rl.final_kind AS kind, rl.latency_ms AS latency_ms
+         FROM usage_logs u LEFT JOIN request_logs rl ON rl.request_id = u.request_id
+         {where_clause} ORDER BY u.id DESC LIMIT {page_size} OFFSET {offset}",
+    );
+    // 按固定顺序绑定:user → model → start → end(独立 fn 避免闭包生命周期纠缠)。
+    fn bind_all<'q>(
+        query: sqlx::query::Query<'q, sqlx::Any, sqlx::any::AnyArguments<'q>>,
+        user_id: Option<Uuid>,
+        model: Option<&str>,
+        start_ts: Option<i64>,
+        end_ts: Option<i64>,
+    ) -> sqlx::query::Query<'q, sqlx::Any, sqlx::any::AnyArguments<'q>> {
+        let mut query = query;
+        if let Some(uid) = user_id {
+            query = query.bind(uid.to_string());
+        }
+        if let Some(m) = model {
+            query = query.bind(m.to_string());
+        }
+        if let Some(s) = start_ts {
+            query = query.bind(s);
+        }
+        if let Some(e) = end_ts {
+            query = query.bind(e);
+        }
+        query
+    }
+    let total: i64 = bind_all(q!(&total_sql), user_id, model, start_ts, end_ts)
+        .fetch_one(pool)
         .await?
-    } else {
-        q!(
-            "SELECT u.user_id, u.model, u.provider, u.input_tokens, u.output_tokens, u.charged_tokens, u.cost_usd, u.bill_multiplier, u.status, u.created_at, rl.final_kind AS kind, rl.latency_ms AS latency_ms
-             FROM usage_logs u LEFT JOIN request_logs rl ON rl.request_id = u.request_id
-             ORDER BY u.id DESC LIMIT ? OFFSET ?",
-        )
-        .bind(page_size)
-        .bind(offset)
-        .fetch_all(pool)
-        .await?
-    };
+        .get("c");
+    let rows = bind_all(q!(&rows_sql), user_id, model, start_ts, end_ts).fetch_all(pool).await?;
     Ok((
         rows.iter()
             .map(|r| {
@@ -2796,6 +2983,20 @@ pub async fn usage_breakdown(pool: &Db) -> anyhow::Result<serde_json::Value> {
     )
     .fetch_all(pool)
     .await?;
+    let models = q!(
+        "SELECT COALESCE(model, '(未知)') AS label,
+                COUNT(*) AS calls,
+                CAST(COALESCE(SUM(input_tokens),0) AS BIGINT) AS input_tokens,
+                CAST(COALESCE(SUM(output_tokens),0) AS BIGINT) AS output_tokens,
+                CAST(COALESCE(SUM(charged_tokens),0) AS BIGINT) AS charged_tokens,
+                COALESCE(SUM(cost_usd),0.0) AS cost_usd
+         FROM usage_logs
+         GROUP BY COALESCE(model, '(未知)')
+         ORDER BY cost_usd DESC
+         LIMIT 10"
+    )
+    .fetch_all(pool)
+    .await?;
     let map = |rows: &[sqlx::any::AnyRow]| -> Vec<serde_json::Value> {
         rows.iter()
             .map(|r| {
@@ -2814,6 +3015,7 @@ pub async fn usage_breakdown(pool: &Db) -> anyhow::Result<serde_json::Value> {
         "providers": map(&providers),
         "users": map(&users),
         "keys": map(&keys),
+        "models": map(&models),
     }))
 }
 
@@ -3186,7 +3388,7 @@ mod tests {
         let (prov, _) = find_or_create_provider(&db, "openai", "https://api.test.com", Some("sk-x")).await.unwrap();
         let mid = add_model(&db, &prov, "gpt-4o", None, None, None).await.unwrap();
         let gid = add_group(&db, "grp").await.unwrap();
-        add_route(&db, gid, "my-gpt", mid, 80, 1.5, false).await.unwrap();
+        add_route(&db, gid, "my-gpt", mid, 0, 80, 1.5, false).await.unwrap();
         add_time_rule(&db, &TimeRuleInput {
             group_id: gid, name: "peak".into(), weekdays: "1-5".into(),
             start_time: "09:00".into(), end_time: "18:00".into(),
@@ -3211,13 +3413,14 @@ mod tests {
             multiplier: 0.8, weight_map: None, active: true,
         }];
         let (gid2, overwritten) = import_group(
-            &db, "grp", "priority",
-            &[("my-gpt".into(), mid, 60, 1.0, false)], &rules,
+            &db, "grp", "weighted_random",
+            &[("my-gpt".into(), mid, 7, 60, 1.0, false)], &rules,
         ).await.unwrap();
         assert!(overwritten);
         assert_eq!(gid2, gid);
         let routes = list_routes(&db, gid).await.unwrap();
         assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0]["priority"].as_i64(), Some(7));
         assert_eq!(routes[0]["weight"].as_i64(), Some(60));
         let trs = list_time_rules(&db, gid).await.unwrap();
         assert_eq!(trs.len(), 1);
@@ -3238,10 +3441,10 @@ mod tests {
         let m1 = add_model(&db, &prov, "gpt-a", None, None, None).await.unwrap();
         let m2 = add_model(&db, &prov, "gpt-b", None, None, None).await.unwrap();
         let gid = add_group(&db, "grp").await.unwrap();
-        let rid = add_route(&db, gid, "pub-a", m1, 80, 1.5, false).await.unwrap();
+        let rid = add_route(&db, gid, "pub-a", m1, 0, 80, 1.5, false).await.unwrap();
 
         // 只改 weight:其余字段不动
-        patch_route(&db, rid, None, None, Some(30), None, None).await.unwrap();
+        patch_route(&db, rid, None, None, None, Some(30), None, None).await.unwrap();
         let routes = list_routes(&db, gid).await.unwrap();
         assert_eq!(routes[0]["public_name"].as_str(), Some("pub-a"));
         assert_eq!(routes[0]["model_id"].as_i64(), Some(m1));
@@ -3250,7 +3453,7 @@ mod tests {
         assert_eq!(routes[0]["cache_enabled"].as_bool(), Some(false));
 
         // 改 public_name + model_id,weight/multiplier 保持
-        patch_route(&db, rid, Some("pub-b"), Some(m2), None, None, None).await.unwrap();
+        patch_route(&db, rid, Some("pub-b"), Some(m2), None, None, None, None).await.unwrap();
         let routes = list_routes(&db, gid).await.unwrap();
         assert_eq!(routes[0]["public_name"].as_str(), Some("pub-b"));
         assert_eq!(routes[0]["model_id"].as_i64(), Some(m2));
@@ -3258,17 +3461,18 @@ mod tests {
         assert_eq!(routes[0]["multiplier"].as_f64(), Some(1.5));
         assert_eq!(routes[0]["cache_enabled"].as_bool(), Some(false));
 
-        // 全字段(前端全量提交兼容路径):含语义缓存开关
-        patch_route(&db, rid, Some("pub-c"), Some(m1), Some(10), Some(2.0), Some(true)).await.unwrap();
+        // 全字段(前端全量提交兼容路径):含优先级与语义缓存开关
+        patch_route(&db, rid, Some("pub-c"), Some(m1), Some(9), Some(10), Some(2.0), Some(true)).await.unwrap();
         let routes = list_routes(&db, gid).await.unwrap();
         assert_eq!(routes[0]["public_name"].as_str(), Some("pub-c"));
         assert_eq!(routes[0]["model_id"].as_i64(), Some(m1));
+        assert_eq!(routes[0]["priority"].as_i64(), Some(9));
         assert_eq!(routes[0]["weight"].as_i64(), Some(10));
         assert_eq!(routes[0]["multiplier"].as_f64(), Some(2.0));
         assert_eq!(routes[0]["cache_enabled"].as_bool(), Some(true));
 
         // 空更新:handler 已挡,storage 层 no-op 不报错也不改值(含 cache_enabled)
-        patch_route(&db, rid, None, None, None, None, None).await.unwrap();
+        patch_route(&db, rid, None, None, None, None, None, None).await.unwrap();
         let routes = list_routes(&db, gid).await.unwrap();
         assert_eq!(routes[0]["weight"].as_i64(), Some(10));
         assert_eq!(routes[0]["multiplier"].as_f64(), Some(2.0));

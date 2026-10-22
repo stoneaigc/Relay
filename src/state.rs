@@ -50,6 +50,8 @@ pub struct UserState {
     pub bill_multiplier_milli: AtomicU32,
     /// 绑定的模型组 id(0 = 未绑定)。
     pub group_id: AtomicI64,
+    /// 所属用户组 id(0 = 未挂组);用户组绑定的模型组列表非空时优先于 group_id。
+    pub user_group_id: AtomicI64,
     /// 余额自上次落盘以来是否变更。
     pub dirty: AtomicBool,
     /// 每分钟请求数上限(0 = 不限)。
@@ -93,6 +95,7 @@ impl UserState {
         status: u8,
         bill_multiplier: f64,
         group_id: i64,
+        user_group_id: i64,
     ) -> Self {
         Self {
             id,
@@ -103,6 +106,7 @@ impl UserState {
             status: AtomicU8::new(status),
             bill_multiplier_milli: AtomicU32::new((bill_multiplier * 1000.0).round() as u32),
             group_id: AtomicI64::new(group_id),
+            user_group_id: AtomicI64::new(user_group_id),
             dirty: AtomicBool::new(false),
             rpm_limit: AtomicU32::new(0),
             tpm_limit: AtomicU32::new(0),
@@ -252,6 +256,30 @@ impl UserState {
 
     pub fn group(&self) -> i64 {
         self.group_id.load(Ordering::Relaxed)
+    }
+
+    pub fn user_group(&self) -> i64 {
+        self.user_group_id.load(Ordering::Relaxed)
+    }
+
+    pub fn set_user_group(&self, id: i64) {
+        self.user_group_id.store(id, Ordering::Relaxed);
+    }
+
+    /// 解析该用户请求生效的有序模型组列表(两级寻址第一级):
+    /// 用户组绑定的模型组列表非空 → 用它(按优先级排序);否则回落用户直属 group_id(旧行为);
+    /// 都没有 → 空表(调用方转 ModelNotAllowed)。
+    pub fn resolve_group_ids(&self, routing: &crate::routing::Routing) -> Vec<i64> {
+        let ug = self.user_group();
+        if ug != 0 {
+            if let Some(ids) = routing.user_group_models.get(&ug) {
+                if !ids.is_empty() {
+                    return ids.clone();
+                }
+            }
+        }
+        let g = self.group();
+        if g != 0 { vec![g] } else { Vec::new() }
     }
 
     pub fn bill_multiplier(&self) -> f64 {
@@ -1418,7 +1446,7 @@ mod tests {
     // --- 周期预算:累计 / 耗尽 / 滚动重置 ---
     #[test]
     fn budget_daily_exhausted() {
-        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 0, 1.0, 0);
+        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 0, 1.0, 0, 0);
         u.set_budgets(1000, 0);
         assert_eq!(u.budget_status(8), BudgetStatus::Ok);
         u.record_budget(600, 8);
@@ -1429,7 +1457,7 @@ mod tests {
 
     #[test]
     fn budget_monthly_exhausted() {
-        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 0, 1.0, 0);
+        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 0, 1.0, 0, 0);
         u.set_budgets(0, 1500);
         u.record_budget(1500, 8);
         assert_eq!(u.budget_status(8), BudgetStatus::MonthlyExhausted);
@@ -1437,7 +1465,7 @@ mod tests {
 
     #[test]
     fn budget_window_rollover_resets_counters() {
-        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 0, 1.0, 0);
+        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 0, 1.0, 0, 0);
         u.set_budgets(1000, 2000);
         u.record_budget(1000, 8);
         assert_eq!(u.budget_status(8), BudgetStatus::DailyExhausted);
@@ -1623,6 +1651,7 @@ mod tests {
             group_strategy: HashMap::new(),
             time_rules: HashMap::new(),
             groups: HashMap::new(),
+            user_group_models: HashMap::new(),
         };
 
         let (usage_tx, _usage_rx) = mpsc::channel(16);

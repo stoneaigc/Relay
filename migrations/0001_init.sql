@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS model_groups (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   name       TEXT NOT NULL UNIQUE,
   is_active  INTEGER NOT NULL DEFAULT 0,   -- 1=激活(默认组),新用户注册默认绑定
-  strategy   TEXT NOT NULL DEFAULT 'weighted_random', -- 负载策略:weighted_random(加权随机,当前)|(可扩展 weighted_round_robin 等)
+  strategy   TEXT NOT NULL DEFAULT 'weighted_random', -- 负载策略:weighted_random(加权随机)|weighted_round_robin(加权轮询)|auto(延迟+成本自适应)
   created_at TEXT NOT NULL
 );
 
@@ -127,13 +127,25 @@ CREATE TABLE IF NOT EXISTS user_groups (
   created_at            TEXT NOT NULL
 );
 
+-- 用户组 ↔ 模型组绑定(多值,有序):priority 越小优先级越高(0=最高)。
+-- 请求两级寻址:先按优先级选定含目标模型的组,再在该组内按该组负载策略分流。
+-- 空绑定 = 回落用户直属 users.group_id(旧行为)。
+CREATE TABLE IF NOT EXISTS user_group_model_groups (
+  user_group_id INTEGER NOT NULL,
+  group_id      INTEGER NOT NULL,
+  priority      INTEGER NOT NULL DEFAULT 0,
+  created_at    TEXT NOT NULL,
+  UNIQUE (user_group_id, group_id)
+);
+
 -- 组内路由:对外模型名 -> 指定模型(同名多条=加权/容灾)。按名精确路由。
 CREATE TABLE IF NOT EXISTS group_routes (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   group_id    INTEGER NOT NULL,
   public_name TEXT NOT NULL,                 -- 用户请求 & 响应展示的模型名
   model_id    INTEGER NOT NULL,              -- models.id
-  weight      INTEGER NOT NULL DEFAULT 100,
+  priority    INTEGER NOT NULL DEFAULT 0,    -- 优先级档位:越大越优先,高档全失败才降档
+  weight      INTEGER NOT NULL DEFAULT 100,  -- 同优先级档内的分流权重
   multiplier  REAL NOT NULL DEFAULT 1.0,
   cache_enabled INTEGER NOT NULL DEFAULT 0,    -- 路由级语义缓存 opt-in(1=参与缓存判定)
   created_at  TEXT NOT NULL

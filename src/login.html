@@ -100,8 +100,8 @@
   .form-panel .sub2 { margin-top: 6px; font-size: 13px; color: #8a8fa3; }
   @media (prefers-color-scheme: dark) { .form-panel .sub2 { color: #8b90a8; } }
 
-  /* 模式切换:登录 / 注册 */
-  .tabs { display: flex; gap: 4px; margin-top: 20px; padding: 4px; border-radius: 12px; background: rgba(99,102,241,.08); }
+  /* 模式切换:登录 / 注册(置于标题与描述之下,先读到场景再选择动作) */
+  .tabs { display: flex; gap: 4px; margin-top: 18px; padding: 4px; border-radius: 12px; background: rgba(99,102,241,.08); }
   .tab { flex: 1; padding: 8px 0; border: 0; border-radius: 9px; background: none; cursor: pointer;
     font-size: 13px; font-weight: 600; color: #8a8fa3; transition: background .15s, color .15s; }
   .tab:hover { color: var(--accent); }
@@ -110,12 +110,17 @@
     .tab.active { background: #232838; color: #a5b4fc; box-shadow: 0 2px 8px rgba(0,0,0,.35); }
   }
 
+  /* 模式容器:固定最小高度取三种表单的最高者,切换时卡片高度恒定,消除上下跳动 */
+  .modes { min-height: 384px; }
+  @media (prefers-reduced-motion: no-preference) {
+    .modes > form { animation: modefade .18s ease-out; }
+    @keyframes modefade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  }
+  @media (max-width: 760px) { .modes { min-height: 0; } }
+
   /* 验证码行:输入框 + 发送按钮 */
   .code-row { display: flex; gap: 8px; }
   .code-row input { flex: 1; min-width: 0; }
-  /* 注册方式子切换(邮箱/手机号),复用 tabs 样式,收窄间距 */
-  .tabs.sub { margin-top: 0; padding: 3px; }
-  .tabs.sub .tab { padding: 6px 0; font-size: 12.5px; }
   .send-btn { flex: none; padding: 0 14px; border: 1px solid rgba(99,102,241,.35); border-radius: 11px;
     background: rgba(99,102,241,.08); color: #4f46e5; font-size: 13px; cursor: pointer; white-space: nowrap; }
   .send-btn:hover:not(:disabled) { background: rgba(99,102,241,.16); }
@@ -241,13 +246,15 @@
   </aside>
 
   <main class="form-panel">
+    <h2 id="title">欢迎回来</h2>
+    <div class="sub2" id="subtitle">登录后按账号身份自动进入对应工作台</div>
+
     <div class="tabs" role="tablist">
       <button type="button" class="tab active" data-mode="login">登录</button>
       <button type="button" class="tab" data-mode="register">注册</button>
     </div>
-    <h2 id="title">欢迎回来</h2>
-    <div class="sub2" id="subtitle">登录后按账号身份自动进入对应工作台</div>
 
+    <div class="modes">
     <!-- 登录(管理员与门户用户统一入口,按身份分流) -->
     <form id="f-login">
       <label for="u">账号名</label>
@@ -264,12 +271,8 @@
       <button type="button" class="link-btn" data-goto="reset">忘记密码?</button>
     </form>
 
-    <!-- 注册(双渠道:邮箱验证码 / 手机短信验证码,均强制验证) -->
+    <!-- 注册(邮箱验证码渠道,强制验证) -->
     <form id="f-register" hidden>
-      <div class="tabs sub" role="tablist" aria-label="注册方式">
-        <button type="button" class="tab active" data-regmode="email">邮箱注册</button>
-        <button type="button" class="tab" data-regmode="phone">手机号注册</button>
-      </div>
       <div id="reg-email-fields">
         <label for="r-email">邮箱</label>
         <input id="r-email" type="email" autocomplete="email">
@@ -277,15 +280,6 @@
         <div class="code-row">
           <input id="r-code" autocomplete="one-time-code">
           <button type="button" class="send-btn" id="r-send">发送验证码</button>
-        </div>
-      </div>
-      <div id="reg-phone-fields" hidden>
-        <label for="p-phone">手机号</label>
-        <input id="p-phone" inputmode="numeric" maxlength="11" placeholder="11 位手机号" autocomplete="tel">
-        <label for="p-code">短信验证码</label>
-        <div class="code-row">
-          <input id="p-code" autocomplete="one-time-code">
-          <button type="button" class="send-btn" id="p-send">发送验证码</button>
         </div>
       </div>
       <label for="r-pass">设置密码</label>
@@ -322,6 +316,7 @@
       <div class="dev-note" id="s-dev" hidden></div>
       <button type="button" class="link-btn" data-goto="login">返回登录</button>
     </form>
+    </div>
   </main>
 </div>
 <script>
@@ -337,8 +332,7 @@ const MODES = {
 };
 function showMode(m) {
   ["login", "register", "reset"].forEach((k) => { $("f-" + k).hidden = k !== m; });
-  // 只作用于模式主 tab;注册方式子 tab(data-regmode,同 .tab 类)由各自的监听管理,
-  // 否则点「手机号注册」会以 undefined 触发 showMode → 三表单全隐藏 + MODES[undefined] 抛错(页面卡死)。
+  // 只作用于模式主 tab(data-mode);表单内其他 .tab 类按钮不受影响。
   document.querySelectorAll(".tab[data-mode]").forEach((b) => b.classList.toggle("active", b.dataset.mode === m));
   $("title").textContent = MODES[m].title;
   $("subtitle").textContent = MODES[m].sub;
@@ -423,28 +417,14 @@ function bindSend(btnId, idInputId, errId, devId, url) {
   });
 }
 bindSend("r-send", "r-email", "r-err", "r-dev", "portal/api/auth/email/send_code");
-bindSend("p-send", "p-phone", "r-err", "r-dev", "portal/api/auth/phone/send_code");
 bindSend("s-send", "s-email", "s-err", "s-dev", "portal/api/auth/email/send_code");
 
-// ---- 注册方式切换:邮箱 | 手机号 ----
-let regMode = "email";
-document.querySelectorAll("[data-regmode]").forEach((b) => b.addEventListener("click", () => {
-  regMode = b.dataset.regmode;
-  document.querySelectorAll("[data-regmode]").forEach((x) => x.classList.toggle("active", x === b));
-  $("reg-email-fields").hidden = regMode !== "email";
-  $("reg-phone-fields").hidden = regMode !== "phone";
-  $("subtitle").textContent = regMode === "phone" ? "手机号注册,注册即送体验额度" : "邮箱注册,注册即送体验额度";
-  $("r-err").textContent = ""; $("r-dev").hidden = true;
-}));
-
-// ---- 注册(双渠道,均强制验证码):成功即带登录态进入门户 ----
+// ---- 注册(邮箱验证码):成功即带登录态进入门户 ----
 $("f-register").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   $("r-err").textContent = "";
   const password = $("r-pass").value;
-  const body = regMode === "phone"
-    ? { kind: "phone", phone: $("p-phone").value.trim(), code: $("p-code").value.trim(), password }
-    : { kind: "email", email: $("r-email").value.trim(), code: $("r-code").value.trim(), password };
+  const body = { kind: "email", email: $("r-email").value.trim(), code: $("r-code").value.trim(), password };
   if (password.length < 8) { $("r-err").textContent = "密码至少 8 位"; return; }
   if (!body.code) { $("r-err").textContent = "请填写验证码"; return; }
   try {

@@ -76,6 +76,8 @@ export interface UserGroupRow {
   budget_daily_tokens: number | null;
   budget_monthly_tokens: number | null;
   member_count: number;
+  /** 绑定的有序模型组 id(下标即优先级,0=最高);空 = 沿用用户直属模型组 */
+  model_group_ids: number[];
   created_at: string;
 }
 
@@ -86,6 +88,8 @@ export interface UserGroupPayload {
   tpm_limit?: number | null;
   budget_daily_tokens?: number | null;
   budget_monthly_tokens?: number | null;
+  /** 绑定的有序模型组 id 列表(覆盖式);不传 = 不改动 */
+  model_group_ids?: number[];
 }
 
 export interface ModelRow {
@@ -180,6 +184,8 @@ export interface RouteRow {
   id: number;
   public_name: string;
   model_id: number;
+  /** 优先级档位:数值越大越优先;只有更高档全部失败才降档,同档内才按负载策略分流 */
+  priority: number;
   weight: number;
   multiplier: number;
   provider: string;
@@ -194,6 +200,7 @@ export interface ImportRoutePayload {
   kind: string;
   base_url: string;
   upstream_model: string;
+  priority?: number;
   weight?: number;
   multiplier?: number;
 }
@@ -219,7 +226,7 @@ export interface ImportPreviewResp {
   summary: { groups: number; create: number; overwrite: number; routes: number; time_rules: number; skipped_routes: number };
 }
 
-/** 用户门户 API Key(管理端视角);status 0=启用 1=待审批;allowed_models 空数组=不限 */
+/** 用户门户 API Key(管理端视角);status 0=启用 1=待审批;allowed_models 空数组=不限;key_masked=脱敏展示(前缀+后缀) */
 export interface AdminKeyRow {
   id: string;
   user_id: string;
@@ -227,6 +234,7 @@ export interface AdminKeyRow {
   phone: string | null;
   interface_kind: string;
   key_prefix: string;
+  key_masked: string;
   revoked: boolean;
   status: number;
   allowed_models: string[];
@@ -279,7 +287,15 @@ export const api = {
     req(`/admin/api/users/${id}/reset-password`, { method: "POST" }),
 
   // ---- API 密钥(用户 Key 治理:审批/模型范围/吊销,均即时生效) ----
-  allKeys: (): Promise<{ data: AdminKeyRow[] }> => req("/admin/api/keys"),
+  allKeys: (page?: number, pageSize?: number, status?: "enabled" | "pending" | "revoked", kw?: string): Promise<{ data: AdminKeyRow[]; total: number; page: number; page_size: number; total_pages: number }> => {
+    const qs = new URLSearchParams();
+    if (typeof page === "number") qs.set("page", String(page));
+    if (typeof pageSize === "number") qs.set("page_size", String(pageSize));
+    if (status) qs.set("status", status);
+    if (kw && kw.trim()) qs.set("kw", kw.trim());
+    const s = qs.toString();
+    return req(`/admin/api/keys${s ? "?" + s : ""}`);
+  },
   patchKey: (id: string, body: { allowed_models?: string[]; approved?: boolean }) =>
     req(`/admin/api/keys/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   revokeKey: (id: string) => req(`/admin/api/keys/${id}`, { method: "DELETE" }),
@@ -348,11 +364,11 @@ export const api = {
   deleteTimeRule: (groupId: number, ruleId: number) => req(`/admin/api/groups/${groupId}/time-rules/${ruleId}`, { method: "DELETE" }),
 
   routes: (groupId: number): Promise<{ data: RouteRow[] }> => req(`/admin/api/groups/${groupId}/routes`),
-  addRoute: (groupId: number, body: { public_name: string; model_id: number; weight?: number; multiplier?: number; cache?: boolean }) =>
+  addRoute: (groupId: number, body: { public_name: string; model_id: number; priority?: number; weight?: number; multiplier?: number; cache?: boolean }) =>
     req(`/admin/api/groups/${groupId}/routes`, { method: "POST", body: JSON.stringify(body) }),
-  addRoutesBatch: (groupId: number, body: { routes: { public_name: string; model_id: number; weight?: number; multiplier?: number }[]; cache?: boolean }): Promise<{ ok: boolean; ids?: number[] }> =>
+  addRoutesBatch: (groupId: number, body: { routes: { public_name: string; model_id: number; priority?: number; weight?: number; multiplier?: number }[]; cache?: boolean }): Promise<{ ok: boolean; ids?: number[] }> =>
     req(`/admin/api/groups/${groupId}/routes/batch`, { method: "POST", body: JSON.stringify(body) }),
-  updateRoute: (id: number, body: { public_name: string; model_id: number; weight?: number; multiplier?: number; cache?: boolean }) =>
+  updateRoute: (id: number, body: { public_name: string; model_id: number; priority?: number; weight?: number; multiplier?: number; cache?: boolean }) =>
     req(`/admin/api/routes/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deleteRoute: (id: number) => req(`/admin/api/routes/${id}`, { method: "DELETE" }),
   batchDeleteRoutes: (ids: number[]) =>
@@ -367,10 +383,15 @@ export const api = {
   groupsImport: (body: { groups: ImportGroupPayload[] }): Promise<{ ok: boolean; imported: { id: number; name: string; action: string; routes: number; time_rules: number; skipped_routes: number }[] }> =>
     req("/admin/api/groups/import", { method: "POST", body: JSON.stringify(body) }),
 
-  usage: (page?: number, pageSize?: number): Promise<{ data: any[]; total: number; page: number; page_size: number; total_pages: number }> => {
+  usage: (page?: number, pageSize?: number, filters?: { model?: string; status?: "ok" | "fail"; start?: number; end?: number }): Promise<{ data: any[]; total: number; page: number; page_size: number; total_pages: number }> => {
     const qs = new URLSearchParams();
     if (typeof page === "number") qs.set("page", String(page));
     if (typeof pageSize === "number") qs.set("page_size", String(pageSize));
+    if (filters?.model && filters.model !== "all") qs.set("model", filters.model);
+    if (filters?.status === "ok") qs.set("status", "true");
+    if (filters?.status === "fail") qs.set("status", "false");
+    if (typeof filters?.start === "number") qs.set("start", String(filters.start));
+    if (typeof filters?.end === "number") qs.set("end", String(filters.end));
     const s = qs.toString();
     return req(`/admin/api/usage${s ? "?" + s : ""}`);
   },
@@ -860,4 +881,5 @@ export interface UsageBreakdownResp {
   providers: UsageBreakdownRow[];
   users: UsageBreakdownRow[];
   keys: UsageBreakdownRow[];
+  models: UsageBreakdownRow[];
 }

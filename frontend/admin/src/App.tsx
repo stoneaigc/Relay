@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
-import { Users as UsersIcon, UsersRound, KeyRound, Copy, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen, SlidersHorizontal, Undo2, Ban, ChevronRight } from "lucide-react";
+import { Users as UsersIcon, UsersRound, KeyRound, Copy, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen, SlidersHorizontal, Undo2, Ban, ChevronRight, ArrowUp, ArrowDown } from "lucide-react";
 import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, UserGroupRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint, AdminKeyRow, AdminApiKeyRow } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
@@ -97,15 +97,15 @@ const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: a
       { path: "/upstreams", label: "上游治理", icon: Zap },
       { path: "/metrics", label: "接口指标", icon: Activity },
       { path: "/request-logs", label: "请求链路", icon: GitBranch },
-      { path: "/cache", label: "语义缓存", icon: Database },
       { path: "/usage", label: "全局用量", icon: BarChart3 },
-      { path: "/audit", label: "操作审计", icon: ShieldCheck },
     ],
   },
   {
     title: "系统",
     items: [
       { path: "/docs", label: "API 文档", icon: BookOpen },
+      { path: "/cache", label: "语义缓存", icon: Database },
+      { path: "/audit", label: "操作审计", icon: ShieldCheck },
       { path: "/settings", label: "设置", icon: Settings },
     ],
   },
@@ -512,6 +512,11 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
                     {userGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
                   </select></div>
               </div>
+              {selGroup && selGroup.model_group_ids.length > 0 && (
+                <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                  用户组「{selGroup.name}」已绑定 {selGroup.model_group_ids.length} 个模型组,将按绑定优先级接管「能用什么」;左侧直属模型组不再生效(仅作兜底)。
+                </p>
+              )}
             </SheetSection>
             <SheetSection title="限额与预算" hint={limitHint}>
               <div><label className={lbl}>并发上限</label>
@@ -1030,16 +1035,20 @@ function LimitCell({ v, def, compact }: { v: number | null; def?: number; compac
 
 function UserGroupsPanel() {
   const [rows, setRows] = useState<UserGroupRow[]>([]);
+  const [groups, setGroups] = useState<GroupRow[]>([]);
   const [defaults, setDefaults] = useState<{ concurrency_limit: number; rpm_limit: number; tpm_limit: number }>({ concurrency_limit: 0, rpm_limit: 0, tpm_limit: 0 });
   const [dlg, setDlg] = useState<{ edit: UserGroupRow | null } | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [err, setErr] = useState("");
+  // 客户端分页(用户组数量有限,无服务端分页端点)
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
 
   const load = async () => {
     setErr("");
     try {
-      const r = await api.userGroups();
-      setRows(r.data); setDefaults(r.defaults);
+      const [r, g] = await Promise.all([api.userGroups(), api.groups()]);
+      setRows(r.data); setDefaults(r.defaults); setGroups(g.data);
     } catch (e: any) {
       // 401 已由 api 层广播全局跳登录;其余错误就地展示,避免整页静默空白。
       setErr(e.message || "加载失败");
@@ -1062,7 +1071,7 @@ function UserGroupsPanel() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="space-y-1">
               <CardTitle className="text-base">用户组(限额模板)</CardTitle>
-              <CardDescription>用户组控制"能用多少"——并发 / 速率 / 预算;用户显式设置优先于组值,组值优先于全局默认。</CardDescription>
+              <CardDescription>用户组控制"能用多少"——并发 / 速率 / 预算;绑定模型组后同时接管"能用什么"——请求按绑定优先级选组,组内按该组负载策略分流。</CardDescription>
             </div>
             <Button size="sm" onClick={() => setDlg({ edit: null })}><Plus className="h-4 w-4" />创建用户组</Button>
           </div>
@@ -1071,14 +1080,28 @@ function UserGroupsPanel() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>名称</TableHead><TableHead>并发上限</TableHead><TableHead>RPM</TableHead><TableHead>TPM</TableHead>
+                <TableHead>名称</TableHead><TableHead>模型组绑定(优先级)</TableHead><TableHead>并发上限</TableHead><TableHead>RPM</TableHead><TableHead>TPM</TableHead>
                 <TableHead>日预算</TableHead><TableHead>月预算</TableHead><TableHead>成员数</TableHead><TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rows.map((g) => (
+              {rows.slice((page - 1) * pageSize, page * pageSize).map((g) => (
                 <TableRow key={g.id}>
                   <TableCell className="max-w-[160px] truncate font-medium" title={g.name}>{g.name}</TableCell>
+                  <TableCell className="max-w-[220px]">
+                    {g.model_group_ids.length > 0 ? (
+                      <div className="flex flex-wrap gap-1">
+                        {g.model_group_ids.map((gid, i) => (
+                          <span key={gid} className="inline-flex items-center gap-1 rounded-md bg-muted/60 px-1.5 py-0.5 text-xs">
+                            <span className="mono text-[10px] text-muted-foreground">{i + 1}</span>
+                            {groups.find((x) => x.id === gid)?.name ?? `#${gid}`}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-xs text-muted-foreground" title="组内用户沿用其直属模型组(users.group_id)">未绑定 · 沿用用户直属组</span>
+                    )}
+                  </TableCell>
                   <TableCell><LimitCell v={g.max_concurrency} def={defaults.concurrency_limit} /></TableCell>
                   <TableCell><LimitCell v={g.rpm_limit} def={defaults.rpm_limit} /></TableCell>
                   <TableCell><LimitCell v={g.tpm_limit} def={defaults.tpm_limit} /></TableCell>
@@ -1098,25 +1121,26 @@ function UserGroupsPanel() {
                 </TableRow>
               ))}
               {rows.length === 0 && !err && (
-                <TableRow><TableCell colSpan={8} className="py-10 text-center text-sm text-muted-foreground">还没有用户组,创建后可在用户管理里批量套用限额</TableCell></TableRow>
+                <TableRow><TableCell colSpan={9} className="py-10 text-center text-sm text-muted-foreground">还没有用户组,创建后可在用户管理里批量套用限额</TableCell></TableRow>
               )}
               {err && (
-                <TableRow><TableCell colSpan={8} className="py-10 text-center text-sm text-destructive">
+                <TableRow><TableCell colSpan={9} className="py-10 text-center text-sm text-destructive">
                   加载失败:{err} <Button size="sm" variant="outline" className="ml-2 h-7" onClick={load}>重试</Button>
                 </TableCell></TableRow>
               )}
             </TableBody>
           </Table>
+          <PaginationBar page={page} pageSize={pageSize} total={rows.length} onPageChange={setPage} onPageSizeChange={(s) => { setPage(1); setPageSize(s); }} />
         </CardContent>
       </Card>
 
-      <UserGroupDialog dlg={dlg} defaults={defaults} onClose={() => setDlg(null)} onSaved={load} />
+      <UserGroupDialog dlg={dlg} defaults={defaults} groups={groups} onClose={() => setDlg(null)} onSaved={load} />
       <ConfirmDialog confirm={confirm} onClose={() => setConfirm(null)} />
     </div>
   );
 }
 
-function UserGroupDialog({ dlg, defaults, onClose, onSaved }: { dlg: { edit: UserGroupRow | null } | null; defaults: { concurrency_limit: number; rpm_limit: number; tpm_limit: number }; onClose: () => void; onSaved: () => void }) {
+function UserGroupDialog({ dlg, defaults, groups, onClose, onSaved }: { dlg: { edit: UserGroupRow | null } | null; defaults: { concurrency_limit: number; rpm_limit: number; tpm_limit: number }; groups: GroupRow[]; onClose: () => void; onSaved: () => void }) {
   const open = !!dlg;
   const edit = dlg?.edit ?? null;
   const [name, setName] = useState("");
@@ -1125,6 +1149,9 @@ function UserGroupDialog({ dlg, defaults, onClose, onSaved }: { dlg: { edit: Use
   const [tpm, setTpm] = useState("");
   const [daily, setDaily] = useState("");
   const [monthly, setMonthly] = useState("");
+  // 绑定的有序模型组(下标即优先级,0=最高)。
+  const [mgIds, setMgIds] = useState<number[]>([]);
+  const [mgPick, setMgPick] = useState("0");
   const [err, setErr] = useState("");
   useEffect(() => {
     if (open) {
@@ -1134,11 +1161,20 @@ function UserGroupDialog({ dlg, defaults, onClose, onSaved }: { dlg: { edit: Use
       setTpm(edit?.tpm_limit == null ? "" : String(edit.tpm_limit));
       setDaily(edit?.budget_daily_tokens == null ? "" : String(edit.budget_daily_tokens));
       setMonthly(edit?.budget_monthly_tokens == null ? "" : String(edit.budget_monthly_tokens));
+      setMgIds(edit?.model_group_ids ?? []); setMgPick("0");
     }
   }, [dlg]);
 
   // 空串 = null(继承全局默认),数字 = 显式限额,0 = 不限
   const num = (s: string) => (s.trim() === "" ? null : Number(s));
+  const nameOf = (id: number) => groups.find((g) => g.id === id)?.name ?? `#${id}`;
+  const move = (i: number, d: -1 | 1) => {
+    const j = i + d;
+    if (j < 0 || j >= mgIds.length) return;
+    const next = [...mgIds];
+    [next[i], next[j]] = [next[j], next[i]];
+    setMgIds(next);
+  };
 
   const submit = async () => {
     setErr("");
@@ -1146,8 +1182,9 @@ function UserGroupDialog({ dlg, defaults, onClose, onSaved }: { dlg: { edit: Use
     const vals = {
       max_concurrency: num(conc), rpm_limit: num(rpm), tpm_limit: num(tpm),
       budget_daily_tokens: num(daily), budget_monthly_tokens: num(monthly),
+      model_group_ids: mgIds,
     };
-    for (const v of Object.values(vals)) {
+    for (const v of [vals.max_concurrency, vals.rpm_limit, vals.tpm_limit, vals.budget_daily_tokens, vals.budget_monthly_tokens]) {
       if (v != null && (!Number.isFinite(v) || v < 0)) { setErr("限额需为非负数字,留空 = 继承全局,0 = 不限"); return; }
       if (v != null && !Number.isInteger(v)) { setErr("限额需为整数"); return; }
     }
@@ -1168,6 +1205,44 @@ function UserGroupDialog({ dlg, defaults, onClose, onSaved }: { dlg: { edit: Use
         <div className="space-y-3">
           <div><label className="mb-1 block text-xs text-muted-foreground">名称 *</label>
             <Input placeholder="如:基础版 / 专业版 / 旗舰版" value={name} maxLength={32} onChange={(e) => setName(e.target.value)} autoFocus /></div>
+          <div className="rounded-lg border border-border p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <label className="text-xs font-medium text-muted-foreground">模型组绑定(自上而下 = 优先级从高到低)</label>
+            </div>
+            {mgIds.length === 0 && (
+              <p className="mb-2 text-xs text-muted-foreground">未绑定模型组:组内用户沿用其「直属模型组」。</p>
+            )}
+            <div className="space-y-1.5">
+              {mgIds.map((gid, i) => (
+                <div key={gid} className="flex items-center gap-2 rounded-md bg-muted/50 px-2 py-1.5 text-sm">
+                  <span className="mono w-5 text-center text-xs text-muted-foreground">{i + 1}</span>
+                  <span className="min-w-0 flex-1 truncate font-medium">{nameOf(gid)}</span>
+                  {i === 0 && <span className="rounded bg-brand-100 px-1.5 py-0.5 text-[10px] font-medium text-brand-700">主用</span>}
+                  {i > 0 && <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">容灾</span>}
+                  <button type="button" aria-label="上移" disabled={i === 0} onClick={() => move(i, -1)}
+                    className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30"><ArrowUp className="h-3.5 w-3.5" /></button>
+                  <button type="button" aria-label="下移" disabled={i === mgIds.length - 1} onClick={() => move(i, 1)}
+                    className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30"><ArrowDown className="h-3.5 w-3.5" /></button>
+                  <button type="button" aria-label="移除" onClick={() => setMgIds(mgIds.filter((x) => x !== gid))}
+                    className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-destructive"><X className="h-3.5 w-3.5" /></button>
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 flex gap-2">
+              <select value={mgPick} onChange={(e) => setMgPick(e.target.value)}
+                className="h-9 min-w-0 flex-1 rounded-lg border border-input bg-card px-2.5 text-sm shadow-card transition-[border-color,box-shadow] hover:border-border-strong focus:border-brand-400 focus:outline-none focus:ring-4 focus:ring-brand-500/15">
+                <option value="0">选择要添加的模型组…</option>
+                {groups.filter((g) => !mgIds.includes(g.id)).map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+              </select>
+              <Button size="sm" variant="outline" disabled={mgPick === "0"}
+                onClick={() => { setMgIds([...mgIds, Number(mgPick)]); setMgPick("0"); }}>
+                <Plus className="h-4 w-4" />添加
+              </Button>
+            </div>
+            <p className="mt-2 text-xs leading-5 text-muted-foreground">
+              请求先命中高优先级组;同名对外模型在组内按<b>该组自己的负载策略</b>分流,全部失败才跨组容灾到下一组。
+            </p>
+          </div>
           <div className="grid grid-cols-3 gap-3">
             <div><label className="mb-1 block text-xs text-muted-foreground">并发上限</label>
               <Input placeholder={`继承全局(${defaults.concurrency_limit})`} value={conc} onChange={(e) => setConc(e.target.value)} /></div>
@@ -1211,31 +1286,58 @@ function fmtDateTime(v: string | null | undefined): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+type KeyStatusFilter = "all" | "enabled" | "pending" | "revoked";
+const KEY_STATUS_TABS: { v: KeyStatusFilter; label: string }[] = [
+  { v: "all", label: "全部" },
+  { v: "enabled", label: "启用" },
+  { v: "pending", label: "待审批" },
+  { v: "revoked", label: "已吊销" },
+];
+
 function KeysPanel() {
   const [rows, setRows] = useState<AdminKeyRow[]>([]);
   const [err, setErr] = useState("");
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   const [scope, setScope] = useState<AdminKeyRow | null>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
+  const [statusFilter, setStatusFilter] = useState<KeyStatusFilter>("all");
+  const [kw, setKw] = useState("");
 
-  const load = async () => {
+  const load = async (p?: number, size?: number) => {
     setErr("");
+    const pg = p ?? page;
     try {
-      setRows((await api.allKeys()).data);
+      const r = await api.allKeys(pg, size ?? pageSize, statusFilter === "all" ? undefined : statusFilter, kw);
+      setRows(r.data);
+      setTotal(r.total);
+      setPage(pg);
     } catch (e: any) {
       // 401 已由 api 层广播全局跳登录;其余错误就地展示。
       setErr(e.message || "加载失败");
     }
   };
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(1); }, [statusFilter]);
+  // 关键字防抖:300ms 后回第 1 页服务端搜索。
+  const firstKw = useRef(true);
+  useEffect(() => {
+    if (firstKw.current) { firstKw.current = false; return; }
+    const t = setTimeout(() => load(1), 300);
+    return () => clearTimeout(t);
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [kw]);
 
+  // 撤销审批:Key 状态回到「待审批」并立即从内存摘除 → 不可用;批准后恢复。
   const setApproved = async (k: AdminKeyRow, approved: boolean) => {
     try { await api.patchKey(k.id, { approved }); await load(); }
     catch (e: any) { setErr(e.message); }
   };
+  // 吊销:硬删除该密钥(行移除,不可恢复)。
   const revoke = (k: AdminKeyRow) => setConfirm({
-    title: "吊销该 Key?",
-    desc: "该 Key 将立即失效,使用它的应用会中断。",
-    confirmLabel: "吊销",
+    title: "吊销并删除该 Key?",
+    desc: "密钥将立即删除,使用它的应用会中断,且不可恢复。",
+    confirmLabel: "吊销删除",
     action: async () => { await api.revokeKey(k.id); await load(); },
   });
 
@@ -1245,10 +1347,25 @@ function KeysPanel() {
         <CardHeader>
           <div className="space-y-1">
             <CardTitle className="text-base">API 密钥</CardTitle>
-            <CardDescription>全部用户 Key 的集中管控:审批、模型范围与吊销,操作即时生效(最多展示 500 条)。</CardDescription>
+            <CardDescription>全部用户 Key 的集中管控:审批、模型范围与吊销,操作即时生效。</CardDescription>
           </div>
         </CardHeader>
         <CardContent>
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div className="inline-flex rounded-lg border border-input bg-card p-0.5 text-xs">
+              {KEY_STATUS_TABS.map(({ v, label }) => (
+                <button key={v} onClick={() => setStatusFilter(v)}
+                  className={cn("rounded-md px-3 py-1 transition-colors",
+                    statusFilter === v ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground")}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="relative w-64">
+              <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input className="h-8 pl-8" placeholder="搜索属主(用户名/手机号)" value={kw} onChange={(e) => setKw(e.target.value)} />
+            </div>
+          </div>
           <Table>
             <TableHeader>
               <TableRow>
@@ -1265,7 +1382,7 @@ function KeysPanel() {
                       {k.username || k.phone || k.user_id.slice(0, 8)}
                     </TableCell>
                     <TableCell><Badge variant="muted">{k.interface_kind}</Badge></TableCell>
-                    <TableCell><span className="mono text-xs">{k.key_prefix}</span></TableCell>
+                    <TableCell><span className="mono text-xs" title={`完整前缀 ${k.key_prefix}`}>{k.key_masked || k.key_prefix}</span></TableCell>
                     <TableCell>
                       {k.revoked ? <Badge variant="muted">已吊销</Badge>
                         : k.status === 1 ? <Badge variant="muted" className="border-amber-500/30 bg-amber-500/10 text-amber-600">待审批</Badge>
@@ -1293,19 +1410,20 @@ function KeysPanel() {
                 );
               })}
               {rows.length === 0 && !err && (
-                <TableRow><TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">暂无任何 API Key</TableCell></TableRow>
+                <TableRow><TableCell colSpan={7} className="py-10 text-center text-sm text-muted-foreground">暂无符合条件的 API Key</TableCell></TableRow>
               )}
               {err && (
                 <TableRow><TableCell colSpan={7} className="py-10 text-center text-sm text-destructive">
-                  加载失败:{err} <Button size="sm" variant="outline" className="ml-2 h-7" onClick={load}>重试</Button>
+                  加载失败:{err} <Button size="sm" variant="outline" className="ml-2 h-7" onClick={() => load()}>重试</Button>
                 </TableCell></TableRow>
               )}
             </TableBody>
           </Table>
+          <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={(p) => load(p)} onPageSizeChange={(s) => { setPageSize(s); load(1, s); }} />
         </CardContent>
       </Card>
 
-      <KeyScopeDialog keyRow={scope} onClose={() => setScope(null)} onSaved={load} />
+      <KeyScopeDialog keyRow={scope} onClose={() => setScope(null)} onSaved={() => load()} />
       <ConfirmDialog confirm={confirm} onClose={() => setConfirm(null)} />
     </div>
   );
@@ -1442,6 +1560,21 @@ function ModelsPanel() {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [provSelected, setProvSelected] = useState<Set<string>>(new Set());
   const [health, setHealth] = useState<Record<string, ProviderHealthItem>>({});
+  // 对外模型映射:组路由(public_name) ↔ 上游模型(model_id),双向透明
+  const [routeMap, setRouteMap] = useState<Record<number, { group: string; public_name: string }[]>>({});
+
+  const loadRouteMap = async () => {
+    try {
+      const g = await api.groups();
+      const pairs = await Promise.all(g.data.map(async (grp) => ({ name: grp.name, routes: (await api.routes(grp.id)).data })));
+      const m: Record<number, { group: string; public_name: string }[]> = {};
+      for (const { name, routes } of pairs) {
+        for (const r of routes) (m[r.model_id] ??= []).push({ group: name, public_name: r.public_name });
+      }
+      setRouteMap(m);
+    } catch { /* 静默:映射展示为空不阻断主列表 */ }
+  };
+  useEffect(() => { loadRouteMap(); }, []);
 
   const loadProviders = async (p?: number, kw?: string) => {
     const pg = p ?? page;
@@ -1495,7 +1628,7 @@ function ModelsPanel() {
   const delProvider = (p: ProviderRow) => setConfirm({
     title: `删除上游「${providerDisplayName(p)}」?`,
     desc: `将删除该上游下的 ${p.model_count} 个模型及其所有路由，不可恢复。`,
-    action: async () => { await api.deleteProvider(p.name); loadProviders(); },
+    action: async () => { await api.deleteProvider(p.name); loadProviders(); loadRouteMap(); },
   });
 
   // 供应商级多选批量删除:卡片头部复选框勾选,头部"删除所选"一键级联删除。
@@ -1517,6 +1650,7 @@ function ModelsPanel() {
         setSelected((s) => { const n = new Set(s); ids.forEach((id) => n.delete(id)); return n; });
         setProvSelected(new Set());
         await loadProviders();
+        loadRouteMap();
       },
     });
   };
@@ -1528,6 +1662,7 @@ function ModelsPanel() {
       await api.deleteModel(m.id);
       setSelected((s) => { const n = new Set(s); n.delete(m.id); return n; });
       await loadProviders();
+      loadRouteMap();
       if (expanded.has(provider)) await refreshProviderModels(provider);
     },
   });
@@ -1556,6 +1691,7 @@ function ModelsPanel() {
         await api.deleteModelsBatch(ids);
         setSelected((s) => { const n = new Set(s); ids.forEach((id) => n.delete(id)); return n; });
         await loadProviders();
+        loadRouteMap();
         if (expanded.has(name)) await refreshProviderModels(name);
       },
     });
@@ -1720,6 +1856,18 @@ function ModelsPanel() {
                         ) : (
                           <Badge variant="muted" className="border-amber-500/30 bg-amber-500/15 text-amber-600" title="未定价模型按内置默认价表计费,成本统计可能偏低;点击右侧 $ 按钮设置">未定价</Badge>
                         )}
+                        {/* 对外映射:该上游模型被哪些「组/对外模型名」引用 */}
+                        <span className="hidden items-center gap-1 xl:flex" title="对外模型映射:模型组/对外模型名">
+                          {(routeMap[m.id] ?? []).slice(0, 2).map((x, i) => (
+                            <Badge key={i} variant="muted" className="text-[10px] font-normal">{x.group}/{x.public_name}</Badge>
+                          ))}
+                          {(routeMap[m.id] ?? []).length > 2 && (
+                            <span className="text-[10px] text-muted-foreground" title={(routeMap[m.id] ?? []).map((x) => `${x.group}/${x.public_name}`).join("\n")}>
+                              +{(routeMap[m.id] ?? []).length - 2}
+                            </span>
+                          )}
+                          {(routeMap[m.id] ?? []).length === 0 && <span className="text-[10px] text-muted-foreground/70">未加入路由</span>}
+                        </span>
                       </div>
                       <div className="flex items-center gap-2">
                         {(() => {
@@ -2007,7 +2155,8 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className={fetchedModels.length > 0 ? "max-w-2xl" : ""}>
+      {/* 探测结果出现前后保持同一宽度,避免选供应商时弹窗跳变 */}
+      <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle>添加上游</DialogTitle>
           <DialogDescription>选择供应商后可探测模型列表并批量添加</DialogDescription>
@@ -2208,6 +2357,7 @@ function PricingDialog({ provider, model, onClose, onSaved }: { provider: Provid
 function GroupsPanel() {
   const [groups, setGroups] = useState<GroupRow[]>([]);
   const [models, setModels] = useState<ModelRow[]>([]);
+  const [provMap, setProvMap] = useState<Record<string, string>>({});
   const [sel, setSel] = useState<number | null>(null);
   const [routes, setRoutes] = useState<RouteRow[]>([]);
   const [timeRules, setTimeRules] = useState<TimeRuleRow[]>([]);
@@ -2220,6 +2370,9 @@ function GroupsPanel() {
   const [checked, setChecked] = useState<Set<number>>(new Set());
   const [importOpen, setImportOpen] = useState(false);
   const [batchDlg, setBatchDlg] = useState<"multiplier" | "weight" | null>(null);
+  // 路由表客户端分页(勾选跨页保留)
+  const [routePage, setRoutePage] = useState(1);
+  const routePageSize = 20;
 
   const loadGroups = async () => {
     const [g, m] = await Promise.all([api.groups(), api.models()]);
@@ -2229,8 +2382,8 @@ function GroupsPanel() {
   };
   const loadRoutes = async (gid: number) => { setRoutes((await api.routes(gid)).data); };
   const loadTimeRules = async (gid: number) => { setTimeRules((await api.timeRules(gid)).data); };
-  useEffect(() => { loadGroups(); }, []);
-  useEffect(() => { if (sel != null) { loadRoutes(sel); loadTimeRules(sel); } setChecked(new Set()); }, [sel]);
+  useEffect(() => { loadGroups(); api.providers(1, 200).then((r) => setProvMap(Object.fromEntries(r.data.map((p) => [p.name, providerDisplayName(p)])))).catch(() => { /* 静默 */ }); }, []);
+  useEffect(() => { if (sel != null) { loadRoutes(sel); loadTimeRules(sel); } setChecked(new Set()); setRoutePage(1); }, [sel]);
 
   const createGroup = async (name: string) => { const r = await api.addGroup(name); await loadGroups(); setSel(r.id); };
   const setActive = async (g: GroupRow) => { if (!g.is_active) { await api.activateGroup(g.id); loadGroups(); } };
@@ -2287,13 +2440,22 @@ function GroupsPanel() {
   const STRATEGY_LABEL: Record<string, string> = {
     weighted_random: "加权随机（默认）",
     weighted_round_robin: "加权轮询",
-    round_robin: "简单轮询",
-    priority: "优先级（故障转移链）",
-    cost_aware: "成本优先",
-    latency_aware: "延迟优先",
+    auto: "智能自适应",
+  };
+  // 各负载策略的语义与配置指引(选中即提示,降低误配成本)。
+  const STRATEGY_HINT: Record<string, string> = {
+    weighted_random: "按「权重」比例随机分流,权重越大命中概率越高;适合大多数场景。配置:给同档路由设权重(如 70/30)。",
+    weighted_round_robin: "按「权重」比例轮转分流(累计分布严格符合权重,无随机抖动);适合需要按比例分摊的场景。配置:给同档路由设权重;权重全填 1 即简单轮询。",
+    auto: "按「延迟 + 成本」综合得分自适应:得分越低越优先;新上线无延迟数据的上游按中位数参与并保留少量探索流量(不会饿死)。配置:给模型填单价,权重保持默认即可。",
   };
   const curStrategy = groups.find((g) => g.id === sel)?.strategy ?? "weighted_random";
   const filteredGroups = groups.filter((g) => !gq.trim() || g.name.includes(gq.trim()));
+  // 路由分页切片(始终按 优先级降序 → 权重降序 排列,便于查看故障转移链)
+  const routeTotal = routes.length;
+  const routeTotalPages = Math.max(1, Math.ceil(routeTotal / routePageSize));
+  const curRoutePage = Math.min(routePage, routeTotalPages);
+  const sortedRoutes = [...routes].sort((a, b) => b.priority - a.priority || b.weight - a.weight || a.id - b.id);
+  const pageRows = sortedRoutes.slice((curRoutePage - 1) * routePageSize, curRoutePage * routePageSize);
 
   return (
     <div className="grid h-full min-h-0 gap-5 md:grid-cols-[260px_1fr]">
@@ -2348,10 +2510,7 @@ function GroupsPanel() {
                   <select value={curStrategy} onChange={(e) => setStrategy(sel, e.target.value)} className="h-8 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring">
                     <option value="weighted_random">加权随机</option>
                     <option value="weighted_round_robin">加权轮询</option>
-                    <option value="round_robin">简单轮询</option>
-                    <option value="priority">优先级（故障转移链）</option>
-                    <option value="cost_aware">成本优先</option>
-                    <option value="latency_aware">延迟优先</option>
+                    <option value="auto">智能自适应</option>
                   </select>
                 </div>
               )}
@@ -2363,9 +2522,11 @@ function GroupsPanel() {
               )}
             </div>
           </div>
-          {curStrategy === "priority" && <p className="mt-1 text-[11px] text-muted-foreground">优先级模式:数字越大越优先;主模型故障时自动切换到下一个。</p>}
-          {curStrategy === "cost_aware" && <p className="mt-1 text-[11px] text-muted-foreground">成本优先模式:按 单价×倍率 从低到高选择;未定价模型自动殿后,同价随机分摊。</p>}
-          {curStrategy === "latency_aware" && <p className="mt-1 text-[11px] text-muted-foreground">延迟优先模式:按窗口内 P50 延迟从低到高选择;无数据候选自动殿后随机分摊,快照每 15 秒刷新一次。</p>}
+          {sel != null && STRATEGY_HINT[curStrategy] && (
+            <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground" title="负载策略说明">
+              <span className="font-medium text-foreground/80">{STRATEGY_LABEL[curStrategy]}:</span>{STRATEGY_HINT[curStrategy]}
+            </p>
+          )}
         </CardHeader>
         <CardContent className="min-h-0 flex-1 overflow-auto">
           {sel == null ? <p className="text-sm text-muted-foreground">先选择左侧一个模型组</p> : (
@@ -2379,6 +2540,11 @@ function GroupsPanel() {
                   </div>
                   <Button size="sm" variant="outline" onClick={() => setTimeRuleDlg({ edit: null })}><Plus className="h-4 w-4" />添加时段</Button>
                 </div>
+                <p className="mb-2.5 text-[11px] leading-relaxed text-muted-foreground">
+                  搭配指引:时段规则命中时,<span className="text-foreground/75">计费倍率</span>按该时段 ×multiplier 结算;
+                  <span className="text-foreground/75">权重覆盖</span>可临时改写各对外模型的路由权重(负载策略仍按当前模式执行,只是权重输入被临时替换)。
+                  典型用法:高峰期 ×1.3 并把权重压向稳定供应商;低谷期 ×0.7 促销,或把权重调向便宜的模型。
+                </p>
                 {timeRules.length === 0 ? (
                   <p className="text-xs text-muted-foreground">尚未配置时段规则。未命中时段时,使用默认倍率 ×1.0 与默认权重。</p>
                 ) : (
@@ -2406,54 +2572,57 @@ function GroupsPanel() {
                   </div>
                 )}
               </div>
-              {checked.size > 0 ? (
-                <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
-                  <Badge>已选 {checked.size} 条</Badge>
-                  <Button size="sm" variant="outline" onClick={() => setBatchDlg("multiplier")}>批量改倍率</Button>
-                  <Button size="sm" variant="outline" onClick={() => setBatchDlg("weight")}>批量改权重</Button>
-                  <Button size="sm" variant="destructive" onClick={delRoutesBatch}><Trash2 className="h-4 w-4" />批量删除</Button>
-                  <Button size="sm" variant="ghost" onClick={() => setChecked(new Set())}>取消选择</Button>
-                </div>
-              ) : (
-                <p className="mb-3 text-xs text-muted-foreground">用户请求「对外模型名」→ 路由到指定模型;响应里保留用户传的名字。同名多条按权重/优先级分流。</p>
-              )}
+              {/* 批量操作区:固定高度占位,勾选出现/消失不再引起下方表格跳动 */}
+              <div className="mb-3 flex min-h-[44px] flex-wrap items-center gap-2 rounded-lg border border-transparent px-3 py-1.5">
+                {checked.size > 0 ? (
+                  <>
+                    <Badge>已选 {checked.size} 条</Badge>
+                    <Button size="sm" variant="outline" onClick={() => setBatchDlg("multiplier")}>批量改倍率</Button>
+                    <Button size="sm" variant="outline" onClick={() => setBatchDlg("weight")}>批量改权重</Button>
+                    <Button size="sm" variant="destructive" onClick={delRoutesBatch}><Trash2 className="h-4 w-4" />批量删除</Button>
+                    <Button size="sm" variant="ghost" onClick={() => setChecked(new Set())}>取消选择</Button>
+                  </>
+                ) : (
+                  <p className="text-xs text-muted-foreground">用户请求「对外模型名」→ 路由到指定模型;响应里保留用户传的名字。同名多条先按「优先级」分档(数值越大越优先),同档内再按「权重」分流。</p>
+                )}
+              </div>
               <Table>
                 <TableHeader><TableRow>
                   <TableHead className="w-9 pr-0">
-                    <input type="checkbox" className="h-3.5 w-3.5 accent-primary" title="全选本组路由"
-                      checked={routes.length > 0 && checked.size === routes.length}
-                      onChange={(e) => setChecked(e.target.checked ? new Set(routes.map((r) => r.id)) : new Set())} />
+                    <input type="checkbox" className="h-3.5 w-3.5 accent-primary" title="全选本页路由"
+                      checked={pageRows.length > 0 && pageRows.every((r) => checked.has(r.id))}
+                      onChange={(e) => setChecked((prev) => {
+                        const next = new Set(prev);
+                        pageRows.forEach((r) => (e.target.checked ? next.add(r.id) : next.delete(r.id)));
+                        return next;
+                      })} />
                   </TableHead>
                   <TableHead>对外模型名</TableHead><TableHead>→ 实际模型</TableHead>
-                  <TableHead>{curStrategy === "priority" ? "优先级" : "权重"}</TableHead>
+                  <TableHead>优先级</TableHead><TableHead>权重</TableHead>
                   <TableHead>倍率</TableHead><TableHead>缓存</TableHead><TableHead className="text-right">操作</TableHead>
                 </TableRow></TableHeader>
                 <TableBody>
-                  {(() => {
-                    // 优先级模式:按权重降序排列,同名路由形成故障转移链
-                    const sorted = curStrategy === "priority"
-                      ? [...routes].sort((a, b) => b.weight - a.weight || a.id - b.id)
-                      : routes;
-                    return sorted.map((r, idx) => {
-                      // 故障链指示:同名路由之间的连接线
-                      const prevSameName = idx > 0 && sorted[idx - 1].public_name === r.public_name;
+                  {pageRows.map((r) => {
+                      const provName = provMap[r.provider] ?? r.provider;
                       return (
                         <TableRow key={r.id} data-checked={checked.has(r.id) || undefined} className={cn(checked.has(r.id) && "bg-primary/5")}>
                           <TableCell>
                             <input type="checkbox" className="h-3.5 w-3.5 accent-primary" checked={checked.has(r.id)} onChange={() => toggleChecked(r.id)} />
                           </TableCell>
                           <TableCell className="mono">
-                            {curStrategy === "priority" && prevSameName && <span className="mr-1 text-muted-foreground">↓</span>}
                             {r.public_name}
                           </TableCell>
-                          <TableCell className="text-xs text-muted-foreground">{(r.label ? r.label + " · " : "") }<span className="mono">{r.provider}/{r.upstream_model}</span></TableCell>
-                          <TableCell>
-                            {curStrategy === "priority" ? (
-                              <Badge variant={idx === 0 || (prevSameName && sorted[idx - 1].public_name !== r.public_name) ? "default" : "muted"}>
-                                P{idx + 1}
-                              </Badge>
-                            ) : r.weight}
+                          <TableCell className="text-xs text-muted-foreground" title={`${provName} · ${r.provider}/${r.upstream_model}`}>
+                            {(r.label ? r.label + " · " : "")}
+                            <span className="font-medium text-foreground/80">{provName}</span>
+                            <span className="mono">/{r.upstream_model}</span>
                           </TableCell>
+                          <TableCell>
+                            <Badge variant={r.priority > 0 ? "default" : "muted"} title="数值越大越优先;只有更高优先级档全部失败才会降档,同档内按当前负载策略分流">
+                              {r.priority}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>{r.weight}</TableCell>
                           <TableCell><Badge variant={r.multiplier === 1 ? "muted" : "default"}>×{r.multiplier}</Badge></TableCell>
                           <TableCell>
                             {r.cache_enabled
@@ -2468,17 +2637,20 @@ function GroupsPanel() {
                           </TableCell>
                     </TableRow>
                   );
-                    });
-                  })()}
-                  {routes.length === 0 && <TableRow><TableCell colSpan={7} className="text-sm text-muted-foreground">该组暂无路由</TableCell></TableRow>}
+                  })}
+                  {routes.length === 0 && <TableRow><TableCell colSpan={8} className="text-sm text-muted-foreground">该组暂无路由</TableCell></TableRow>}
                 </TableBody>
               </Table>
+              {routeTotal > routePageSize && (
+                <PaginationBar page={curRoutePage} pageSize={routePageSize} total={routeTotal}
+                  onPageChange={setRoutePage} onPageSizeChange={() => { /* 客户端分页,每页固定 20 */ }} />
+              )}
             </>
           )}
         </CardContent>
       </Card>
 
-      {sel != null && <AddRouteDialog dlg={routeDlg} groupId={sel} models={models} strategy={curStrategy} onClose={() => setRouteDlg(null)} onSaved={() => loadRoutes(sel)} />}
+      {sel != null && <AddRouteDialog dlg={routeDlg} groupId={sel} models={models} onClose={() => setRouteDlg(null)} onSaved={() => loadRoutes(sel)} />}
       {sel != null && <TimeRuleDialog dlg={timeRuleDlg} groupId={sel} onClose={() => setTimeRuleDlg(null)} onSaved={() => loadTimeRules(sel)} />}
       <AddGroupDialog open={groupOpen} onClose={() => setGroupOpen(false)} onCreate={createGroup} />
       {renameDlg && <RenameGroupDialog group={renameDlg} onClose={() => setRenameDlg(null)} onSaved={loadGroups} />}
@@ -2686,13 +2858,14 @@ function ImportGroupsDialog({ open, onClose, onImported }: { open: boolean; onCl
   );
 }
 
-function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
-  dlg: { edit: RouteRow | null } | null; groupId: number; models: ModelRow[]; strategy: string; onClose: () => void; onSaved: () => void;
+function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
+  dlg: { edit: RouteRow | null } | null; groupId: number; models: ModelRow[]; onClose: () => void; onSaved: () => void;
 }) {
   const open = !!dlg;
   const edit = dlg?.edit ?? null;
   const [publicName, setPublicName] = useState("");
   const [modelId, setModelId] = useState<number | "">("");
+  const [priority, setPriority] = useState("0");
   const [weight, setWeight] = useState("100");
   const [mult, setMult] = useState("1");
   const [useCache, setUseCache] = useState(false);
@@ -2700,17 +2873,17 @@ function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
   const [err, setErr] = useState("");
   // 批量模式
   const [selectedModels, setSelectedModels] = useState<Set<number>>(new Set());
-  const [routeRows, setRouteRows] = useState<Map<number, { public_name: string; weight: string; multiplier: string }>>(new Map());
+  const [routeRows, setRouteRows] = useState<Map<number, { public_name: string; priority: string; weight: string; multiplier: string }>>(new Map());
   const [submitting, setSubmitting] = useState(false);
   useEffect(() => {
     if (open) {
       if (edit) {
         setPublicName(edit.public_name); setModelId(edit.model_id);
-        setWeight(String(edit.weight)); setMult(String(edit.multiplier));
+        setPriority(String(edit.priority)); setWeight(String(edit.weight)); setMult(String(edit.multiplier));
         setUseCache(edit.cache_enabled);
       } else {
         setPublicName(""); setModelId(models[0]?.id ?? "");
-        setWeight("100"); setMult("1"); setUseCache(false); setBatchCache(false);
+        setPriority("0"); setWeight("100"); setMult("1"); setUseCache(false); setBatchCache(false);
         setSelectedModels(new Set()); setRouteRows(new Map()); setSelectedProvider("");
       }
       setErr("");
@@ -2724,7 +2897,7 @@ function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
       else {
         next.add(id);
         const m = models.find(x => x.id === id);
-        routeRows.set(id, { public_name: m?.upstream_model || "", weight: "100", multiplier: "1" });
+        routeRows.set(id, { public_name: m?.upstream_model || "", priority: "0", weight: "100", multiplier: "1" });
       }
       setRouteRows(new Map(routeRows));
       return next;
@@ -2739,20 +2912,20 @@ function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
   // 编辑模式:单个提交;批量模式:多条提交
   const submit = async () => {
     setErr(""); setSubmitting(true);
-    // 留空才用默认值;显式填 0 保留 0(权重/倍率 0 是合法值,不能被 || 吞掉)。
+    // 留空才用默认值;显式填 0 保留 0(优先级/权重/倍率 0 是合法值,不能被 || 吞掉)。
     const numOr = (s: string, def: number) => { const t = s.trim(); if (t === "") return def; const n = Number(t); return Number.isFinite(n) && n >= 0 ? n : def; };
     try {
       if (edit) {
-        await api.updateRoute(edit.id, { public_name: publicName.trim(), model_id: Number(modelId), weight: numOr(weight, 100), multiplier: numOr(mult, 1), cache: useCache });
+        await api.updateRoute(edit.id, { public_name: publicName.trim(), model_id: Number(modelId), priority: numOr(priority, 0), weight: numOr(weight, 100), multiplier: numOr(mult, 1), cache: useCache });
       } else if (selectedModels.size > 0) {
         const routes = [...selectedModels].map(id => {
           const row = routeRows.get(id);
-          return { public_name: row?.public_name || "", model_id: id, weight: numOr(row?.weight ?? "", 100), multiplier: numOr(row?.multiplier ?? "", 1) };
+          return { public_name: row?.public_name || "", model_id: id, priority: numOr(row?.priority ?? "", 0), weight: numOr(row?.weight ?? "", 100), multiplier: numOr(row?.multiplier ?? "", 1) };
         }).filter(r => r.public_name.trim());
         if (routes.length === 0) { setErr("请至少填写一个对外模型名"); setSubmitting(false); return; }
         await api.addRoutesBatch(groupId, { routes, cache: batchCache });
       } else {
-        await api.addRoute(groupId, { public_name: publicName.trim(), model_id: Number(modelId), weight: numOr(weight, 100), multiplier: numOr(mult, 1), cache: useCache });
+        await api.addRoute(groupId, { public_name: publicName.trim(), model_id: Number(modelId), priority: numOr(priority, 0), weight: numOr(weight, 100), multiplier: numOr(mult, 1), cache: useCache });
       }
       onSaved(); onClose();
     } catch (e: any) { setErr(e.message); }
@@ -2802,7 +2975,7 @@ function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
       for (const m of providerModels) {
         if (!next.has(m.id)) {
           next.add(m.id);
-          newRows.set(m.id, { public_name: m.upstream_model, weight: "100", multiplier: "1" });
+          newRows.set(m.id, { public_name: m.upstream_model, priority: "0", weight: "100", multiplier: "1" });
         }
       }
       setRouteRows(newRows);
@@ -2812,7 +2985,8 @@ function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className={batchMode ? "max-w-3xl max-h-[85vh]" : ""}>
+      {/* 单选/批量两模式共用同一宽度,避免模式切换时弹窗宽度跳变 */}
+      <DialogContent className="max-w-3xl">
         <DialogHeader>
           <DialogTitle>{edit ? "编辑路由" : "添加路由"}</DialogTitle>
           <DialogDescription>对外模型名 → 实际模型;可多选模型批量添加。</DialogDescription>
@@ -2831,7 +3005,8 @@ function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
                     </optgroup>
                   ))}
                 </select></div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
+                <div><label className="mb-1 block text-xs text-muted-foreground" title="数值越大越优先;只有更高优先级档全部失败才会降档,同档内按当前负载策略分流">优先级</label><Input value={priority} onChange={(e) => setPriority(e.target.value)} /></div>
                 <div><label className="mb-1 block text-xs text-muted-foreground">权重</label><Input value={weight} onChange={(e) => setWeight(e.target.value)} /></div>
                 <div><label className="mb-1 block text-xs text-muted-foreground">倍率</label><Input value={mult} onChange={(e) => setMult(e.target.value)} /></div>
               </div>
@@ -2875,17 +3050,18 @@ function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
                   <label className="block text-xs font-medium text-muted-foreground">配置每条路由</label>
                   <div className="max-h-64 overflow-y-auto rounded-lg border p-3">
                     {/* 表头 */}
-                    <div className="mb-1 grid grid-cols-[140px_20px_1fr_70px_70px_36px] items-center gap-2 text-[10px] text-muted-foreground">
+                    <div className="mb-1 grid grid-cols-[130px_16px_1fr_64px_64px_64px_32px] items-center gap-2 text-[10px] text-muted-foreground">
                       <span>对外模型名</span><span/>
                       <span>→ 实际模型</span>
-                      <span className="text-center">{strategy === "priority" ? "优先级" : "权重"}</span><span className="text-center">倍率</span><span/>
+                      <span className="text-center" title="数值越大越优先;同档内才按负载策略分流">优先级</span>
+                      <span className="text-center">权重</span><span className="text-center">倍率</span><span/>
                     </div>
                     {[...selectedModels].map(id => {
                       const m = models.find(x => x.id === id);
                       const row = routeRows.get(id);
                       if (!m || !row) return null;
                       return (
-                        <div key={id} className="grid grid-cols-[140px_20px_1fr_70px_70px_36px] items-center gap-2 py-1.5 text-sm">
+                        <div key={id} className="grid grid-cols-[130px_16px_1fr_64px_64px_64px_32px] items-center gap-2 py-1.5 text-sm">
                           <Input value={row.public_name} onChange={(e) => updateRow(id, "public_name", e.target.value)} placeholder="如 chat" className="h-8 text-xs" />
                           <span className="text-center text-muted-foreground">→</span>
                           <div className="flex items-center gap-1.5 rounded border border-border/50 bg-muted/30 px-2 py-1 text-xs" title={m.upstream_model}>
@@ -2893,6 +3069,7 @@ function AddRouteDialog({ dlg, groupId, models, strategy, onClose, onSaved }: {
                             <span className="truncate">{m.label || m.upstream_model}</span>
                             <span className="shrink-0 text-[10px] text-muted-foreground">/ {m.upstream_model}</span>
                           </div>
+                          <Input value={row.priority} onChange={(e) => updateRow(id, "priority", e.target.value)} className="h-8 text-xs text-center" />
                           <Input value={row.weight} onChange={(e) => updateRow(id, "weight", e.target.value)} className="h-8 text-xs text-center" />
                           <Input value={row.multiplier} onChange={(e) => updateRow(id, "multiplier", e.target.value)} className="h-8 text-xs text-center" />
                           <button onClick={() => toggleModel(id)} className="text-xs text-destructive hover:underline">移除</button>
@@ -3588,7 +3765,20 @@ function UsagePanel() {
   const [bd, setBd] = useState<UsageBreakdownResp | null>(null);
   const [metric, setMetric] = useState<"tokens" | "cost">("tokens");
   const [allModels, setAllModels] = useState<ModelRow[]>([]);
-  useEffect(() => { api.usage(page, pageSize).then((r) => { setRows(r.data); setTotal(r.total); }); }, [page, pageSize]);
+  // 调用明细筛选:模型名/状态/时间区间(组合生效,变更即回第 1 页)
+  const [fModel, setFModel] = useState("all");
+  const [fStatus, setFStatus] = useState<"all" | "ok" | "fail">("all");
+  const [fRange, setFRange] = useState<"all" | "1h" | "24h" | "7d">("all");
+  const RANGE_SECS: Record<string, number> = { "1h": 3600, "24h": 86400, "7d": 604800 };
+  const loadUsage = async (p: number, size: number) => {
+    const r = await api.usage(p, size, {
+      model: fModel,
+      status: fStatus === "all" ? undefined : fStatus,
+      start: fRange === "all" ? undefined : Math.floor(Date.now() / 1000) - RANGE_SECS[fRange],
+    });
+    setRows(r.data); setTotal(r.total); setPage(p);
+  };
+  useEffect(() => { loadUsage(1, pageSize).catch(() => { /* 静默,重试由用户触发 */ }); }, [fModel, fStatus, fRange]);
   useEffect(() => { api.usageBreakdown().then(setBd).catch(() => { /* 静默,下轮刷新重试 */ }); }, []);
   useEffect(() => { api.models().then((r) => setAllModels(r.data)).catch(() => { /* 静默 */ }); }, []);
   // ID → 友好名称映射(供应商 prov-xxx → 展示名;用户 UUID → 用户名),拉一次全量构建字典。
@@ -3627,15 +3817,43 @@ function UsagePanel() {
           </div>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-6 lg:grid-cols-3">
+          <div className="grid gap-6 lg:grid-cols-2">
             <BreakdownBars title="按供应商" rows={(bd?.providers ?? []).map((r) => ({ ...r, label: provMap[r.label] ?? r.label }))} metric={metric} />
             <BreakdownBars title="按用户" rows={(bd?.users ?? []).map((r) => ({ ...r, label: userMap[r.label] ?? r.label }))} metric={metric} />
+            <BreakdownBars title="按模型" rows={bd?.models ?? []} metric={metric} />
             <BreakdownBars title="按密钥" rows={(bd?.keys ?? []).map((r) => ({ ...r, label: r.label }))} metric={metric} />
           </div>
         </CardContent>
       </Card>
       <Card>
-        <CardHeader><CardTitle className="text-base">调用明细({total})</CardTitle></CardHeader>
+        <CardHeader>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <CardTitle className="text-base">调用明细({total})</CardTitle>
+            {/* 多维筛选:模型 / 状态 / 时间区间 */}
+            <div className="flex flex-wrap items-center gap-2">
+              <select value={fModel} onChange={(e) => setFModel(e.target.value)}
+                className="h-8 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring" title="按模型筛选">
+                <option value="all">全部模型</option>
+                {[...new Set(allModels.map((m) => m.upstream_model))].map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <select value={fStatus} onChange={(e) => setFStatus(e.target.value as any)}
+                className="h-8 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring" title="按状态筛选">
+                <option value="all">全部状态</option>
+                <option value="ok">仅成功</option>
+                <option value="fail">仅失败</option>
+              </select>
+              <div className="inline-flex rounded-lg border border-input bg-card p-0.5 text-xs">
+                {([["all", "全部"], ["1h", "近 1 小时"], ["24h", "近 24 小时"], ["7d", "近 7 天"]] as const).map(([v, label]) => (
+                  <button key={v} onClick={() => setFRange(v)}
+                    className={cn("rounded-md px-2.5 py-1 transition-colors",
+                      fRange === v ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground")}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </CardHeader>
         <CardContent>
           {rows.length === 0 ? <p className="text-sm text-muted-foreground">暂无记录</p> : (
             <Table>
@@ -3686,7 +3904,7 @@ function UsagePanel() {
               </TableBody>
             </Table>
           )}
-          <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={setPage} onPageSizeChange={(s) => { setPage(1); setPageSize(s); }} />
+          <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={(p) => loadUsage(p, pageSize).catch(() => {})} onPageSizeChange={(s) => { setPageSize(s); loadUsage(1, s).catch(() => {}); }} />
         </CardContent>
       </Card>
     </div>

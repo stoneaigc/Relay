@@ -53,9 +53,9 @@ fn make_test_routing() -> Routing {
     let mut chat_routes = HashMap::new();
     // "chat" 对外模型名 → 3 条路由
     chat_routes.insert("chat".into(), vec![
-        Target { model_id: 1, weight: 50, multiplier: 1.5, cache_enabled: true },  // OpenAI GPT-4o(验证字段透传)
-        Target { model_id: 3, weight: 30, multiplier: 1.0, cache_enabled: false },  // DeepSeek V3
-        Target { model_id: 5, weight: 20, multiplier: 2.0, cache_enabled: false },  // Claude Sonnet 4
+        Target { model_id: 1, weight: 50, priority: 0, multiplier: 1.5, cache_enabled: true },  // OpenAI GPT-4o(验证字段透传)
+        Target { model_id: 3, weight: 30, priority: 0, multiplier: 1.0, cache_enabled: false },  // DeepSeek V3
+        Target { model_id: 5, weight: 20, priority: 0, multiplier: 2.0, cache_enabled: false },  // Claude Sonnet 4
     ]);
     groups.insert(1, chat_routes);
 
@@ -66,6 +66,7 @@ fn make_test_routing() -> Routing {
         group_strategy,
         time_rules: HashMap::new(),
         groups,
+        user_group_models: HashMap::new(),
     }
 }
 
@@ -84,28 +85,40 @@ fn resolve_with_counter(
     result.into_iter().map(|r| (r.upstream_model, r.base_url, r.weight)).collect()
 }
 
-// ==================== 优先级路由 ====================
+// ==================== 优先级分档 ====================
 
+/// 优先级是路由属性:高档优先,低档只在容灾时出现。
 #[test]
-fn priority_routes_in_descending_weight_order() {
-    let rt = make_test_routing();
+fn priority_tiers_put_highest_first() {
+    let mut rt = make_test_routing();
+    {
+        let t = rt.groups.get_mut(&1).unwrap().get_mut("chat").unwrap();
+        t[0].priority = 20; // OpenAI 最高档
+        t[1].priority = 10; // DeepSeek
+        t[2].priority = 0;  // Anthropic
+    }
     let rr = dashmap::DashMap::new();
-    let candidates = resolve_with_counter(&rt, Strategy::Priority, "chat", &rr, None);
-    // 权重: 50(OpenAI) > 30(DeepSeek) > 20(Anthropic)
-    assert_eq!(candidates[0].0, "gpt-4o");
-    assert_eq!(candidates[0].2, 50);
-    assert_eq!(candidates[1].0, "deepseek-chat");
-    assert_eq!(candidates[1].2, 30);
-    assert_eq!(candidates[2].0, "claude-sonnet-4-20250514");
-    assert_eq!(candidates[2].2, 20);
+    // 任意策略下,首个候选都必须来自最高档
+    for strategy in [Strategy::WeightedRandom, Strategy::WeightedRoundRobin, Strategy::Auto] {
+        let candidates = resolve_with_counter(&rt, strategy, "chat", &rr, None);
+        assert_eq!(candidates[0].0, "gpt-4o", "strategy={strategy:?}");
+        assert_eq!(candidates.len(), 3);
+    }
 }
 
+/// 同档内仍按权重分流(优先级只切档,不替代权重)。
 #[test]
-fn priority_all_three_candidates_present() {
-    let rt = make_test_routing();
+fn same_priority_tier_still_uses_weight() {
+    let rt = make_test_routing(); // 夹具全部 priority=0
     let rr = dashmap::DashMap::new();
-    let candidates = resolve_with_counter(&rt, Strategy::Priority, "chat", &rr, None);
-    assert_eq!(candidates.len(), 3);
+    let mut counts = HashMap::new();
+    for _ in 0..300 {
+        let candidates = resolve_with_counter(&rt, Strategy::WeightedRoundRobin, "chat", &rr, None);
+        *counts.entry(candidates[0].0.clone()).or_insert(0) += 1;
+    }
+    let total: u32 = counts.values().sum();
+    let openai_pct = *counts.get("gpt-4o").unwrap_or(&0) as f64 / total as f64;
+    assert!(openai_pct > 0.35, "同档内应仍按权重 50/30/20 分流,OpenAI 实得 {openai_pct:.2}");
 }
 
 #[test]
@@ -113,12 +126,10 @@ fn priority_deduplicates_same_upstream() {
     let mut rt = make_test_routing();
     // 给 chat 加一条重复的 OpenAI GPT-4o(不同 model_id 但相同上游)
     rt.groups.get_mut(&1).unwrap().get_mut("chat").unwrap()
-        .push(Target { model_id: 100, weight: 10, multiplier: 1.0, cache_enabled: false });
-    // model_id=100 没有对应的 ModelDef,会被跳过;但如果添加了就要去重
-    // 用另一个 model_id 指向同一个 provider+model 来测试去重
+        .push(Target { model_id: 100, weight: 10, priority: 0, multiplier: 1.0, cache_enabled: false });
     rt.models.insert(100, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None });
     let rr = dashmap::DashMap::new();
-    let candidates = resolve_with_counter(&rt, Strategy::Priority, "chat", &rr, None);
+    let candidates = resolve_with_counter(&rt, Strategy::WeightedRandom, "chat", &rr, None);
     // 去重后应该只有 3 个(OpenAI 只出现一次)
     let openai_count = candidates.iter().filter(|(m, _, _)| m == "gpt-4o").count();
     assert_eq!(openai_count, 1);
@@ -156,21 +167,25 @@ fn weighted_random_first_is_not_always_same() {
     assert!(first_models.len() > 1);
 }
 
-// ==================== 简单轮询 ====================
+// ==================== 简单轮询(权重全 1 的加权轮询) ====================
 
 #[test]
-fn round_robin_cycles_through_models() {
-    let rt = make_test_routing();
+fn round_robin_equivalent_when_weights_equal() {
+    let mut rt = make_test_routing();
+    // 权重全部设为 1 → 加权轮询退化为简单轮询,应严格循环 A,B,C,A,B,C
+    for t in rt.groups.get_mut(&1).unwrap().get_mut("chat").unwrap().iter_mut() {
+        t.weight = 1;
+    }
     let rr = dashmap::DashMap::new();
     let mut first_models = Vec::new();
     for _ in 0..6 {
-        let candidates = resolve_with_counter(&rt, Strategy::RoundRobin, "chat", &rr, None);
+        let candidates = resolve_with_counter(&rt, Strategy::WeightedRoundRobin, "chat", &rr, None);
         first_models.push(candidates[0].0.clone());
     }
-    // 简单轮询应该循环: A, B, C, A, B, C
     assert_eq!(first_models[0], first_models[3]);
     assert_eq!(first_models[1], first_models[4]);
     assert_eq!(first_models[2], first_models[5]);
+    assert_eq!(first_models[0], "gpt-4o");
 }
 
 // ==================== 加权轮询 ====================
@@ -197,8 +212,8 @@ fn weighted_round_robin_uses_weights() {
 #[test]
 fn time_rule_overrides_weight() {
     let mut rt = make_test_routing();
-    // 夹具默认 WeightedRandom(首个候选是随机的),本测试断言确定性顺序,须改为 Priority。
-    rt.group_strategy.insert(1, Strategy::Priority);
+    // 夹具默认 WeightedRandom(首个候选是随机的),本测试断言确定性顺序,须改为加权轮询。
+    rt.group_strategy.insert(1, Strategy::WeightedRoundRobin);
     // 添加时段规则:工作日白天,覆盖 chat 的权重
     let mut weight_map = HashMap::new();
     let mut chat_override = HashMap::new();
@@ -309,7 +324,7 @@ fn different_public_names_independent_routing() {
     let mut rt = make_test_routing();
     // 添加 "fast" 对外模型名,只绑一个模型
     rt.groups.get_mut(&1).unwrap().insert("fast".into(), vec![
-        Target { model_id: 2, weight: 100, multiplier: 0.8, cache_enabled: false }, // GPT-4o-mini
+        Target { model_id: 2, weight: 100, priority: 0, multiplier: 0.8, cache_enabled: false }, // GPT-4o-mini
     ]);
 
     let rr1 = dashmap::DashMap::new();
@@ -324,11 +339,19 @@ fn different_public_names_independent_routing() {
     assert_eq!(fast[0].upstream_model, "gpt-4o-mini");
 }
 
-// ==================== 延迟优先 ====================
+// ==================== 智能自适应(auto) ====================
 
 #[test]
-fn latency_aware_orders_by_p50() {
-    let rt = make_test_routing();
+fn auto_orders_by_p50_when_cost_equal() {
+    let mut rt = make_test_routing();
+    // 真正让成本相等:统一倍率为 1.0,并显式设定相同单价(否则内置价表差异会介入排序)。
+    for t in rt.groups.get_mut(&1).unwrap().get_mut("chat").unwrap().iter_mut() {
+        t.multiplier = 1.0;
+    }
+    for m in rt.models.values_mut() {
+        m.input_price = Some(1.0);
+        m.output_price = Some(1.0);
+    }
     let lat = dashmap::DashMap::new();
     // P50:deepseek(200) < anthropic(450) < openai(800)
     lat.insert("p-deepseek".to_string(), 200u64);
@@ -336,39 +359,45 @@ fn latency_aware_orders_by_p50() {
     lat.insert("p-openai".to_string(), 800u64);
     let rr = dashmap::DashMap::new();
     let mut r = rt.clone();
-    r.group_strategy.insert(1, Strategy::LatencyAware);
+    r.group_strategy.insert(1, Strategy::Auto);
     let result = r.resolve_all(1, "chat", &rr, &lat, 28800, None).unwrap();
     let models: Vec<&str> = result.iter().map(|x| x.upstream_model.as_str()).collect();
     assert_eq!(models, vec!["deepseek-chat", "claude-sonnet-4-20250514", "gpt-4o"]);
 }
 
+/// 回归:无数据的上游不能被永久排在最后(否则永远拿不到流量 → 冷启动死锁)。
 #[test]
-fn latency_aware_no_data_goes_last() {
+fn auto_cold_start_upstream_not_starved() {
     let rt = make_test_routing();
     let lat = dashmap::DashMap::new();
-    // 只给 deepseek 数据,openai/anthropic 无数据殿后(彼此随机)
+    // 只给 deepseek 数据,openai/anthropic 无数据
     lat.insert("p-deepseek".to_string(), 300u64);
-    let rr = dashmap::DashMap::new();
     let mut r = rt.clone();
-    r.group_strategy.insert(1, Strategy::LatencyAware);
-    let result = r.resolve_all(1, "chat", &rr, &lat, 28800, None).unwrap();
-    assert_eq!(result[0].upstream_model, "deepseek-chat");
-    assert_eq!(result.len(), 3);
+    r.group_strategy.insert(1, Strategy::Auto);
+    let mut non_deepseek_first = 0;
+    for _ in 0..100 {
+        let rr = dashmap::DashMap::new();
+        let result = r.resolve_all(1, "chat", &rr, &lat, 28800, None).unwrap();
+        if result[0].upstream_model != "deepseek-chat" {
+            non_deepseek_first += 1;
+        }
+    }
+    assert!(non_deepseek_first > 0, "无数据上游 100 次一次都没被选中,冷启动死锁复现");
 }
 
 #[test]
-fn latency_aware_dedup_still_applies() {
+fn auto_dedup_still_applies() {
     let mut rt = make_test_routing();
-    // 加一条与 model_id=1 相同上游的新路由(不同 model_id),延迟优先下也应去重
+    // 加一条与 model_id=1 相同上游的新路由(不同 model_id),auto 下也应去重
     rt.groups.get_mut(&1).unwrap().get_mut("chat").unwrap()
-        .push(Target { model_id: 101, weight: 1, multiplier: 1.0, cache_enabled: false });
+        .push(Target { model_id: 101, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false });
     rt.models.insert(101, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None });
     let lat = dashmap::DashMap::new();
     lat.insert("p-openai".to_string(), 100u64);
     lat.insert("p-deepseek".to_string(), 500u64);
     let rr = dashmap::DashMap::new();
     let mut r = rt.clone();
-    r.group_strategy.insert(1, Strategy::LatencyAware);
+    r.group_strategy.insert(1, Strategy::Auto);
     let result = r.resolve_all(1, "chat", &rr, &lat, 28800, None).unwrap();
     let gpt4o_count = result.iter().filter(|x| x.upstream_model == "gpt-4o").count();
     assert_eq!(gpt4o_count, 1);

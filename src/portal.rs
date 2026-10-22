@@ -238,7 +238,9 @@ pub async fn register(
             if !email.contains('@') || email.len() < 3 {
                 return Err(ApiError::BadRequest("邮箱格式不正确".into()));
             }
-            verify_code(&state, "email_code", &email, &body.code).await?;
+            // kind 传 "email":verify_code 内部拼 "{kind}_code:{id}" → 与发码写入的
+            // "email_code:{email}" 对齐(此前误传 "email_code" 导致查 email_code_code: 永不相等,注册必然失败)。
+            verify_code(&state, "email", &email, &body.code).await?;
             let id = storage::admin_create_user(
                 &state.db,
                 &email,
@@ -256,7 +258,7 @@ pub async fn register(
             (id, email)
         }
     };
-    let us = Arc::new(UserState::new(id, grant, 0, limit, 0, 1.0, active_group.unwrap_or(0)));
+    let us = Arc::new(UserState::new(id, grant, 0, limit, 0, 1.0, active_group.unwrap_or(0), default_ug.unwrap_or(0)));
     us.set_limits(rpm, tpm);
     state.users.insert(id, us);
     let token = jwt::issue(&secret, &id.to_string(), "portal", ttl)?;
@@ -658,8 +660,9 @@ pub async fn models(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let uid = portal_user(&state, &headers)?;
-    let group = state.user(&uid).map(|u| u.group()).unwrap_or(0);
-    let cards = state.routing.load().group_model_cards(group);
+    let routing = state.routing.load();
+    let gids = state.user(&uid).map(|u| u.resolve_group_ids(&routing)).unwrap_or_default();
+    let cards = routing.model_cards_union(&gids);
     let data: Vec<Value> = cards
         .iter()
         .map(|c| {
@@ -796,7 +799,7 @@ pub async fn usage(
 ) -> Result<Json<Value>, ApiError> {
     let uid = portal_user(&state, &headers)?;
     let (page, page_size, offset) = normalize_page(q.page, q.page_size);
-    let (rows, total) = storage::usage_rows_page(&state.db, Some(uid), page_size as i64, offset as i64)
+    let (rows, total) = storage::usage_rows_page(&state.db, Some(uid), page_size as i64, offset as i64, None, None, None, None)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({
