@@ -516,8 +516,10 @@ pub struct AppState {
     /// 语义缓存 L1(精确哈希 + TTL,进程内):响应缓存与命中统计。
     pub semantic_cache: crate::semantic_cache::SemanticCache,
     /// ---------- 上游治理 ----------
-    /// 每个上游连接的并发槽(排队信号量)。0 容量 = 不限(跳过获取)。
+    /// 每个上游连接的并发槽(满员立即拒绝)。0 容量 = 不限(跳过获取)。
     pub upstream_slots: DashMap<UpstreamKey, Arc<Semaphore>>,
+    /// 每个模型组的总并发槽;未配置的组不占表,表示不限。
+    pub group_slots: DashMap<i64, Arc<Semaphore>>,
     /// 每个上游的熔断器状态。
     pub upstream_breakers: DashMap<UpstreamKey, Arc<AsyncMutex<Breaker>>>,
     /// ---------- 组级负载策略的运行态 ----------
@@ -567,28 +569,42 @@ impl AppState {
         from_provider.unwrap_or(default_limit)
     }
 
-    /// 获取一个上游并发槽(返回 OwnedPermit,自动释放)。
-    /// permits==0 时直接返回 None(不排队,相当于不限)。
-    pub async fn acquire_upstream(
+    /// 路由 rebuild 后更换槽位代次;在途请求继续持有旧 Arc,结束后自然收敛。
+    pub fn rebuild_concurrency(&self) {
+        self.group_slots.clear();
+        self.upstream_slots.clear();
+    }
+
+    /// 非阻塞获取模型组槽;Ok(None)=不限,Err=已满。DashMap guard 不跨 await。
+    pub fn try_acquire_group(&self, group_id: i64) -> Result<Option<OwnedSemaphorePermit>, ()> {
+        let permits = self.routing.load().group_concurrency.get(&group_id).copied().unwrap_or(0);
+        if permits == 0 {
+            return Ok(None);
+        }
+        let sem = self
+            .group_slots
+            .entry(group_id)
+            .or_insert_with(|| Arc::new(Semaphore::new(permits as usize)))
+            .clone();
+        sem.try_acquire_owned().map(Some).map_err(|_| ())
+    }
+
+    /// 非阻塞获取上游槽;Ok(None)=不限,Err=已满。permit drop 时自动释放。
+    pub fn try_acquire_upstream(
         &self,
         key: UpstreamKey,
         provider_name: &str,
-    ) -> Option<OwnedSemaphorePermit> {
+    ) -> Result<Option<OwnedSemaphorePermit>, ()> {
         let permits = self.resolve_permits(provider_name);
         if permits == 0 {
-            return None;
+            return Ok(None);
         }
         let sem = self
             .upstream_slots
             .entry(key)
             .or_insert_with(|| Arc::new(Semaphore::new(permits as usize)))
             .clone();
-        // 若 permits 后来调大,简单方案:重新包装成新容量。这里暂不支持热调(和用户并发一致)。
-        // 拿 OwnedSemaphorePermit:permit 被 drop 时自动归还槽位。
-        match sem.acquire_owned().await {
-            Ok(p) => Some(p),
-            Err(_) => None, // Semaphore 不会 close,理论上不会到这里
-        }
+        sem.try_acquire_owned().map(Some).map_err(|_| ())
     }
 
     // ======================== P2:上游熔断器 ========================
@@ -1649,6 +1665,7 @@ mod tests {
             models: HashMap::new(),
             group_names: HashMap::new(),
             group_strategy: HashMap::new(),
+            group_concurrency: HashMap::new(),
             time_rules: HashMap::new(),
             groups: HashMap::new(),
             user_group_models: HashMap::new(),
@@ -1668,6 +1685,7 @@ mod tests {
             cache: Cache::Memory(StdMutex::new(HashMap::new())),
             semantic_cache: crate::semantic_cache::SemanticCache::new(),
             upstream_slots: DashMap::new(),
+            group_slots: DashMap::new(),
             upstream_breakers: DashMap::new(),
             round_robin: DashMap::new(),
             latency_p50: DashMap::new(),
@@ -1743,5 +1761,85 @@ mod tests {
         assert!(items[0]["breaker"]["recover_remaining_ms"].as_u64().unwrap() > 0);
         assert_eq!(items[1]["provider"], "prov-a");
         assert_eq!(items[1]["status"], "degraded");
+    }
+
+    #[tokio::test]
+    async fn group_and_upstream_slots_reject_when_full_and_release_on_drop() {
+        use std::collections::HashMap;
+        use std::sync::Mutex as StdMutex;
+
+        use crate::cache::Cache;
+        use crate::reqlog::SqliteRequestLogStore;
+        use crate::routing::{ProviderConn, Routing};
+
+        sqlx::any::install_default_drivers();
+        let db = crate::storage::Db::connect("sqlite::memory:").await.unwrap();
+        let db2 = db.clone();
+        let cfg: crate::config::Config = serde_json::from_str(
+            r#"{"server":{"bind":"127.0.0.1:0"},"database":{}}"#,
+        ).unwrap();
+        let routing = Routing {
+            providers: HashMap::from([("prov".into(), ProviderConn {
+                kind: ProviderKind::Openai,
+                base_url: "http://upstream".into(),
+                api_key: None,
+                concurrency: None,
+                headers: Vec::new(),
+            })]),
+            group_concurrency: HashMap::from([(1, 1), (2, 0)]),
+            ..Routing::default()
+        };
+        let (usage_tx, _usage_rx) = mpsc::channel(16);
+        let (log_tx, _log_rx) = mpsc::channel(16);
+        let (audit_tx, _audit_rx) = mpsc::channel(16);
+        let state = Arc::new(AppState {
+            config: ArcSwap::from_pointee(cfg),
+            routing: ArcSwap::from_pointee(routing),
+            keys: DashMap::new(),
+            users: DashMap::new(),
+            http: reqwest::Client::new(),
+            db,
+            usage_tx,
+            cache: Cache::Memory(StdMutex::new(HashMap::new())),
+            semantic_cache: crate::semantic_cache::SemanticCache::new(),
+            upstream_slots: DashMap::new(),
+            group_slots: DashMap::new(),
+            upstream_breakers: DashMap::new(),
+            round_robin: DashMap::new(),
+            latency_p50: DashMap::new(),
+            tz_offset_secs: 28800,
+            audit_failures: AsyncMutex::new(VecDeque::new()),
+            metrics: MetricsStore::default(),
+            request_log: Arc::new(SqliteRequestLogStore::new(db2.clone())),
+            request_log_tx: log_tx,
+            audit_log: Arc::new(crate::audit::SqliteAuditStore::new(db2)),
+            audit_tx,
+            login_guard: Arc::new(crate::guard::LoginGuard::default()),
+        });
+
+        let group_permit = state.try_acquire_group(1).unwrap().unwrap();
+        assert!(state.try_acquire_group(1).is_err());
+        drop(group_permit);
+        assert!(state.try_acquire_group(1).unwrap().is_some());
+        assert!(state.try_acquire_group(2).unwrap().is_none());
+
+        // NULL 继承全局默认 32;改为独立上限 1 后满员拒绝,drop 后释放。
+        assert_eq!(state.resolve_permits("prov"), 32);
+        let mut limited = state.routing.load_full();
+        Arc::make_mut(&mut limited).providers.get_mut("prov").unwrap().concurrency = Some(1);
+        state.routing.store(limited);
+        state.rebuild_concurrency();
+        let key = UpstreamKey::new(ProviderKind::Openai, "http://upstream", None);
+        let upstream_permit = state.try_acquire_upstream(key.clone(), "prov").unwrap().unwrap();
+        assert!(state.try_acquire_upstream(key.clone(), "prov").is_err());
+        drop(upstream_permit);
+        assert!(state.try_acquire_upstream(key.clone(), "prov").unwrap().is_some());
+
+        // 0=显式不限;rebuild 后新配置生效。
+        let mut updated = state.routing.load_full();
+        Arc::make_mut(&mut updated).providers.get_mut("prov").unwrap().concurrency = Some(0);
+        state.routing.store(updated);
+        state.rebuild_concurrency();
+        assert!(state.try_acquire_upstream(key, "prov").unwrap().is_none());
     }
 }

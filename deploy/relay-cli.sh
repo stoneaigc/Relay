@@ -137,7 +137,7 @@ cmd_backup() {
   echo "  恢复: relay stop → 用备份覆盖 $db → relay start"
 }
 
-cmd_upgrade() { run bash "$INSTALL_DIR/upgrade.sh" "$@"; }
+cmd_upgrade() { run env INSTALL_DIR="$INSTALL_DIR" bash "$INSTALL_DIR/upgrade.sh" "$@"; }
 
 # 卸载:停服务 → 删单元 → 自动备份 SQLite/relay.env → 删安装目录 → 自删除 CLI。
 # 需交互确认;--yes/-y 跳过(脚本场景)。

@@ -59,7 +59,12 @@ rand_str() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1" || true; }
 # ---- 0. 前置检查 ----------------------------------------------------------
 [ "$(id -u)" -eq 0 ] || abort "需要 root 权限,请用 sudo 运行。"
 command -v curl >/dev/null 2>&1 || abort "缺少 curl,请先安装:apt install curl / yum install curl"
-command -v systemctl >/dev/null 2>&1 || warn "未检测到 systemd,将跳过服务注册与自动重启;完成后请手动启动 $INSTALL_DIR/relay"
+HAS_SYSTEMD=0
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  HAS_SYSTEMD=1
+else
+  warn "未检测到 systemd,将跳过服务注册与自动重启;完成后请手动启动 $INSTALL_DIR/relay"
+fi
 
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -90,7 +95,7 @@ echo "==> 目标版本: v$RELAY_VERSION"
 # ---- 2. 已安装检测(升级模式) ---------------------------------------------
 # 识别规则:安装目录下有 relay 可执行文件 → 升级模式;默认目录未命中且调用方
 # 未显式指定目录时,再从 systemd 单元的 WorkingDirectory 自动定位真实安装目录。
-if [ -z "$INSTALL_DIR_SET" ] && [ ! -x "$INSTALL_DIR/relay" ] && command -v systemctl >/dev/null 2>&1; then
+if [ -z "$INSTALL_DIR_SET" ] && [ ! -x "$INSTALL_DIR/relay" ] && [ "$HAS_SYSTEMD" = "1" ]; then
   UNIT_DIR="$(systemctl show relay -p WorkingDirectory --value 2>/dev/null | tail -n1 | sed 's/^WorkingDirectory=//' | tr -d '[:space:]')"
   if [ -n "$UNIT_DIR" ] && [ -x "$UNIT_DIR/relay" ]; then
     INSTALL_DIR="$UNIT_DIR"
@@ -163,6 +168,9 @@ tar -xzf "$TMP/$PKG.tar.gz" -C "$TMP"
 [ -x "$TMP/$PKG/install.sh" ] || abort "发布包缺少 install.sh,下载不完整,请重试。"
 
 # ---- 5. 预写敏感配置 relay.env(install.sh 不覆盖已存在文件) -------------
+# 下载成功后再创建最终目录,覆盖首次安装、自定义嵌套目录及旧安装缺 env 的分支;
+# 不能让 install.sh 的目录创建晚于这里的首次写入。
+mkdir -p "$INSTALL_DIR"
 # 首次安装:写入端口 / 管理员凭据 / 随机 JWT 密钥(比默认 dev-secret 更安全);
 # 升级安装:已存在则原样保留,绝不覆盖用户已改配置。
 ENV_FILE="$INSTALL_DIR/relay.env"
@@ -200,25 +208,32 @@ info "开始安装到 $INSTALL_DIR"
 (cd "$TMP/$PKG" && INSTALL_DIR="$INSTALL_DIR" ./install.sh)
 
 # ---- 7. 健康检查 ----------------------------------------------------------
-info "健康检查:$HEALTH_URL"
-OK=""
-for _ in $(seq 1 15); do
-  if curl -fsS -m 3 "$HEALTH_URL" 2>/dev/null | grep -q '"status":"ok"'; then OK=1; break; fi
-  sleep 2
-done
-[ -n "$OK" ] || {
-  warn "健康检查未通过,请查看日志:journalctl -u relay -n 50"
-  warn "常见原因:端口被占用(RELAY_SERVER__BIND 换端口)、配置语法错误。"
-  exit 1
-}
-VER="$(curl -fsS -m 5 "$HEALTH_URL" 2>/dev/null | grep -o '"version":"[^"]*"' | cut -d'"' -f4 || true)"
+VER=""
+if [ "$HAS_SYSTEMD" = "1" ]; then
+  info "健康检查:$HEALTH_URL"
+  OK=""
+  for _ in $(seq 1 15); do
+    if curl -fsS -m 3 "$HEALTH_URL" 2>/dev/null | grep -q '"status":"ok"'; then OK=1; break; fi
+    sleep 2
+  done
+  [ -n "$OK" ] || {
+    warn "健康检查未通过,请查看日志:journalctl -u relay -n 50"
+    warn "常见原因:端口被占用(RELAY_SERVER__BIND 换端口)、配置语法错误。"
+    exit 1
+  }
+  VER="$(curl -fsS -m 5 "$HEALTH_URL" 2>/dev/null | grep -o '"version":"[^"]*"' | cut -d'"' -f4 || true)"
+else
+  info "无 systemd:文件安装已完成,跳过自动健康检查。"
+  info "请手动启动 $INSTALL_DIR/relay,然后访问 $HEALTH_URL 验证。"
+fi
 
 # ---- 8. 完成横幅 ----------------------------------------------------------
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 IP="${IP:-127.0.0.1}"
+if [ "$UPGRADE" = "1" ]; then ACTION="升级"; else ACTION="安装"; fi
 echo
 echo "============================================================"
-echo "  ✔ Relay ${VER:+v$VER} ${UPGRADE:+升级}${UPGRADE:-安装}成功!"
+echo "  ✔ Relay ${VER:+v$VER} ${ACTION}成功!"
 echo "============================================================"
 if [ "$UPGRADE" = "0" ]; then
   echo "  管理后台 : http://${IP}:${RELAY_PORT}/admin/"

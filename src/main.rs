@@ -339,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
         cache,
         semantic_cache: crate::semantic_cache::SemanticCache::new(),
         upstream_slots: DashMap::new(),
+        group_slots: DashMap::new(),
         upstream_breakers: DashMap::new(),
         round_robin: DashMap::new(),
         latency_p50: DashMap::new(),

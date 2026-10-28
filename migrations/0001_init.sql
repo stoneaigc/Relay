@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS providers (
   base_url     TEXT NOT NULL,
   api_key      TEXT,                        -- 直接保存的真实密钥
   display_name TEXT,                        -- 自定义显示名(空=按域名展示)
+  max_concurrency INTEGER,                  -- NULL=继承全局上游并发,0=不限
   created_at   TEXT NOT NULL
 );
 
@@ -111,6 +112,7 @@ CREATE TABLE IF NOT EXISTS model_groups (
   name       TEXT NOT NULL UNIQUE,
   is_active  INTEGER NOT NULL DEFAULT 0,   -- 1=激活(默认组),新用户注册默认绑定
   strategy   TEXT NOT NULL DEFAULT 'weighted_random', -- 负载策略:weighted_random(加权随机)|weighted_round_robin(加权轮询)|auto(延迟+成本自适应)
+  max_concurrency INTEGER NOT NULL DEFAULT 0, -- 模型组总并发,0=不限
   created_at TEXT NOT NULL
 );
 

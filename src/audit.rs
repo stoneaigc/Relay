@@ -18,6 +18,7 @@ use axum::{
 use serde::Serialize;
 
 use crate::state::AppState;
+use crate::storage::pq;
 
 /// 一条管理操作审计记录。
 #[derive(Debug, Clone, Serialize)]
@@ -89,7 +90,7 @@ impl AuditStore for SqliteAuditStore {
         let latency_ms = log.latency_ms;
         let db = self.db.clone();
         Box::pin(async move {
-            sqlx::query(INSERT_SQL)
+            sqlx::query(&pq(INSERT_SQL))
                 .bind(&actor)
                 .bind(&method)
                 .bind(&path)
@@ -114,7 +115,7 @@ impl AuditStore for SqliteAuditStore {
         let db = self.db.clone();
         Box::pin(async move {
             use sqlx::Row;
-            let rows = sqlx::query(SELECT_SQL)
+            let rows = sqlx::query(&pq(SELECT_SQL))
                 .bind(limit)
                 .bind(offset)
                 .fetch_all(&db)
@@ -155,11 +156,11 @@ impl AuditStore for SqliteAuditStore {
     fn prune(&self, days: u64) -> Pin<Box<dyn Future<Output = anyhow::Result<u64>> + Send + '_>> {
         let cutoff = format!(
             "@{}",
-            crate::storage::now_secs().saturating_sub(days as i64 * 3600)
+            crate::storage::now_secs().saturating_sub(days as i64 * 86400)
         );
         let db = self.db.clone();
         Box::pin(async move {
-            let res = sqlx::query("DELETE FROM admin_audit_logs WHERE created_at < ?")
+            let res = sqlx::query(&pq("DELETE FROM admin_audit_logs WHERE created_at < ?"))
                 .bind(&cutoff)
                 .execute(&db)
                 .await?;
@@ -292,12 +293,12 @@ mod tests {
     #[tokio::test]
     async fn sqlite_prune_deletes_expired() {
         let store = SqliteAuditStore::new(audit_test_db().await);
-        store.write(&log("admin", 200, 1)).await.unwrap();
-        let fresh = crate::storage::now_secs() + 3600;
-        store.write(&log("admin", 200, fresh)).await.unwrap();
+        let now = crate::storage::now_secs();
+        store.write(&log("admin", 200, now - 31 * 86400)).await.unwrap();
+        store.write(&log("admin", 200, now - 29 * 86400)).await.unwrap();
         assert_eq!(store.prune(30).await.unwrap(), 1);
         let got = store.recent(10, 0).await.unwrap();
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].ts, fresh);
+        assert_eq!(got[0].ts, now - 29 * 86400);
     }
 }

@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::config::ProviderKind;
-use crate::storage::{now_secs, Db};
+use crate::storage::{now_secs, pq, Db};
 
 /// 单个候选上游的一次尝试结果(failover 链的一环)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,7 +214,7 @@ impl RequestLogStore for SqliteRequestLogStore {
         let charged_tokens = log.charged_tokens;
         let db = self.db.clone();
         Box::pin(async move {
-            sqlx::query(INSERT_SQL)
+            sqlx::query(&pq(INSERT_SQL))
                 .bind(&request_id)
                 .bind(&user_id)
                 .bind(&path)
@@ -267,7 +267,7 @@ impl RequestLogStore for SqliteRequestLogStore {
                         continue;
                     }
                 };
-                if let Err(e) = sqlx::query(INSERT_SQL)
+                if let Err(e) = sqlx::query(&pq(INSERT_SQL))
                     .bind(&log.request_id)
                     .bind(&log.user_id)
                     .bind(&log.path)
@@ -321,6 +321,7 @@ impl RequestLogStore for SqliteRequestLogStore {
              ORDER BY id DESC LIMIT ? OFFSET ?"
         );
         Box::pin(async move {
+            let sql = pq(&sql);
             let mut query = sqlx::query(&sql);
             if has_q {
                 query = query.bind(&pat).bind(&pat);
@@ -379,6 +380,7 @@ impl RequestLogStore for SqliteRequestLogStore {
         let sql = format!("SELECT COUNT(*) AS c FROM (SELECT 1 FROM request_logs{where_sql} LIMIT ?)");
         Box::pin(async move {
             use sqlx::Row;
+            let sql = pq(&sql);
             let mut query = sqlx::query(&sql);
             if has_q {
                 query = query.bind(&pat).bind(&pat);
@@ -396,13 +398,13 @@ impl RequestLogStore for SqliteRequestLogStore {
     /// 每批 2000 条循环删除,避免单次大 DELETE 长时间持锁;SQLite/PG 通用。
     fn prune(&self, days: u64) -> Pin<Box<dyn Future<Output = anyhow::Result<u64>> + Send + '_>> {
         let db = self.db.clone();
-        let cutoff = format!("@{}", now_secs().saturating_sub(days as i64 * 3600));
+        let cutoff = format!("@{}", now_secs().saturating_sub(days as i64 * 86400));
         Box::pin(async move {
             let mut total: u64 = 0;
             loop {
-                let res = sqlx::query(
+                let res = sqlx::query(&pq(
                     "DELETE FROM request_logs WHERE id IN (SELECT id FROM request_logs WHERE created_at < ? LIMIT 2000)",
-                )
+                ))
                 .bind(&cutoff)
                 .execute(&db)
                 .await?;
@@ -698,7 +700,7 @@ impl RequestLogStore for EsRequestLogStore {
     /// 删除所有按日索引中超过 days 天的文档:delete_by_query 按 ts 范围过滤;404=尚无索引,视为 0 条。
     fn prune(&self, days: u64) -> Pin<Box<dyn Future<Output = anyhow::Result<u64>> + Send + '_>> {
         let url = format!("{}/{}-*/_delete_by_query", self.base_url, self.index_prefix);
-        let cutoff = now_secs().saturating_sub(days as i64 * 3600);
+        let cutoff = now_secs().saturating_sub(days as i64 * 86400);
         let body = serde_json::json!({
             "query": { "range": { "ts": { "lt": cutoff } } }
         });
@@ -964,5 +966,20 @@ mod tests {
         assert_eq!(got[1].request_id, "req_b1");
         assert_eq!(got[1].req_body.as_deref(), Some("b1-req"));
         assert_eq!(got[1].resp_body, None);
+    }
+
+    #[tokio::test]
+    async fn sqlite_prune_uses_retention_days() {
+        let store = SqliteRequestLogStore::new(reqlog_test_db().await);
+        let now = now_secs();
+        let mut old = body_log("req_old", None, None);
+        old.ts = now - 31 * 86400;
+        let mut recent = body_log("req_recent", None, None);
+        recent.ts = now - 29 * 86400;
+        store.write_batch(vec![old, recent]).await.unwrap();
+        assert_eq!(store.prune(30).await.unwrap(), 1);
+        let got = store.recent("", None, None, 10, 0).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].request_id, "req_recent");
     }
 }

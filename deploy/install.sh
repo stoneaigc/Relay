@@ -71,7 +71,7 @@ fi
 chown -R relay:relay "$INSTALL_DIR"
 
 # systemd 单元:把占位符替换成实际安装目录;重启服务以加载新程序(升级路径的关键一步)
-if command -v systemctl >/dev/null 2>&1; then
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
   echo "==> 安装 systemd 服务:$SERVICE"
   sed "s#@INSTALL_DIR@#${INSTALL_DIR}#g" "$SRC/relay.service" \
     > "/etc/systemd/system/${SERVICE}.service"

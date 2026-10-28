@@ -35,6 +35,9 @@ pub enum ApiError {
     },
     #[error("concurrency limit exceeded")]
     TooManyRequests,
+    /// 模型组或供应商并发满员,携带明确层级文案。
+    #[error("{0}")]
+    ConcurrencyLimit(String),
     /// 登录防爆破/防轰炸触发。中文消息直接透出给前端。
     #[error("{0}")]
     TooManyAttempts(String),
@@ -63,7 +66,7 @@ impl ApiError {
             ApiError::NoTarget(_) | ApiError::AllFailed { .. } => StatusCode::BAD_GATEWAY,
             ApiError::Upstream(_) => StatusCode::BAD_GATEWAY,
             ApiError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-            ApiError::TooManyRequests | ApiError::TooManyAttempts(_) | ApiError::BudgetExhausted(_) => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::TooManyRequests | ApiError::ConcurrencyLimit(_) | ApiError::TooManyAttempts(_) | ApiError::BudgetExhausted(_) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -75,7 +78,7 @@ impl ApiError {
             ApiError::AccountDisabled => "permission_error",
             ApiError::InsufficientBalance | ApiError::BudgetExhausted(_) => "insufficient_quota",
             ApiError::ModelNotFound(_) | ApiError::ModelNotAllowed(_) => "not_found_error",
-            ApiError::TooManyRequests | ApiError::TooManyAttempts(_) => "rate_limit_error",
+            ApiError::TooManyRequests | ApiError::ConcurrencyLimit(_) | ApiError::TooManyAttempts(_) => "rate_limit_error",
             ApiError::BadRequest(_) => "invalid_request_error",
             ApiError::NoTarget(_) | ApiError::AllFailed { .. } | ApiError::Upstream(_) => "upstream_error",
             ApiError::Unavailable(_) => "upstream_error",
@@ -103,7 +106,7 @@ impl ApiError {
             ApiError::AccountDisabled => "permission_error",
             ApiError::InsufficientBalance => "api_error",
             ApiError::ModelNotFound(_) | ApiError::ModelNotAllowed(_) => "not_found_error",
-            ApiError::TooManyRequests | ApiError::TooManyAttempts(_) | ApiError::BudgetExhausted(_) => "rate_limit_error",
+            ApiError::TooManyRequests | ApiError::ConcurrencyLimit(_) | ApiError::TooManyAttempts(_) | ApiError::BudgetExhausted(_) => "rate_limit_error",
             ApiError::BadRequest(_) => "invalid_request_error",
             ApiError::NoTarget(_) | ApiError::AllFailed { .. } | ApiError::Upstream(_) | ApiError::Unavailable(_) => "api_error",
             ApiError::Internal(_) => "internal_error",

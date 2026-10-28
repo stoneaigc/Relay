@@ -50,6 +50,8 @@ pub struct Entry {
 /// 一次缓存命中记录(供「最近命中」表格)。
 #[derive(Debug, Clone)]
 pub struct HitRecord {
+    /// 单次命中的稳定标识,供前端轮询列表做行级复用。
+    pub id: String,
     pub ts: u64,
     /// "exact"(L1);L2 将为 "semantic"。
     pub hit_type: String,
@@ -248,6 +250,7 @@ impl SemanticCache {
                 .take(limit)
                 .map(|h| {
                     json!({
+                        "id": h.id,
                         "ts": h.ts,
                         "hit_type": h.hit_type,
                         "similarity": h.similarity,
@@ -489,6 +492,7 @@ mod tests {
         let c = SemanticCache::new();
         c.record_miss();
         c.record_hit(HitRecord {
+            id: uuid::Uuid::new_v4().to_string(),
             ts: now_secs(),
             hit_type: "exact".into(),
             similarity: None,

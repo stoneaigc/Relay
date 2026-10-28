@@ -290,6 +290,9 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE providers ADD COLUMN IF NOT EXISTS headers TEXT")
             .execute(pool)
             .await;
+        let _ = q!("ALTER TABLE providers ADD COLUMN IF NOT EXISTS max_concurrency BIGINT")
+            .execute(pool)
+            .await;
         // Key 明文列:门户端随时查看/复制完整 Key(认证仍走 key_hash)。
         let _ = q!("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_plain TEXT")
             .execute(pool)
@@ -309,6 +312,12 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
             .execute(pool)
             .await;
         let _ = q!("ALTER TABLE model_groups ADD COLUMN IF NOT EXISTS is_active BIGINT NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE model_groups ADD COLUMN IF NOT EXISTS strategy TEXT NOT NULL DEFAULT 'weighted_random'")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE model_groups ADD COLUMN IF NOT EXISTS max_concurrency BIGINT NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
         let _ = q!("ALTER TABLE users ADD COLUMN IF NOT EXISTS rpm_limit BIGINT")
@@ -394,6 +403,7 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE providers ADD COLUMN display_name TEXT").execute(pool).await;
         // 供应商自定义请求头(JSON 对象,加密存储;随上游请求附带,如 x-opencode-session)。
         let _ = q!("ALTER TABLE providers ADD COLUMN headers TEXT").execute(pool).await;
+        let _ = q!("ALTER TABLE providers ADD COLUMN max_concurrency INTEGER").execute(pool).await;
         // Key 明文列:门户端随时查看/复制完整 Key(认证仍走 key_hash)。
         let _ = q!("ALTER TABLE api_keys ADD COLUMN key_plain TEXT").execute(pool).await;
         // 分级密钥管控:模型范围 + 审批状态。
@@ -408,6 +418,9 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
             .execute(pool)
             .await;
         let _ = q!("ALTER TABLE model_groups ADD COLUMN strategy TEXT NOT NULL DEFAULT 'weighted_random'")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE model_groups ADD COLUMN max_concurrency INTEGER NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
         // L1 路由级语义缓存 opt-in(旧库补列,已存在则忽略错误)。
@@ -715,9 +728,14 @@ pub async fn find_or_create_provider_named(
     api_key: Option<&str>,
     display_name: Option<&str>,
     headers: Option<&str>,
+    max_concurrency: Option<i64>,
 ) -> anyhow::Result<(String, bool)> {
     let dn = display_name.map(str::trim).filter(|s| !s.is_empty());
     let (name, created) = find_or_create_provider(pool, kind, base_url, api_key).await?;
+    if created && max_concurrency.is_some() {
+        q!("UPDATE providers SET max_concurrency = ? WHERE name = ?")
+            .bind(max_concurrency).bind(&name).execute(pool).await?;
+    }
     if let Some(dn) = dn {
         if created {
             q!("UPDATE providers SET display_name = ? WHERE name = ?")
@@ -788,7 +806,7 @@ pub async fn list_providers(pool: &Db, page: Option<u32>, page_size: Option<u32>
     let current_page = page.unwrap_or(1).max(1);
     let offset = ((current_page - 1) as i64 * limit).max(0);
     let rows_sql = format!(
-        "SELECT p.name, p.kind, p.base_url, p.display_name,
+        "SELECT p.name, p.kind, p.base_url, p.display_name, p.max_concurrency,
                 (SELECT COUNT(*) FROM models m WHERE m.provider = p.name) as model_count
          FROM providers p{where_sql} ORDER BY p.name LIMIT ? OFFSET ?"
     );
@@ -801,6 +819,7 @@ pub async fn list_providers(pool: &Db, page: Option<u32>, page_size: Option<u32>
         "kind": r.get::<String,_>("kind"),
         "base_url": r.get::<String,_>("base_url"),
         "display_name": r.try_get::<Option<String>,_>("display_name").unwrap_or(None),
+        "max_concurrency": r.try_get::<Option<i64>,_>("max_concurrency").unwrap_or(None),
         "model_count": r.get::<i64,_>("model_count"),
     })).collect(), total as u64))
 }
@@ -828,6 +847,7 @@ pub async fn update_provider(
     api_key: Option<&str>,
     display_name: Option<&str>,
     headers: Option<&str>,
+    max_concurrency: Option<Option<i64>>,
 ) -> anyhow::Result<()> {
     let key = api_key.filter(|k| !k.is_empty());
     let dn = display_name.map(str::trim).filter(|s| !s.is_empty());
@@ -859,6 +879,11 @@ pub async fn update_provider(
         };
         q!("UPDATE providers SET headers = ? WHERE name = ?")
             .bind(enc).bind(name).execute(pool).await?;
+    }
+    // 三态:None=不改,Some(None)=恢复继承全局,Some(Some(n))=设置上限(0=不限)。
+    if let Some(limit) = max_concurrency {
+        q!("UPDATE providers SET max_concurrency = ? WHERE name = ?")
+            .bind(limit).bind(name).execute(pool).await?;
     }
     Ok(())
 }
@@ -1011,9 +1036,9 @@ pub async fn list_model_names_by_provider(pool: &Db, provider_name: &str) -> any
     Ok(rows.iter().map(|r| r.get::<String, _>("upstream_model")).collect())
 }
 
-pub async fn add_group(pool: &Db, name: &str) -> anyhow::Result<i64> {
-    let r = q!("INSERT INTO model_groups (name, created_at) VALUES (?, ?) RETURNING id")
-        .bind(name).bind(now_iso()).fetch_one(pool).await?;
+pub async fn add_group(pool: &Db, name: &str, max_concurrency: i64) -> anyhow::Result<i64> {
+    let r = q!("INSERT INTO model_groups (name, max_concurrency, created_at) VALUES (?, ?, ?) RETURNING id")
+        .bind(name).bind(max_concurrency).bind(now_iso()).fetch_one(pool).await?;
     Ok(r.get::<i64, _>("id"))
 }
 
@@ -1033,25 +1058,27 @@ pub async fn delete_group(pool: &Db, id: i64) -> anyhow::Result<u64> {
     Ok(unbound)
 }
 
-/// 重命名模型组。返回 Ok(false) 表示目标组名已被其他组占用。
-pub async fn rename_group(pool: &Db, id: i64, name: &str) -> anyhow::Result<bool> {
+/// 编辑模型组;max_concurrency=None 时保持原值。返回 Ok(false) 表示组名冲突。
+pub async fn rename_group(pool: &Db, id: i64, name: &str, max_concurrency: Option<i64>) -> anyhow::Result<bool> {
     let dup = q!("SELECT id FROM model_groups WHERE name = ? AND id <> ?")
         .bind(name).bind(id).fetch_optional(pool).await?;
     if dup.is_some() {
         return Ok(false);
     }
-    q!("UPDATE model_groups SET name = ? WHERE id = ?").bind(name).bind(id).execute(pool).await?;
+    q!("UPDATE model_groups SET name = ?, max_concurrency = COALESCE(?, max_concurrency) WHERE id = ?")
+        .bind(name).bind(max_concurrency).bind(id).execute(pool).await?;
     Ok(true)
 }
 
 pub async fn list_groups(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
-    let rows = q!("SELECT id, name, is_active, strategy FROM model_groups ORDER BY id")
+    let rows = q!("SELECT id, name, is_active, strategy, max_concurrency FROM model_groups ORDER BY id")
         .fetch_all(pool).await?;
     Ok(rows.iter().map(|r| serde_json::json!({
         "id": r.get::<i64,_>("id"),
         "name": r.get::<String,_>("name"),
         "is_active": r.get::<i64,_>("is_active") != 0,
         "strategy": r.get::<Option<String>,_>("strategy").unwrap_or_else(|| "weighted_random".to_string()),
+        "max_concurrency": r.try_get::<i64,_>("max_concurrency").unwrap_or(0),
     })).collect())
 }
 
@@ -1082,6 +1109,15 @@ pub async fn add_route(pool: &Db, group_id: i64, public_name: &str, model_id: i6
         .bind(group_id).bind(public_name).bind(model_id).bind(priority).bind(weight).bind(multiplier).bind(cache_enabled as i64).bind(now_iso())
         .fetch_one(pool).await?;
     Ok(r.get::<i64, _>("id"))
+}
+
+/// 路由防重:同组内 (对外名, model_id) 是否已有路由(避免同名同模型的冗余分流)。
+pub async fn route_exists(pool: &Db, group_id: i64, public_name: &str, model_id: i64) -> anyhow::Result<bool> {
+    let row = q!("SELECT 1 AS ok FROM group_routes WHERE group_id = ? AND public_name = ? AND model_id = ? LIMIT 1")
+        .bind(group_id).bind(public_name).bind(model_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.is_some())
 }
 
 /// 真部分更新:只 SET 传入的字段(动态拼 SET 子句,经 pq 适配占位符,SQLite/Postgres 双后端兼容)。
@@ -1290,7 +1326,7 @@ pub async fn set_user_group(pool: &Db, user_id: Uuid, group_id: Option<i64>) -> 
 pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
     let mut routing = Routing::default();
 
-    for r in q!("SELECT name, kind, base_url, api_key, headers FROM providers").fetch_all(pool).await? {
+    for r in q!("SELECT name, kind, base_url, api_key, headers, max_concurrency FROM providers").fetch_all(pool).await? {
         let kind = match r.get::<String, _>("kind").as_str() {
             "anthropic" => ProviderKind::Anthropic,
             _ => ProviderKind::Openai,
@@ -1310,7 +1346,11 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
             })
             .unwrap_or_default();
         routing.providers.insert(r.get::<String, _>("name"), ProviderConn {
-            kind, base_url: r.get("base_url"), api_key: dec_field(r.get("api_key")), concurrency: None, headers,
+            kind,
+            base_url: r.get("base_url"),
+            api_key: dec_field(r.get("api_key")),
+            concurrency: r.try_get::<Option<i64>, _>("max_concurrency").unwrap_or(None).map(|v| v.max(0) as u32),
+            headers,
         });
     }
     for r in q!("SELECT id, provider, upstream_model, label, input_price, output_price, context_length, tags FROM models").fetch_all(pool).await? {
@@ -1324,10 +1364,11 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
             tags: r.try_get("tags").unwrap_or(None),
         });
     }
-    for r in q!("SELECT id, name, strategy FROM model_groups").fetch_all(pool).await? {
+    for r in q!("SELECT id, name, strategy, max_concurrency FROM model_groups").fetch_all(pool).await? {
         let id: i64 = r.get("id");
         routing.group_names.insert(id, r.get("name"));
         routing.group_strategy.insert(id, crate::routing::strategy_from_str(r.try_get("strategy").unwrap_or(None).unwrap_or("weighted_random")));
+        routing.group_concurrency.insert(id, r.try_get::<i64, _>("max_concurrency").unwrap_or(0).max(0) as u32);
         routing.groups.entry(id).or_default();
     }
     for r in q!("SELECT group_id, public_name, model_id, priority, weight, multiplier, cache_enabled FROM group_routes").fetch_all(pool).await? {
@@ -3387,7 +3428,7 @@ mod tests {
         let db = test_db().await;
         let (prov, _) = find_or_create_provider(&db, "openai", "https://api.test.com", Some("sk-x")).await.unwrap();
         let mid = add_model(&db, &prov, "gpt-4o", None, None, None).await.unwrap();
-        let gid = add_group(&db, "grp").await.unwrap();
+        let gid = add_group(&db, "grp", 0).await.unwrap();
         add_route(&db, gid, "my-gpt", mid, 0, 80, 1.5, false).await.unwrap();
         add_time_rule(&db, &TimeRuleInput {
             group_id: gid, name: "peak".into(), weekdays: "1-5".into(),
@@ -3432,6 +3473,24 @@ mod tests {
         assert_ne!(gid3, gid);
     }
 
+    // ---- 路由防重 ----
+
+    #[tokio::test]
+    async fn route_exists_detects_same_group_name_and_model() {
+        let db = test_db().await;
+        let (prov, _) = find_or_create_provider(&db, "openai", "https://api.test.com", Some("sk-x")).await.unwrap();
+        let m1 = add_model(&db, &prov, "gpt-a", None, None, None).await.unwrap();
+        let m2 = add_model(&db, &prov, "gpt-b", None, None, None).await.unwrap();
+        let g1 = add_group(&db, "grp1", 0).await.unwrap();
+        let g2 = add_group(&db, "grp2", 0).await.unwrap();
+        add_route(&db, g1, "chat", m1, 0, 100, 1.0, false).await.unwrap();
+
+        assert!(route_exists(&db, g1, "chat", m1).await.unwrap(), "同组同名同模型 = 重复");
+        assert!(!route_exists(&db, g1, "chat", m2).await.unwrap(), "同组同名但不同模型 = 允许(同名加权分流)");
+        assert!(!route_exists(&db, g2, "chat", m1).await.unwrap(), "不同组 = 允许");
+        assert!(!route_exists(&db, g1, "other", m1).await.unwrap(), "不同对外名 = 允许");
+    }
+
     // ---- patch_route(真部分更新) ----
 
     #[tokio::test]
@@ -3440,7 +3499,7 @@ mod tests {
         let (prov, _) = find_or_create_provider(&db, "openai", "https://api.test.com", Some("sk-x")).await.unwrap();
         let m1 = add_model(&db, &prov, "gpt-a", None, None, None).await.unwrap();
         let m2 = add_model(&db, &prov, "gpt-b", None, None, None).await.unwrap();
-        let gid = add_group(&db, "grp").await.unwrap();
+        let gid = add_group(&db, "grp", 0).await.unwrap();
         let rid = add_route(&db, gid, "pub-a", m1, 0, 80, 1.5, false).await.unwrap();
 
         // 只改 weight:其余字段不动
@@ -3524,6 +3583,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrency_config_roundtrip_and_null_zero_semantics() {
+        let db = test_db().await;
+        // 新库重复执行 schema 初始化保持幂等。
+        init_schema(&db).await.unwrap();
+
+        let gid = add_group(&db, "limited", 2).await.unwrap();
+        assert_eq!(list_groups(&db).await.unwrap()[0]["max_concurrency"], 2);
+        assert_eq!(load_routing(&db).await.unwrap().group_concurrency.get(&gid), Some(&2));
+        assert!(rename_group(&db, gid, "limited-renamed", None).await.unwrap());
+        assert_eq!(list_groups(&db).await.unwrap()[0]["max_concurrency"], 2);
+        assert!(rename_group(&db, gid, "limited-renamed", Some(0)).await.unwrap());
+        assert_eq!(list_groups(&db).await.unwrap()[0]["max_concurrency"], 0);
+
+        let (provider, created) = find_or_create_provider_named(
+            &db, "openai", "https://api.concurrency.test/v1", Some("sk-c1"),
+            None, None, Some(0),
+        ).await.unwrap();
+        assert!(created);
+        let (providers, _) = list_providers(&db, None, None, None).await.unwrap();
+        assert_eq!(providers[0]["max_concurrency"], 0);
+        assert_eq!(load_routing(&db).await.unwrap().providers[&provider].concurrency, Some(0));
+
+        update_provider(
+            &db, &provider, "https://api.concurrency.test/v1", None, None, None,
+            Some(Some(7)),
+        ).await.unwrap();
+        assert_eq!(load_routing(&db).await.unwrap().providers[&provider].concurrency, Some(7));
+        update_provider(
+            &db, &provider, "https://api.concurrency.test/v1", None, None, None,
+            Some(None),
+        ).await.unwrap();
+        let (providers, _) = list_providers(&db, None, None, None).await.unwrap();
+        assert!(providers[0]["max_concurrency"].is_null());
+        assert_eq!(load_routing(&db).await.unwrap().providers[&provider].concurrency, None);
+    }
+
+    #[tokio::test]
     async fn find_or_create_provider_creates_new() {
         let db = test_db().await;
         let (name, created) = find_or_create_provider(&db, "openai", "https://api.test.com/v1", Some("sk-aaa"))
@@ -3571,7 +3667,7 @@ mod tests {
     #[tokio::test]
     async fn named_provider_persists_display_name_on_create() {
         let db = test_db().await;
-        let (name, created) = find_or_create_provider_named(&db, "openai", "https://api.named.test/v1", Some("sk-n1"), Some("  生产网关  "), None)
+        let (name, created) = find_or_create_provider_named(&db, "openai", "https://api.named.test/v1", Some("sk-n1"), Some("  生产网关  "), None, None)
             .await.unwrap();
         assert!(created);
         let (rows, _) = list_providers(&db, None, None, None).await.unwrap();
@@ -3582,7 +3678,7 @@ mod tests {
     #[tokio::test]
     async fn named_provider_persists_headers_on_create() {
         let db = test_db().await;
-        let (name, created) = find_or_create_provider_named(&db, "openai", "https://api.hdr.test/v1", Some("sk-h1"), None, Some(r#"{"x-opencode-session":"sess-1"}"#))
+        let (name, created) = find_or_create_provider_named(&db, "openai", "https://api.hdr.test/v1", Some("sk-h1"), None, Some(r#"{"x-opencode-session":"sess-1"}"#), None)
             .await.unwrap();
         assert!(created);
         // headers 走 load_routing 读取路径:解密 + 解析为键值对。
@@ -3594,10 +3690,10 @@ mod tests {
     #[tokio::test]
     async fn named_provider_reuse_keeps_original_name() {
         let db = test_db().await;
-        let (n1, _) = find_or_create_provider_named(&db, "openai", "https://api.reuse.test/v1", Some("sk-r1"), Some("第一个名字"), None)
+        let (n1, _) = find_or_create_provider_named(&db, "openai", "https://api.reuse.test/v1", Some("sk-r1"), Some("第一个名字"), None, None)
             .await.unwrap();
         // 同 base_url+key 再次添加并带新名字:复用已有 provider,不覆盖其显示名。
-        let (n2, created) = find_or_create_provider_named(&db, "openai", "https://api.reuse.test/v1", Some("sk-r1"), Some("第二个名字"), None)
+        let (n2, created) = find_or_create_provider_named(&db, "openai", "https://api.reuse.test/v1", Some("sk-r1"), Some("第二个名字"), None, None)
             .await.unwrap();
         assert!(!created);
         assert_eq!(n1, n2);
@@ -3613,7 +3709,7 @@ mod tests {
         let (n1, _) = find_or_create_provider(&db, "openai", "https://api.fillblank.test/v1", Some("sk-f1"))
             .await.unwrap();
         // 复用时带名字:原显示名为空 → 补写。
-        let (n2, created) = find_or_create_provider_named(&db, "openai", "https://api.fillblank.test/v1", Some("sk-f1"), Some("补写的名字"), None)
+        let (n2, created) = find_or_create_provider_named(&db, "openai", "https://api.fillblank.test/v1", Some("sk-f1"), Some("补写的名字"), None, None)
             .await.unwrap();
         assert!(!created);
         assert_eq!(n1, n2);
@@ -3625,7 +3721,7 @@ mod tests {
     #[tokio::test]
     async fn named_provider_blank_name_falls_back_to_null() {
         let db = test_db().await;
-        let (name, created) = find_or_create_provider_named(&db, "openai", "https://api.blank.test/v1", Some("sk-b1"), Some("   "), None)
+        let (name, created) = find_or_create_provider_named(&db, "openai", "https://api.blank.test/v1", Some("sk-b1"), Some("   "), None, None)
             .await.unwrap();
         assert!(created);
         let (rows, _) = list_providers(&db, None, None, None).await.unwrap();
@@ -3638,12 +3734,12 @@ mod tests {
         let db = test_db().await;
         let (name, _) = find_or_create_provider(&db, "openai", "https://api.upd.test/v1", Some("sk-u1"))
             .await.unwrap();
-        update_provider(&db, &name, "https://api.upd.test/v1", None, Some("改名后的上游"), None).await.unwrap();
+        update_provider(&db, &name, "https://api.upd.test/v1", None, Some("改名后的上游"), None, None).await.unwrap();
         let (rows, _) = list_providers(&db, None, None, None).await.unwrap();
         let row = rows.iter().find(|r| r["name"] == name).unwrap();
         assert_eq!(row["display_name"], "改名后的上游");
         // 空白名不覆盖已有显示名。
-        update_provider(&db, &name, "https://api.upd.test/v1", None, Some("  "), None).await.unwrap();
+        update_provider(&db, &name, "https://api.upd.test/v1", None, Some("  "), None, None).await.unwrap();
         let (rows, _) = list_providers(&db, None, None, None).await.unwrap();
         let row = rows.iter().find(|r| r["name"] == name).unwrap();
         assert_eq!(row["display_name"], "改名后的上游");

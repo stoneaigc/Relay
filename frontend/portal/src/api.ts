@@ -71,6 +71,7 @@ export interface ModelCard {
   multiplier: number;
   cache: boolean;
   upstreams: number;
+  group_concurrency: number;
   input_price: number | null;
   output_price: number | null;
 }

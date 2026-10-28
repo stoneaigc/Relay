@@ -52,6 +52,8 @@ export interface UserRow {
   concurrency_limit: number | null;
   /** 原始显式值(未与运行时生效值合并):编辑回显用,null = 继承用户组/全局 */
   concurrency_limit_raw?: number | null;
+  rpm_limit?: number | null;
+  tpm_limit?: number | null;
   group_id: number;
   budget_daily_tokens: number | null;
   budget_monthly_tokens: number | null;
@@ -111,6 +113,8 @@ export interface ProviderRow {
   kind: string;
   base_url: string;
   display_name?: string | null;
+  /** null = 继承全局上游并发;0 = 不限 */
+  max_concurrency: number | null;
   model_count: number;
 }
 
@@ -156,7 +160,7 @@ export interface ProviderHealthResp {
   items: ProviderHealthItem[];
 }
 
-export interface GroupRow { id: number; name: string; is_active: boolean; strategy: string }
+export interface GroupRow { id: number; name: string; is_active: boolean; strategy: string; max_concurrency: number }
 
 export interface TimeRuleRow {
   id: number;
@@ -252,8 +256,8 @@ export interface AdminApiKeyRow {
 }
 
 export const api = {
-  // 管理员一键切换门户:按管理员用户名查找同名门户用户并签发 portal 令牌(无同名用户时 404)
-  portalSso: (): Promise<{ role: string; token: string; username: string }> =>
+  // 管理员一键切换门户:无同名门户账号时自动创建,仍签发独立 portal 令牌。
+  portalSso: (): Promise<{ role: string; token: string; username: string; created?: boolean }> =>
     req("/admin/api/portal-sso", { method: "POST" }),
 
   overview: (): Promise<OverviewResp> => req("/admin/api/overview"),
@@ -268,7 +272,7 @@ export const api = {
     const s = qs.toString();
     return req(`/admin/api/users${s ? "?" + s : ""}`);
   },
-  createUser: (body: { username: string; password: string; email?: string; phone?: string; group_id?: number; user_group_id?: number; grant_tokens?: number; concurrency_limit?: number; budget_daily_tokens?: number; budget_monthly_tokens?: number }) =>
+  createUser: (body: { username: string; password: string; email?: string; phone?: string; group_id?: number; user_group_id?: number; grant_tokens?: number; concurrency_limit?: number; rpm_limit?: number; tpm_limit?: number; budget_daily_tokens?: number; budget_monthly_tokens?: number }) =>
     req("/admin/api/users", { method: "POST", body: JSON.stringify(body) }),
   patchUser: (id: string, body: any) =>
     req(`/admin/api/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
@@ -321,11 +325,11 @@ export const api = {
     req(`/admin/api/providers?page=${page || 1}&page_size=${page_size || 20}${q ? `&q=${encodeURIComponent(q)}` : ""}`),
   providerModels: (name: string): Promise<{ data: ProviderModelRow[] }> => req(`/admin/api/providers/${name}/models`),
   deleteProvider: (name: string) => req(`/admin/api/providers/${name}`, { method: "DELETE" }),
-  updateProvider: (name: string, body: { base_url: string; api_key?: string; display_name?: string | null; headers?: string }) =>
+  updateProvider: (name: string, body: { base_url: string; api_key?: string; display_name?: string | null; headers?: string; max_concurrency?: number | null }) =>
     req(`/admin/api/providers/${name}`, { method: "PUT", body: JSON.stringify(body) }),
 
   models: (): Promise<{ data: ModelRow[] }> => req("/admin/api/models"),
-  addModel: (body: { label?: string; kind: string; base_url: string; api_key?: string; upstream_model: string; input_price?: number | null; output_price?: number | null; display_name?: string; headers?: string }) =>
+  addModel: (body: { label?: string; kind: string; base_url: string; api_key?: string; upstream_model: string; input_price?: number | null; output_price?: number | null; display_name?: string; headers?: string; max_concurrency?: number | null }) =>
     req("/admin/api/models", { method: "POST", body: JSON.stringify(body) }),
   updateModel: (id: number, body: { kind: string; base_url: string; api_key?: string; upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null; context_length?: number | null; tags?: string }) =>
     req(`/admin/api/models/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
@@ -334,11 +338,11 @@ export const api = {
   deleteModel: (id: number) => req(`/admin/api/models/${id}`, { method: "DELETE" }),
   deleteModelsBatch: (ids: number[]): Promise<{ ok: boolean; deleted: number }> =>
     req("/admin/api/models/batch-delete", { method: "POST", body: JSON.stringify({ ids }) }),
-  testModel: (id: number): Promise<{ ok: boolean; latency_ms?: number; error?: string }> =>
+  testModel: (id: number): Promise<{ ok: boolean; latency_ms?: number; error?: string; note?: string; probe_kind?: "chat" | "embeddings" | "connectivity"; forward_supported?: boolean }> =>
     req(`/admin/api/models/${id}/test`, { method: "POST" }),
   fetchModelList: (body: { kind: string; base_url: string; api_key?: string; provider?: string }): Promise<{ ok: boolean; models?: string[]; error?: string }> =>
     req("/admin/api/models/fetch-list", { method: "POST", body: JSON.stringify(body) }),
-  addModelsBatch: (body: { kind: string; base_url: string; api_key?: string; display_name?: string; headers?: string; models: { upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null }[] }): Promise<{ ok: boolean; provider?: string; provider_created?: boolean; added?: number; skipped?: number }> =>
+  addModelsBatch: (body: { kind: string; base_url: string; api_key?: string; display_name?: string; headers?: string; max_concurrency?: number | null; models: { upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null }[] }): Promise<{ ok: boolean; provider?: string; provider_created?: boolean; added?: number; skipped?: number }> =>
     req("/admin/api/models/batch", { method: "POST", body: JSON.stringify(body) }),
   addModelsToProvider: (name: string, models: { upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null }[]): Promise<{ ok: boolean; added?: number; skipped?: number }> =>
     req(`/admin/api/providers/${encodeURIComponent(name)}/models/batch`, { method: "POST", body: JSON.stringify({ models }) }),
@@ -348,11 +352,12 @@ export const api = {
     req(`/admin/api/providers/health?range_secs=${rangeSecs}`),
 
   groups: (): Promise<{ data: GroupRow[] }> => req("/admin/api/groups"),
-  addGroup: (name: string) => req("/admin/api/groups", { method: "POST", body: JSON.stringify({ name }) }),
+  addGroup: (name: string, maxConcurrency = 0): Promise<{ ok: boolean; id: number }> =>
+    req("/admin/api/groups", { method: "POST", body: JSON.stringify({ name, max_concurrency: maxConcurrency }) }),
   deleteGroup: (id: number) => req(`/admin/api/groups/${id}`, { method: "DELETE" }),
   activateGroup: (id: number) => req(`/admin/api/groups/${id}/activate`, { method: "POST" }),
-  renameGroup: (id: number, name: string) =>
-    req(`/admin/api/groups/${id}`, { method: "PATCH", body: JSON.stringify({ name }) }),
+  renameGroup: (id: number, name: string, maxConcurrency?: number) =>
+    req(`/admin/api/groups/${id}`, { method: "PATCH", body: JSON.stringify({ name, ...(maxConcurrency === undefined ? {} : { max_concurrency: maxConcurrency }) }) }),
   setGroupStrategy: (id: number, strategy: string) =>
     req(`/admin/api/groups/${id}/strategy`, { method: "POST", body: JSON.stringify({ strategy }) }),
 
@@ -638,6 +643,7 @@ export interface CacheStatsResp {
 }
 
 export interface CacheHitRow {
+  id: string;
   ts: number;
   /** exact = 精确哈希命中;semantic = 语义相似命中(批 D) */
   hit_type: string;

@@ -61,9 +61,18 @@ function CopyButton({ value, label = "复制" }: { value: string; label?: string
   );
 }
 
+/** 语音、搜索等能力当前仅做上游连通性探测,不作为可转发模型展示。 */
+const isUnsupportedModel = (m: ModelCard) =>
+  m.tags.some((t) => /语音|搜索|asr|speech|transcri|search|tts/i.test(t));
+
+/** 纯向量模型只走 /v1/embeddings,不能用于对话。 */
+const isEmbeddingModel = (m: ModelCard) =>
+  m.tags.some((t) => t.toLowerCase().includes("向量") || t.toLowerCase().includes("embedding"));
+
 /** 模型广场卡片:点击查看详情;悬浮复制图标直接复制模型名。 */
 function ModelCardView({ m, onDetail }: { m: ModelCard; onDetail: (m: ModelCard) => void }) {
   const [copied, copy] = useCopy();
+  const unsupported = isUnsupportedModel(m);
   const ctx = m.context_length != null && m.context_length > 0
     ? m.context_length >= 1_000_000 ? `${(m.context_length / 1_000_000).toFixed(m.context_length % 1_000_000 ? 1 : 0)}M` : `${Math.round(m.context_length / 1000)}K`
     : null;
@@ -84,10 +93,11 @@ function ModelCardView({ m, onDetail }: { m: ModelCard; onDetail: (m: ModelCard)
           ? <span className="ml-auto inline-flex shrink-0 items-center gap-1 text-xs text-primary"><Check className="h-3.5 w-3.5" />已复制</span>
           : <Copy className="ml-auto h-3.5 w-3.5 shrink-0 opacity-0 transition-opacity group-hover:opacity-40" onClick={(e) => { e.stopPropagation(); copy(m.name); }} />}
       </div>
-      {(m.labels.length > 0 || m.tags.length > 0) && (
+      {(unsupported || m.labels.length > 0 || m.tags.length > 0) && (
         <div className="flex flex-wrap gap-1">
           {m.labels.map((l) => <Badge key={l}>{l}</Badge>)}
           {m.tags.map((t) => <Badge key={t} variant="muted">{t}</Badge>)}
+          {unsupported && <Badge variant="default" className="border-destructive/30 bg-destructive/15 text-destructive">暂不转发</Badge>}
         </div>
       )}
       <div className="mt-auto grid grid-cols-2 gap-x-3 gap-y-1 border-t pt-2.5 text-xs text-muted-foreground">
@@ -95,6 +105,7 @@ function ModelCardView({ m, onDetail }: { m: ModelCard; onDetail: (m: ModelCard)
         <span className="flex items-center gap-1" title="该模型路由的计费倍率,实际单价 = 模型单价 × 倍率">倍率<span className="mono text-foreground">×{m.multiplier}</span></span>
         <span className="flex items-center gap-1" title="每 1M tokens 模型单价(未含倍率)">价格<span className="mono truncate text-foreground" title={price != null ? `${price} $/1M tokens(未含倍率)` : "未定价"}>{price ?? "未定价"}</span></span>
         <span className="flex items-center gap-1" title="该模型聚合的上游部署数">上游<span className="mono text-foreground">{m.upstreams}</span></span>
+        <span className="col-span-2 flex items-center gap-1" title="该模型所在模型组的总并发上限,0 表示不限">模型组总并发<span className="mono text-foreground">{m.group_concurrency === 0 ? "不限" : m.group_concurrency}</span></span>
         {m.cache && <span className="col-span-2 inline-flex items-center gap-1 text-success" title="支持提示词缓存,命中按折扣计费"><Star className="h-3 w-3" />支持上下文缓存</span>}
       </div>
     </button>
@@ -110,14 +121,17 @@ function ModelDetailDialog({ m, onClose }: { m: ModelCard | null; onClose: () =>
         : `${Math.round(m.context_length / 1000)}K`) + " tokens"
     : "—";
   // 网关内置协议互转:按模型能力提供入口——对话/多模态模型走三大对话端点,向量模型走 Embeddings。
-  const isEmbedding = m ? m.tags.some((t) => t.toLowerCase().includes("向量") || t.toLowerCase().includes("embedding")) : false;
-  const protos: [string, string][] = isEmbedding
-    ? [["/v1/embeddings", "向量 Embeddings(输入文本,返回向量)"]]
-    : [
-        ["/v1/chat/completions", "OpenAI 对话补全"],
-        ["/v1/responses", "OpenAI Responses"],
-        ["/v1/messages", "Anthropic Messages"],
-      ];
+  const unsupported = m ? isUnsupportedModel(m) : false;
+  const isEmbedding = m ? isEmbeddingModel(m) : false;
+  const protos: [string, string][] = unsupported
+    ? []
+    : isEmbedding
+      ? [["/v1/embeddings", "向量 Embeddings(输入文本,返回向量)"]]
+      : [
+          ["/v1/chat/completions", "OpenAI 对话补全"],
+          ["/v1/responses", "OpenAI Responses"],
+          ["/v1/messages", "Anthropic Messages"],
+        ];
   // 实际计费单价 = 模型单价 × 路由倍率。
   const effIn = m?.input_price != null ? m.input_price * m.multiplier : null;
   const effOut = m?.output_price != null ? m.output_price * m.multiplier : null;
@@ -129,14 +143,15 @@ function ModelDetailDialog({ m, onClose }: { m: ModelCard | null; onClose: () =>
             <span className="mono">{m?.name}</span>
             {m && <CopyButton value={m.name} label="复制模型名" />}
           </DialogTitle>
-          <DialogDescription>按模型能力提供兼容的调用入口，网关自动完成协议互转；实际计费以下方「实际计费单价」为准。</DialogDescription>
+          <DialogDescription>{unsupported ? "该模型暂不支持网关转发，仅用于上游连通性探测。" : "按模型能力提供兼容的调用入口，网关自动完成协议互转；实际计费以下方「实际计费单价」为准。"}</DialogDescription>
         </DialogHeader>
         {m && (
           <div className="space-y-4">
-            {(m.labels.length > 0 || m.tags.length > 0) && (
+            {(unsupported || m.labels.length > 0 || m.tags.length > 0) && (
               <div className="flex flex-wrap gap-1">
                 {m.labels.map((l) => <Badge key={l}>{l}</Badge>)}
                 {m.tags.map((t) => <Badge key={t} variant="muted">{t}</Badge>)}
+                {unsupported && <Badge variant="default" className="border-destructive/30 bg-destructive/15 text-destructive">暂不转发</Badge>}
               </div>
             )}
             <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
@@ -144,6 +159,7 @@ function ModelDetailDialog({ m, onClose }: { m: ModelCard | null; onClose: () =>
               <div><div className="text-xs text-muted-foreground">计费倍率</div><div className="mono">×{m.multiplier}</div></div>
               <div><div className="text-xs text-muted-foreground">模型单价(输入/输出)</div><div className="mono">{m.input_price != null && m.output_price != null ? `$${m.input_price.toFixed(2)} / $${m.output_price.toFixed(2)} · 1M tokens` : "未定价"}</div></div>
               <div><div className="text-xs text-muted-foreground">上游部署数</div><div className="mono">{m.upstreams}</div></div>
+              <div><div className="text-xs text-muted-foreground">模型组总并发</div><div className="mono">{m.group_concurrency === 0 ? "不限" : m.group_concurrency}</div></div>
               <div><div className="text-xs text-muted-foreground">上下文缓存</div><div>{m.cache ? <span className="text-success">支持(命中按折扣)</span> : <span className="text-muted-foreground">不支持</span>}</div></div>
             </div>
             <div className="rounded-lg bg-muted/40 px-3 py-2 text-xs leading-5">
@@ -153,20 +169,29 @@ function ModelDetailDialog({ m, onClose }: { m: ModelCard | null; onClose: () =>
                 <>该模型未定价，调用按 $0 计。</>
               )}
             </div>
-            <div>
-              <div className="mb-1 text-xs font-medium text-muted-foreground">兼容调用入口</div>
-              <div className="space-y-1">
-                {protos.map(([p, d]) => (
-                  <div key={p} className="flex items-center justify-between gap-2 rounded-md bg-muted/40 px-2 py-1 text-xs">
-                    <span className="mono">{p}</span>
-                    <span className="text-muted-foreground">{d}</span>
-                  </div>
-                ))}
+            {unsupported ? (
+              <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs leading-5">
+                <div className="font-medium text-destructive">暂不转发</div>
+                <p className="mt-1 text-muted-foreground">当前网关不转发此类语音、搜索等模型，仅做上游连通性探测，不承诺转发能力。</p>
               </div>
-            </div>
-            <Button variant="outline" className="w-full" onClick={() => { onClose(); navigate("/docs"); }}>
-              <BookOpen className="h-4 w-4" /> 查看调用示例(API 文档)
-            </Button>
+            ) : (
+              <>
+                <div>
+                  <div className="mb-1 text-xs font-medium text-muted-foreground">兼容调用入口</div>
+                  <div className="space-y-1">
+                    {protos.map(([p, d]) => (
+                      <div key={p} className="flex items-center justify-between gap-2 rounded-md bg-muted/40 px-2 py-1 text-xs">
+                        <span className="mono">{p}</span>
+                        <span className="text-muted-foreground">{d}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <Button variant="outline" className="w-full" onClick={() => { onClose(); navigate("/docs"); }}>
+                  <BookOpen className="h-4 w-4" /> 查看调用示例(API 文档)
+                </Button>
+              </>
+            )}
           </div>
         )}
       </DialogContent>
@@ -564,7 +589,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         )}
 
         {effectiveSection === "chat" ? (
-          <ChatView models={models.map((m) => m.name)} onSent={refresh} />
+          // 对话页只能走三大对话端点:与卡片/详情保持一致,过滤掉网关暂不转发(语音/搜索)与纯向量模型。
+          <ChatView models={models.filter((m) => !isUnsupportedModel(m) && !isEmbeddingModel(m)).map((m) => m.name)} onSent={refresh} />
         ) : effectiveSection === "models" ? (
           <div className="min-h-0 flex-1 overflow-auto">
             <div className="p-4 md:p-6">
@@ -775,9 +801,15 @@ function ChatView({ models, onSent }: { models: string[]; onSent: () => void }) 
       <div className="flex shrink-0 items-center gap-2 border-b px-4 py-2 md:px-6">
         <span className="text-xs text-muted-foreground">模型</span>
         <select value={model} onChange={(e) => setModel(e.target.value)}
-          className="h-8 rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring">
-          {models.map((m) => <option key={m} value={m}>{m}</option>)}
+          disabled={models.length === 0}
+          className="h-8 rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-60">
+          {models.length === 0
+            ? <option value="">暂无可用对话模型</option>
+            : models.map((m) => <option key={m} value={m}>{m}</option>)}
         </select>
+        {models.length === 0 && (
+          <span className="text-xs text-muted-foreground">当前模型组仅包含网关暂不支持转发的模型(语音/搜索/向量)</span>
+        )}
         {msgs.length > 0 && (
           <Button variant="ghost" size="sm" className="ml-auto gap-1.5 text-muted-foreground" onClick={clearChat} disabled={busy}>
             <Trash2 className="h-3.5 w-3.5" />清空对话

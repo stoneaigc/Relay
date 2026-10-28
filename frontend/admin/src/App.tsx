@@ -16,7 +16,7 @@ import EChart, { cssVar } from "@/components/EChart";
 import type { EChartsCoreOption } from "echarts/core";
 import PaginationBar from "./PaginationBar";
 import ApiDocsPanel from "./ApiDocs";
-import { Toaster } from "sonner";
+import { Toaster, toast } from "sonner";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
 
@@ -170,14 +170,17 @@ function Console({ onLogout }: { onLogout: () => void }) {
         ))}
       </nav>
       <div className="space-y-0.5 border-t border-border px-2.5 py-3">
-        {/* 一键切换门户:有同名门户用户则带登录态直达,否则回落门户登录页 */}
+        {/* 一键切换门户:首次自动创建同名门户账号,成功后带独立 portal 令牌直达。 */}
         <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground"
           onClick={async () => {
             try {
               const r = await api.portalSso();
-              if (r.token) localStorage.setItem("relay_portal_token", r.token);
-            } catch { /* 无同名门户用户:回落门户登录页 */ }
-            window.location.href = SITE_PREFIX + "/portal/";
+              if (r.token) {
+                localStorage.setItem("relay_portal_token", r.token);
+                if (r.created) toast.success(`已自动创建门户账号 ${r.username}`);
+                window.location.href = SITE_PREFIX + "/portal/";
+              }
+            } catch (e: any) { toast.error(e.message || "进入用户门户失败"); }
           }}>
           <ExternalLink className="h-4 w-4" />进入用户门户
         </Button>
@@ -386,6 +389,8 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
   const [phone, setPhone] = useState("");
   // 空串 = 继承用户组/全局(不写显式值);数字 = 显式限额,0 = 显式不限。
   const [conc, setConc] = useState("");
+  const [rpm, setRpm] = useState("");
+  const [tpm, setTpm] = useState("");
   const [amount, setAmount] = useState("");
   const [budgetDaily, setBudgetDaily] = useState("");
   const [budgetMonthly, setBudgetMonthly] = useState("");
@@ -395,12 +400,15 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
   const [copiedHint, setCopiedHint] = useState(false);
   useEffect(() => {
     if (open) {
-      setUsername(edit?.username ?? ""); setPassword(""); setGroupId(edit?.group_id ?? 0);
-      setUserGroupId(edit?.user_group_id ?? 0);
+      setUsername(edit?.username ?? ""); setPassword("");
+      setGroupId(edit ? (edit.group_id ?? 0) : (groups.find((g) => g.is_active)?.id ?? 0));
+      setUserGroupId(edit ? (edit.user_group_id ?? 0) : (userGroups.find((g) => g.name === "default")?.id ?? 0));
       setEmail(edit?.email ?? ""); setPhone(edit?.phone ?? "");
       // 回显用原始显式值(raw):null(继承)显示空串,保存时发 -1 继续保持继承。
       // 不能用 concurrency_limit(生效值=解析链结果,继承时也非 null),否则继承被静默固化为显式值。
       setConc(edit?.concurrency_limit_raw == null ? "" : String(edit.concurrency_limit_raw));
+      setRpm(edit?.rpm_limit == null ? "" : String(edit.rpm_limit));
+      setTpm(edit?.tpm_limit == null ? "" : String(edit.tpm_limit));
       setAmount(edit ? "0" : "10000000"); setErr("");
       setBudgetDaily(edit?.budget_daily_tokens == null ? "" : String(edit.budget_daily_tokens));
       setBudgetMonthly(edit?.budget_monthly_tokens == null ? "" : String(edit.budget_monthly_tokens));
@@ -417,9 +425,9 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
       if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return NaN;
       return n;
     };
-    const cl = numOrUndef(conc), bd = numOrUndef(budgetDaily), bm = numOrUndef(budgetMonthly);
-    if (Number.isNaN(cl) || Number.isNaN(bd) || Number.isNaN(bm)) {
-      setErr("并发/预算需为非负整数,留空 = 继承用户组/全局,0 = 显式不限");
+    const cl = numOrUndef(conc), rr = numOrUndef(rpm), tr = numOrUndef(tpm), bd = numOrUndef(budgetDaily), bm = numOrUndef(budgetMonthly);
+    if (Number.isNaN(cl) || Number.isNaN(rr) || Number.isNaN(tr) || Number.isNaN(bd) || Number.isNaN(bm)) {
+      setErr("并发/RPM/TPM/预算需为非负整数,留空 = 继承用户组/全局,0 = 显式不限");
       return;
     }
     try {
@@ -429,6 +437,8 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
           email: email.trim(), phone: phone.trim(),
           group_id: groupId, user_group_id: userGroupId,
           concurrency_limit: cl === undefined ? -1 : cl,
+          rpm_limit: rr === undefined ? -1 : rr,
+          tpm_limit: tr === undefined ? -1 : tr,
           budget_daily_tokens: bd === undefined ? -1 : bd,
           budget_monthly_tokens: bm === undefined ? -1 : bm,
         };
@@ -439,8 +449,8 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
         const r: any = await api.createUser({
           username: username.trim(), password,
           email: email.trim() || undefined, phone: phone.trim() || undefined,
-          group_id: groupId || undefined, user_group_id: userGroupId || undefined, grant_tokens: Number(amount) || 0,
-          concurrency_limit: cl,
+          group_id: groupId, user_group_id: userGroupId, grant_tokens: Number(amount) || 0,
+          concurrency_limit: cl, rpm_limit: rr, tpm_limit: tr,
           budget_daily_tokens: bd, budget_monthly_tokens: bm,
         });
         if (r?.initial_password) setCreated({ username: username.trim(), password: r.initial_password });
@@ -456,8 +466,8 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
   const effConc = conc.trim() === "" ? (selGroup?.max_concurrency ?? defaults.concurrency_limit) : Number(conc || 0);
   const effDaily = budgetDaily.trim() === "" ? selGroup?.budget_daily_tokens ?? null : Number(budgetDaily || 0);
   const effMonthly = budgetMonthly.trim() === "" ? selGroup?.budget_monthly_tokens ?? null : Number(budgetMonthly || 0);
-  const effRpm = selGroup?.rpm_limit ?? defaults.rpm_limit;
-  const effTpm = selGroup?.tpm_limit ?? defaults.tpm_limit;
+  const effRpm = rpm.trim() === "" ? (selGroup?.rpm_limit ?? defaults.rpm_limit) : Number(rpm || 0);
+  const effTpm = tpm.trim() === "" ? (selGroup?.tpm_limit ?? defaults.tpm_limit) : Number(tpm || 0);
   const fmtEff = (v: number | null | undefined) => (v == null || v === 0 ? "不限" : v.toLocaleString());
   const concPlaceholder = selGroup
     ? `继承用户组:${selGroup.name}(${selGroup.max_concurrency == null ? `全局 ${defaults.concurrency_limit}` : selGroup.max_concurrency})`
@@ -519,8 +529,14 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
               )}
             </SheetSection>
             <SheetSection title="限额与预算" hint={limitHint}>
-              <div><label className={lbl}>并发上限</label>
-                <Input placeholder={concPlaceholder} value={conc} onChange={(e) => setConc(e.target.value)} /></div>
+              <div className="grid grid-cols-3 gap-3">
+                <div><label className={lbl}>并发上限</label>
+                  <Input placeholder={concPlaceholder} value={conc} onChange={(e) => setConc(e.target.value)} /></div>
+                <div><label className={lbl}>RPM</label>
+                  <Input placeholder={selGroup ? `继承用户组(${selGroup.rpm_limit ?? `全局 ${defaults.rpm_limit}`})` : `继承全局(${defaults.rpm_limit})`} value={rpm} onChange={(e) => setRpm(e.target.value)} /></div>
+                <div><label className={lbl}>TPM</label>
+                  <Input placeholder={selGroup ? `继承用户组(${selGroup.tpm_limit ?? `全局 ${defaults.tpm_limit}`})` : `继承全局(${defaults.tpm_limit})`} value={tpm} onChange={(e) => setTpm(e.target.value)} /></div>
+              </div>
               <div className="grid grid-cols-2 gap-3.5">
                 <div><label className={lbl}>日预算 tokens</label>
                   <Input placeholder={budgetPlaceholder(selGroup?.budget_daily_tokens ?? null)} value={budgetDaily} onChange={(e) => setBudgetDaily(e.target.value)} /></div>
@@ -534,8 +550,8 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
                 </p>
                 <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-xs">
                   <span>并发 <b className="font-semibold tabular-nums text-foreground">{fmtEff(effConc)}</b></span>
-                  <span>RPM <b className="font-semibold tabular-nums text-foreground">{fmtEff(effRpm)}</b><span className="ml-1 text-[10px] text-subtle-foreground">{selGroup ? "组" : "全局"}</span></span>
-                  <span>TPM <b className="font-semibold tabular-nums text-foreground">{fmtEff(effTpm)}</b><span className="ml-1 text-[10px] text-subtle-foreground">{selGroup ? "组" : "全局"}</span></span>
+                  <span>RPM <b className="font-semibold tabular-nums text-foreground">{fmtEff(effRpm)}</b><span className="ml-1 text-[10px] text-subtle-foreground">{rpm.trim() ? "显式" : selGroup ? "组" : "全局"}</span></span>
+                  <span>TPM <b className="font-semibold tabular-nums text-foreground">{fmtEff(effTpm)}</b><span className="ml-1 text-[10px] text-subtle-foreground">{tpm.trim() ? "显式" : selGroup ? "组" : "全局"}</span></span>
                   <span>日预算 <b className="font-semibold tabular-nums text-foreground">{fmtEff(effDaily)}</b>{effDaily !== 0 && selGroup?.budget_daily_tokens != null && budgetDaily.trim() === "" && <span className="ml-1 text-[10px] text-subtle-foreground">组</span>}</span>
                   <span>月预算 <b className="font-semibold tabular-nums text-foreground">{fmtEff(effMonthly)}</b>{effMonthly !== 0 && selGroup?.budget_monthly_tokens != null && budgetMonthly.trim() === "" && <span className="ml-1 text-[10px] text-subtle-foreground">组</span>}</span>
                 </div>
@@ -1554,6 +1570,7 @@ function ModelsPanel() {
   const [test, setTest] = useState<Record<number, "loading" | { ok: boolean; msg: string }>>({});
   // 供应商级一键测试结果(卡片行内展示,免逐个模型手测);running = 批量进行中(防重入)。
   const [provTest, setProvTest] = useState<Record<string, { ok: boolean; msg: string; running?: boolean }>>({});
+  const testJobs = useRef<Record<string, { cancelled: boolean }>>({});
   const [page, setPage] = useState(1);
   const [pageMeta, setPageMeta] = useState({ total: 0, total_pages: 1 });
   const [providerSearch, setProviderSearch] = useState("");
@@ -1701,42 +1718,53 @@ function ModelsPanel() {
     setTest((t) => ({ ...t, [id]: "loading" }));
     try {
       const r = await api.testModel(id);
-      setTest((t) => ({ ...t, [id]: { ok: r.ok, msg: r.ok ? `${r.latency_ms}ms` : (r.error || "失败") } }));
+      setTest((t) => ({ ...t, [id]: { ok: r.ok, msg: r.ok ? (r.note || `${r.latency_ms}ms · ${r.probe_kind || "chat"}`) : (r.error || "失败") } }));
     } catch (e: any) { setTest((t) => ({ ...t, [id]: { ok: false, msg: e.message } })); }
   };
 
-  // 供应商级一键测试:批量测试该供应商下全部模型(并发 5,复用单模型测试接口),
-  // 每个模型行的结果实时填充;完成后卡片头部显示通过数。
-  const runProvTest = async (p: ProviderRow) => {
-    if (provTest[p.name]?.running) return;
-    let models = providerModels[p.name];
-    if (!models) {
-      setProvTest((t) => ({ ...t, [p.name]: { ok: true, msg: "0", running: true } }));
-      try {
+  // 供应商级批量测试支持全部/仅勾选；取消会停止领取新任务，已发出的请求等待自然结束。
+  const runProvTest = async (p: ProviderRow, selectedOnly = false) => {
+    if (testJobs.current[p.name] && provTest[p.name]?.running) return;
+    const job = { cancelled: false };
+    testJobs.current[p.name] = job;
+    setProvTest((t) => ({ ...t, [p.name]: { ok: true, msg: "准备中", running: true } }));
+    try {
+      let models = providerModels[p.name];
+      if (!models) {
         models = (await api.providerModels(p.name)).data;
         setProviderModels((prev) => ({ ...prev, [p.name]: models! }));
-      } catch (e: any) { setProvTest((t) => ({ ...t, [p.name]: { ok: false, msg: e.message } })); return; }
-    }
-    if (!models.length) { setProvTest((t) => ({ ...t, [p.name]: { ok: false, msg: "该供应商下没有模型" } })); return; }
-    setExpanded((s) => { const n = new Set(s); n.add(p.name); return n; });
-    const ids = models.map((m) => m.id);
-    let done = 0, okCount = 0;
-    const CONCURRENCY = 5;
-    const queue = [...ids];
-    const worker = async () => {
-      while (queue.length) {
-        const id = queue.shift()!;
-        try {
-          const r = await api.testModel(id);
-          if (r.ok) okCount++;
-          setTest((t) => ({ ...t, [id]: { ok: r.ok, msg: r.ok ? `${r.latency_ms}ms` : (r.error || "失败") } }));
-        } catch (e: any) { setTest((t) => ({ ...t, [id]: { ok: false, msg: e.message } })); }
-        done++;
-        setProvTest((t) => ({ ...t, [p.name]: { ok: true, msg: `${done}/${ids.length}`, running: true } }));
       }
-    };
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, ids.length) }, worker));
-    setProvTest((t) => ({ ...t, [p.name]: { ok: okCount === ids.length, msg: `${okCount}/${ids.length} 通过` } }));
+      const ids = models.filter((m) => !selectedOnly || selected.has(m.id)).map((m) => m.id);
+      if (!ids.length) {
+        setProvTest((t) => ({ ...t, [p.name]: { ok: false, msg: selectedOnly ? "请先勾选模型" : "该供应商下没有模型" } }));
+        return;
+      }
+      setExpanded((s) => { const n = new Set(s); n.add(p.name); return n; });
+      let done = 0, okCount = 0;
+      const queue = [...ids];
+      const worker = async () => {
+        while (!job.cancelled && queue.length) {
+          const id = queue.shift()!;
+          try {
+            const r = await api.testModel(id);
+            if (r.ok) okCount++;
+            setTest((t) => ({ ...t, [id]: { ok: r.ok, msg: r.ok ? (r.note || `${r.latency_ms}ms · ${r.probe_kind || "chat"}`) : (r.error || "失败") } }));
+          } catch (e: any) { setTest((t) => ({ ...t, [id]: { ok: false, msg: e.message } })); }
+          done++;
+          setProvTest((t) => ({ ...t, [p.name]: { ok: true, msg: `${done}/${ids.length}`, running: true } }));
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(5, ids.length) }, worker));
+      setProvTest((t) => ({ ...t, [p.name]: {
+        ok: !job.cancelled && okCount === ids.length,
+        msg: job.cancelled ? `已取消 · ${okCount}/${done} 已测通过` : `${okCount}/${ids.length} 通过`,
+      } }));
+      loadHealth();
+    } catch (e: any) {
+      setProvTest((t) => ({ ...t, [p.name]: { ok: false, msg: e.message } }));
+    } finally {
+      if (testJobs.current[p.name] === job) delete testJobs.current[p.name];
+    }
   };
 
   return (
@@ -1811,12 +1839,24 @@ function ModelsPanel() {
                     }
                     return null;
                   })()}
+                  {selectedInProvider(p.name).length > 0 && !provTest[p.name]?.running && (
+                    <Button variant="outline" size="sm" className="h-7 gap-1.5 px-2.5"
+                      title="仅测试该供应商下已勾选的模型"
+                      onClick={(e) => { e.stopPropagation(); runProvTest(p, true); }}>
+                      <Activity className="h-3.5 w-3.5" />测试所勾选({selectedInProvider(p.name).length})
+                    </Button>
+                  )}
                   <Button variant="outline" size="sm" className="h-7 gap-1.5 px-2.5"
-                    disabled={!!provTest[p.name]?.running}
-                    title="批量测试该供应商下全部模型(结果逐行显示)"
-                    onClick={(e) => { e.stopPropagation(); runProvTest(p); }}>
-                    <Activity className={cn("h-3.5 w-3.5", provTest[p.name]?.running && "animate-pulse")} />
-                    {provTest[p.name]?.running ? "测试中" : "测试全部"}
+                    title={provTest[p.name]?.running ? "停止领取新的测试任务；已发出的请求会自然结束" : "批量测试该供应商下全部模型(结果逐行显示)"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (provTest[p.name]?.running) {
+                        const job = testJobs.current[p.name];
+                        if (job) job.cancelled = true;
+                      } else runProvTest(p);
+                    }}>
+                    {provTest[p.name]?.running ? <X className="h-3.5 w-3.5" /> : <Activity className="h-3.5 w-3.5" />}
+                    {provTest[p.name]?.running ? "取消测试" : "测试全部"}
                   </Button>
                   <button className="text-xs text-primary hover:underline" onClick={(e) => { e.stopPropagation(); setEditProvider(p); }}>编辑</button>
                   <button className="text-xs text-destructive hover:underline" onClick={(e) => { e.stopPropagation(); delProvider(p); }}>删除</button>
@@ -1953,6 +1993,7 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
   const [baseUrl, setBaseUrl] = useState(provider.base_url);
   const [apiKey, setApiKey] = useState("");
   const [headers, setHeaders] = useState("");
+  const [maxConcurrency, setMaxConcurrency] = useState(provider.max_concurrency == null ? "" : String(provider.max_concurrency));
   const [err, setErr] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
@@ -1963,9 +2004,12 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
   const [pickMsg, setPickMsg] = useState("");
 
   const submit = async () => {
-    setErr(""); setSubmitting(true);
+    setErr("");
+    const limit = maxConcurrency.trim() === "" ? null : Number(maxConcurrency);
+    if (limit != null && (!Number.isInteger(limit) || limit < 0)) { setErr("并发需为非负整数,留空继承全局,0 = 不限"); return; }
+    setSubmitting(true);
     try {
-      await api.updateProvider(provider.name, { base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, display_name: dn.trim(), headers: headers.trim() || undefined });
+      await api.updateProvider(provider.name, { base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, display_name: dn.trim(), headers: headers.trim() || undefined, max_concurrency: limit });
       onSaved();
     } catch (e: any) { setErr(e.message); }
     setSubmitting(false);
@@ -2014,6 +2058,8 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
             <Input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="留空保持原密钥" /></div>
           <div><label className="mb-1 block text-xs text-muted-foreground">自定义请求头 (JSON 对象,随上游请求附带)</label>
             <Input value={headers} onChange={(e) => setHeaders(e.target.value)} placeholder='留空保持不变;{} = 清除;如 {"x-opencode-session":"..."}' /></div>
+          <div><label className="mb-1 block text-xs text-muted-foreground">供应商并发上限</label>
+            <Input type="number" min="0" step="1" value={maxConcurrency} onChange={(e) => setMaxConcurrency(e.target.value)} placeholder="留空继承全局,0 = 不限" /></div>
           {err && <p className="text-sm text-destructive">{err}</p>}
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={onClose}>取消</Button>
@@ -2052,6 +2098,7 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [headers, setHeaders] = useState("");
+  const [maxConcurrency, setMaxConcurrency] = useState("");
   const [fetchedModels, setFetchedModels] = useState<string[]>([]);
   const [selectedModels, setSelectedModels] = useState<Set<string>>(new Set());
   const [fetching, setFetching] = useState(false);
@@ -2064,7 +2111,7 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
   // 每次打开都重置为全新状态,避免上一次的填写与探测结果残留。
   useEffect(() => {
     if (!open) return;
-    setProvName(""); setKind("openai"); setTpl("custom"); setBaseUrl(""); setApiKey(""); setHeaders("");
+    setProvName(""); setKind("openai"); setTpl("custom"); setBaseUrl(""); setApiKey(""); setHeaders(""); setMaxConcurrency("");
     setFetchedModels([]); setSelectedModels(new Set()); setErr(""); setInputPrice(""); setOutputPrice("");
   }, [open]);
 
@@ -2137,14 +2184,18 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
     try {
       const ip = inputPrice.trim() === "" ? null : Number(inputPrice);
       const op = outputPrice.trim() === "" ? null : Number(outputPrice);
+      const limit = maxConcurrency.trim() === "" ? null : Number(maxConcurrency);
       if ((ip != null && (!Number.isFinite(ip) || ip < 0)) || (op != null && (!Number.isFinite(op) || op < 0))) {
         setErr("单价必须是非负数字"); setSubmitting(false); return;
       }
+      if (limit != null && (!Number.isInteger(limit) || limit < 0)) {
+        setErr("并发需为非负整数,留空继承全局,0 = 不限"); setSubmitting(false); return;
+      }
       if (selectedModels.size > 0) {
         const items = [...selectedModels].map((m) => ({ upstream_model: m, label: m, input_price: ip, output_price: op }));
-        await api.addModelsBatch({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, display_name: provName.trim() || undefined, headers: headers.trim() || undefined, models: items });
+        await api.addModelsBatch({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, display_name: provName.trim() || undefined, headers: headers.trim() || undefined, max_concurrency: limit, models: items });
       } else {
-        await api.addModel({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, upstream_model: "custom-model", input_price: ip, output_price: op, display_name: provName.trim() || undefined, headers: headers.trim() || undefined });
+        await api.addModel({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, upstream_model: "custom-model", input_price: ip, output_price: op, display_name: provName.trim() || undefined, headers: headers.trim() || undefined, max_concurrency: limit });
       }
       onSaved(); onClose();
     } catch (e: any) { setErr(e.message); }
@@ -2188,14 +2239,16 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
               </div>
             ))}
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div><label className="mb-1 block text-xs text-muted-foreground">协议</label>
-              <select value={kind} onChange={(e) => setKind(e.target.value)} className={sel}>
-                <option value="openai">openai 兼容</option><option value="anthropic">anthropic</option>
-              </select></div>
-            <div><label className="mb-1 block text-xs text-muted-foreground">Base URL (选模板自动填,可改)</label>
-              <Input placeholder="https://api.deepseek.com/v1" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} /></div>
-          </div>
+          <div><label className="mb-1 block text-xs text-muted-foreground">上游协议</label>
+            <select value={kind} onChange={(e) => setKind(e.target.value)} className={sel}>
+              <option value="openai">openai 兼容</option><option value="anthropic">anthropic</option>
+            </select>
+            <p className="mt-1 text-[11px] text-muted-foreground">这里选择上游协议；客户端入口协议由网关自动互转。</p></div>
+          <div><label className="mb-1 block text-xs text-muted-foreground">Base URL (选模板自动填,可改)</label>
+            <Input className="font-mono" placeholder="https://api.deepseek.com/v1" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} /></div>
+          <div><label className="mb-1 block text-xs text-muted-foreground">供应商并发上限</label>
+            <Input type="number" min="0" step="1" value={maxConcurrency} onChange={(e) => setMaxConcurrency(e.target.value)} placeholder="留空继承全局,0 = 不限" />
+            <p className="mt-1 text-[11px] text-muted-foreground">限制该供应商全部模型的在途请求总数；留空继承全局默认，0 表示不限。</p></div>
           <div><label className="mb-1 block text-xs text-muted-foreground">API Key (可选)</label>
             <Input type="password" placeholder="sk-..." value={apiKey} onChange={(e) => setApiKey(e.target.value)} /></div>
           <div><label className="mb-1 block text-xs text-muted-foreground">自定义请求头 (可选,JSON 对象,随上游请求附带)</label>
@@ -2252,7 +2305,7 @@ function EditModelDialog({ model, onClose, onSaved }: { model: ModelRow; onClose
     setTesting(true); setTestResult(null);
     try {
       const r = await api.testModel(model.id);
-      setTestResult({ ok: r.ok, msg: r.ok ? `${r.latency_ms}ms` : (r.error || "失败") });
+      setTestResult({ ok: r.ok, msg: r.ok ? (r.note || `${r.latency_ms}ms · ${r.probe_kind || "chat"}`) : (r.error || "失败") });
     } catch (e: any) { setTestResult({ ok: false, msg: e.message }); }
     setTesting(false);
   };
@@ -2385,7 +2438,7 @@ function GroupsPanel() {
   useEffect(() => { loadGroups(); api.providers(1, 200).then((r) => setProvMap(Object.fromEntries(r.data.map((p) => [p.name, providerDisplayName(p)])))).catch(() => { /* 静默 */ }); }, []);
   useEffect(() => { if (sel != null) { loadRoutes(sel); loadTimeRules(sel); } setChecked(new Set()); setRoutePage(1); }, [sel]);
 
-  const createGroup = async (name: string) => { const r = await api.addGroup(name); await loadGroups(); setSel(r.id); };
+  const createGroup = async (name: string, maxConcurrency: number) => { const r = await api.addGroup(name, maxConcurrency); await loadGroups(); setSel(r.id); };
   const setActive = async (g: GroupRow) => { if (!g.is_active) { await api.activateGroup(g.id); loadGroups(); } };
   const delGroup = (g: GroupRow) => setConfirm({
     title: `删除模型组「${g.name}」?`,
@@ -2448,7 +2501,8 @@ function GroupsPanel() {
     weighted_round_robin: "按「权重」比例轮转分流(累计分布严格符合权重,无随机抖动);适合需要按比例分摊的场景。配置:给同档路由设权重;权重全填 1 即简单轮询。",
     auto: "按「延迟 + 成本」综合得分自适应:得分越低越优先;新上线无延迟数据的上游按中位数参与并保留少量探索流量(不会饿死)。配置:给模型填单价,权重保持默认即可。",
   };
-  const curStrategy = groups.find((g) => g.id === sel)?.strategy ?? "weighted_random";
+  const curGroup = groups.find((g) => g.id === sel);
+  const curStrategy = curGroup?.strategy ?? "weighted_random";
   const filteredGroups = groups.filter((g) => !gq.trim() || g.name.includes(gq.trim()));
   // 路由分页切片(始终按 优先级降序 → 权重降序 排列,便于查看故障转移链)
   const routeTotal = routes.length;
@@ -2506,6 +2560,7 @@ function GroupsPanel() {
             <div className="flex items-center gap-2">
               {sel != null && (
                 <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-muted-foreground" title="模型组总并发,0 = 不限;点击重命名/编辑可修改">组并发 {curGroup?.max_concurrency || "不限"}</span>
                   <span className="text-xs text-muted-foreground">负载策略</span>
                   <select value={curStrategy} onChange={(e) => setStrategy(sel, e.target.value)} className="h-8 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring">
                     <option value="weighted_random">加权随机</option>
@@ -2663,22 +2718,29 @@ function GroupsPanel() {
 
 function RenameGroupDialog({ group, onClose, onSaved }: { group: GroupRow; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState(group.name);
+  const [maxConcurrency, setMaxConcurrency] = useState(String(group.max_concurrency));
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const submit = async () => {
-    if (!name.trim() || name.trim() === group.name) { onClose(); return; }
+    const limit = Number(maxConcurrency);
+    if (!name.trim()) return;
+    if (!Number.isInteger(limit) || limit < 0) { setErr("组并发需为非负整数,0 = 不限"); return; }
+    if (name.trim() === group.name && limit === group.max_concurrency) { onClose(); return; }
     setErr(""); setBusy(true);
-    try { await api.renameGroup(group.id, name.trim()); onSaved(); onClose(); } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+    try { await api.renameGroup(group.id, name.trim(), limit); onSaved(); onClose(); } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle>重命名模型组</DialogTitle>
-          <DialogDescription>当前组名:{group.name}。组内路由、用户绑定不受影响。</DialogDescription>
+          <DialogTitle>编辑模型组</DialogTitle>
+          <DialogDescription>修改名称或组级总并发;组内路由、用户绑定不受影响。</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
-          <Input value={name} onChange={(e) => setName(e.target.value)} autoFocus onKeyDown={(e) => e.key === "Enter" && submit()} />
+          <div><label className="mb-1 block text-xs text-muted-foreground">组名</label>
+            <Input value={name} onChange={(e) => setName(e.target.value)} autoFocus onKeyDown={(e) => e.key === "Enter" && submit()} /></div>
+          <div><label className="mb-1 block text-xs text-muted-foreground">组级总并发(0 = 不限)</label>
+            <Input type="number" min="0" step="1" value={maxConcurrency} onChange={(e) => setMaxConcurrency(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} /></div>
           {err && <p className="text-sm text-destructive">{err}</p>}
         </div>
         <div className="flex justify-end gap-2">
@@ -2690,14 +2752,17 @@ function RenameGroupDialog({ group, onClose, onSaved }: { group: GroupRow; onClo
   );
 }
 
-function AddGroupDialog({ open, onClose, onCreate }: { open: boolean; onClose: () => void; onCreate: (name: string) => Promise<void> }) {
+function AddGroupDialog({ open, onClose, onCreate }: { open: boolean; onClose: () => void; onCreate: (name: string, maxConcurrency: number) => Promise<void> }) {
   const [name, setName] = useState("");
+  const [maxConcurrency, setMaxConcurrency] = useState("0");
   const [err, setErr] = useState("");
-  useEffect(() => { if (open) { setName(""); setErr(""); } }, [open]);
+  useEffect(() => { if (open) { setName(""); setMaxConcurrency("0"); setErr(""); } }, [open]);
   const submit = async () => {
+    const limit = Number(maxConcurrency);
     if (!name.trim()) return;
+    if (!Number.isInteger(limit) || limit < 0) { setErr("组并发需为非负整数,0 = 不限"); return; }
     setErr("");
-    try { await onCreate(name.trim()); onClose(); } catch (e: any) { setErr(e.message); }
+    try { await onCreate(name.trim(), limit); onClose(); } catch (e: any) { setErr(e.message); }
   };
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -2705,6 +2770,8 @@ function AddGroupDialog({ open, onClose, onCreate }: { open: boolean; onClose: (
         <DialogHeader><DialogTitle>新建模型组</DialogTitle></DialogHeader>
         <div className="space-y-3">
           <Input placeholder="组名,如 默认组 / VIP" value={name} onChange={(e) => setName(e.target.value)} autoFocus onKeyDown={(e) => e.key === "Enter" && submit()} />
+          <div><label className="mb-1 block text-xs text-muted-foreground">组级总并发(0 = 不限)</label>
+            <Input type="number" min="0" step="1" value={maxConcurrency} onChange={(e) => setMaxConcurrency(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} /></div>
           {err && <p className="text-sm text-destructive">{err}</p>}
         </div>
         <div className="flex justify-end gap-2">
@@ -4078,8 +4145,8 @@ function CachePanel() {
             <Table>
               <TableHeader><TableRow><TableHead>时间</TableHead><TableHead>命中类型</TableHead><TableHead>相似度</TableHead><TableHead>模型</TableHead><TableHead>供应商</TableHead><TableHead className="text-right">节省 tokens</TableHead></TableRow></TableHeader>
               <TableBody>
-                {hits.map((h, i) => (
-                  <TableRow key={`${h.ts}-${h.model}-${i}`}>
+                {hits.map((h) => (
+                  <TableRow key={h.id}>
                     <TableCell className="mono text-xs text-muted-foreground">{fmtTsShort(h.ts)}</TableCell>
                     <TableCell>
                       {h.hit_type === "exact" ? (
@@ -5225,18 +5292,25 @@ function UpstreamsPanel() {
   const [resetAllOpen, setResetAllOpen] = useState(false);
   const [resetAllBusy, setResetAllBusy] = useState(false);
   const [failuresLimit, setFailuresLimit] = useState<number>(50);
+  const loadSeq = useRef(0);
 
   const load = async () => {
+    const seq = ++loadSeq.current;
     try {
-      setErr("");
       const [u, f] = await Promise.all([
         api.listUpstreams(),
         api.listFailures(failuresLimit),
       ]);
-      setData(u); setFailures(f);
-    } catch (e: any) { setErr(e.message || "加载失败"); }
-    finally { setLoading(false); }
+      // 手动刷新、筛选变更和定时器可能重叠；只允许最后一次请求更新界面。
+      if (seq !== loadSeq.current) return;
+      setData(u); setFailures(f); setErr("");
+    } catch (e: any) {
+      if (seq === loadSeq.current) setErr(e.message || "加载失败");
+    } finally {
+      if (seq === loadSeq.current) setLoading(false);
+    }
   };
+  useEffect(() => () => { loadSeq.current++; }, []);
   // 首屏 + failuresLimit 改变时刷新(挂载时只拉一次,避免重复请求)。
   useEffect(() => { load(); /* eslint-disable-line react-hooks/exhaustive-deps */ }, [failuresLimit]);
   // 自动轮询

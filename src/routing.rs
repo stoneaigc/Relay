@@ -75,14 +75,15 @@ pub struct ModelCard {
 fn infer_tags(upstream_model: &str) -> Vec<String> {
     let m = upstream_model.to_ascii_lowercase();
     let mut tags: Vec<String> = Vec::new();
-    for t in ["视觉", "推理", "向量", "语音"] {
+    for t in ["视觉", "推理", "向量", "语音", "搜索"] {
         tags.push(t.to_string());
     }
     tags.retain(|t| match t.as_str() {
         "视觉" => m.contains("vision") || m.contains("vl") || m.contains("omni"),
         "推理" => m.contains("reasoner") || m.contains("reasoning") || m.contains("think") || m.contains("o1") || m.contains("o3") || m.ends_with("-r") || m.contains("-r1"),
         "向量" => m.contains("embedding") || m.contains("embed"),
-        "语音" => m.contains("audio") || m.contains("tts") || m.contains("whisper"),
+        "语音" => m.contains("audio") || m.contains("tts") || m.contains("asr") || m.contains("whisper") || m.contains("speech") || m.contains("transcri"),
+        "搜索" => m.contains("search"),
         _ => false,
     });
     if tags.is_empty() {
@@ -154,6 +155,8 @@ pub struct Routing {
     pub group_names: HashMap<i64, String>,
     /// 每组绑定的负载策略(缺省=加权随机)。
     pub group_strategy: HashMap<i64, Strategy>,
+    /// 每组总并发上限(缺省/0=不限)。
+    pub group_concurrency: HashMap<i64, u32>,
     /// 每组的高峰/低谷时段规则(按当前时间命中后:算倍率、覆盖权重)。
     pub time_rules: HashMap<i64, Vec<TimeRule>>,
     /// group_id -> (对外模型名 -> 目标列表)。按名精确路由,同名多条即加权。
@@ -164,6 +167,8 @@ pub struct Routing {
 
 /// 解析结果:实际要打到哪个上游。
 pub struct Resolved {
+    /// 候选所属模型组;跨组 failover 时逐组获取并发槽。
+    pub group_id: i64,
     pub provider: String,
     pub kind: ProviderKind,
     pub base_url: String,
@@ -207,10 +212,13 @@ impl Routing {
                     .iter()
                     .filter_map(|t| self.models.get(&t.model_id))
                     .collect();
-                // 展示名:优先各部署的 label,去重。
+                // 展示名:优先各部署的 label,去重;与对外模型名完全相同的 label 不携带额外信息,丢弃避免卡片重复渲染。
                 let mut labels: Vec<String> = Vec::new();
                 for d in &defs {
                     if let Some(l) = d.label.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                        if l.eq_ignore_ascii_case(name) {
+                            continue;
+                        }
                         if !labels.iter().any(|x| x.eq_ignore_ascii_case(l)) {
                             labels.push(l.to_string());
                         }
@@ -337,6 +345,7 @@ impl Routing {
                 continue;
             }
             out.push(Resolved {
+                group_id,
                 provider: m.provider.clone(),
                 kind: p.kind,
                 base_url: p.base_url.clone(),
@@ -924,6 +933,7 @@ mod tests {
             models,
             group_names: HashMap::new(),
             group_strategy,
+            group_concurrency: HashMap::new(),
             time_rules: HashMap::new(),
             groups,
             user_group_models: HashMap::new(),
@@ -942,6 +952,8 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].upstream_model, "ma");
         assert_eq!(out[1].upstream_model, "mb");
+        assert_eq!(out[0].group_id, 1);
+        assert_eq!(out[1].group_id, 2);
     }
 
     #[test]

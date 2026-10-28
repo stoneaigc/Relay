@@ -200,6 +200,17 @@ pub async fn register(
         let cfg = state.config();
         (cfg.defaults.signup_grant_tokens, cfg.defaults.concurrency_limit, cfg.defaults.rpm_limit, cfg.defaults.tpm_limit, cfg.auth.jwt_secret.clone(), cfg.auth.session_ttl_secs)
     };
+    // 运行时限额必须立即走「用户组 > 全局」解析链,不能只在 DB 记录组归属。
+    let default_group = match default_ug {
+        Some(gid) => storage::get_user_group(&state.db, gid)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+        None => None,
+    };
+    let effective_cl = default_group.as_ref().and_then(|g| g.max_concurrency).unwrap_or(limit as i64).max(0) as u32;
+    let effective_cl = if effective_cl == 0 { u32::MAX } else { effective_cl };
+    let effective_rpm = default_group.as_ref().and_then(|g| g.rpm_limit).unwrap_or(rpm as i64).max(0) as u32;
+    let effective_tpm = default_group.as_ref().and_then(|g| g.tpm_limit).unwrap_or(tpm as i64).max(0) as u32;
     // 注册默认绑定到激活(默认)模型组;无激活组则不绑定。
     let active_group = storage::active_group_id(&state.db)
         .await
@@ -258,8 +269,12 @@ pub async fn register(
             (id, email)
         }
     };
-    let us = Arc::new(UserState::new(id, grant, 0, limit, 0, 1.0, active_group.unwrap_or(0), default_ug.unwrap_or(0)));
-    us.set_limits(rpm, tpm);
+    let us = Arc::new(UserState::new(id, grant, 0, effective_cl, 0, 1.0, active_group.unwrap_or(0), default_ug.unwrap_or(0)));
+    us.set_limits(effective_rpm, effective_tpm);
+    us.set_budgets(
+        default_group.as_ref().and_then(|g| g.budget_daily).unwrap_or(0).max(0),
+        default_group.as_ref().and_then(|g| g.budget_monthly).unwrap_or(0).max(0),
+    );
     state.users.insert(id, us);
     let token = jwt::issue(&secret, &id.to_string(), "portal", ttl)?;
     Ok(Json(json!({ "token": token, "user": { "id": id, "account": display } })))
@@ -666,8 +681,16 @@ pub async fn models(
     let data: Vec<Value> = cards
         .iter()
         .map(|c| {
+            // 与两级寻址一致:取首个提供该对外模型的模型组;0 表示不限。
+            let group_id = gids.iter().find(|gid| {
+                routing.groups.get(*gid).and_then(|g| g.get(&c.name)).is_some()
+            });
+            let group_concurrency = group_id
+                .and_then(|gid| routing.group_concurrency.get(gid).copied())
+                .unwrap_or(0);
             json!({
                 "name": c.name,
+                "group_concurrency": group_concurrency,
                 "labels": c.labels,
                 "tags": c.tags,
                 "context_length": c.context_length,

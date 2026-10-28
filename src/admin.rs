@@ -22,6 +22,7 @@ async fn rebuild_routing(state: &AppState) -> Result<(), ApiError> {
     let r = storage::load_routing(&state.db)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    state.rebuild_concurrency();
     state.routing.store(Arc::new(r));
     Ok(())
 }
@@ -218,8 +219,8 @@ pub async fn change_admin_password(
 }
 
 /// POST /admin/api/portal-sso —— 管理员一键切换门户:
-/// 按管理员用户名查找同名门户用户并签发 portal 令牌;无同名用户时 404(前端回落门户登录页)。
-/// 只能取得「同名用户」的令牌,无法越权到其他用户。
+/// 按管理员用户名查找同名门户用户;首次使用时自动创建独立门户账号,仍只签发 portal 令牌。
+/// 不允许 admin 令牌直接访问门户 API,两种凭证的权限边界保持不变。
 pub async fn portal_sso(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -227,12 +228,45 @@ pub async fn portal_sso(
     admin_guard(&state, &headers)?;
     let cfg = state.config();
     let claims = jwt::from_headers(&cfg.auth.jwt_secret, &headers, "admin")?;
-    let username = claims.sub.trim();
-    let Some((id, _)) = storage::find_user_by_username(&state.db, username)
+    let username = claims.sub.trim().to_string();
+    let existing = storage::find_user_by_username(&state.db, &username)
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-    else {
-        return Err(ApiError::NoTarget(format!("门户无同名用户 {username}")));
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let (id, created) = match existing {
+        Some((id, _)) => (id, false),
+        None => {
+            let active_group = storage::active_group_id(&state.db)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            let id = storage::admin_create_user(
+                &state.db,
+                &username,
+                &storage::hash_password(&storage::gen_default_password()),
+                None,
+                None,
+                cfg.defaults.signup_grant_tokens,
+                active_group,
+                "admin",
+                None,
+                None,
+            )
+            .await
+            .map_err(|e| ApiError::Internal(format!("自动创建门户账号失败: {e}")))?;
+            let limit = if cfg.defaults.concurrency_limit == 0 { u32::MAX } else { cfg.defaults.concurrency_limit };
+            let us = Arc::new(crate::state::UserState::new(
+                id,
+                cfg.defaults.signup_grant_tokens,
+                0,
+                limit,
+                0,
+                1.0,
+                active_group.unwrap_or(0),
+                0,
+            ));
+            us.set_limits(cfg.defaults.rpm_limit, cfg.defaults.tpm_limit);
+            state.users.insert(id, us);
+            (id, true)
+        }
     };
     let token = jwt::issue(
         &cfg.auth.jwt_secret.clone(),
@@ -240,7 +274,12 @@ pub async fn portal_sso(
         "portal",
         cfg.auth.session_ttl_secs,
     )?;
-    Ok(Json(json!({ "role": "user", "token": token, "username": username })))
+    Ok(Json(json!({
+        "role": "user",
+        "token": token,
+        "username": username,
+        "created": created,
+    })))
 }
 
 /// GET /admin/overview —— 概览统计(累计)。
@@ -347,6 +386,8 @@ pub async fn list_users(
                 // 若只有合并后的生效值,继承中的用户一打开编辑框就显示全局默认,
                 // 保存任意字段都会把继承静默固化为显式值。
                 "concurrency_limit_raw": u.concurrency_limit,
+                "rpm_limit": u.rpm_limit,
+                "tpm_limit": u.tpm_limit,
                 "group_id": live.as_ref().map(|x| x.group()).unwrap_or(u.group_id.unwrap_or(0)),
                 "user_group_id": u.user_group_id,
                 "user_group_name": ug_name,
@@ -405,8 +446,14 @@ pub async fn create_user(
         }
         None => storage::gen_default_password(),
     };
-    // 用户组校验(0/None = 不挂组)。
-    let ugid = body.user_group_id.filter(|g| *g > 0);
+    // 未传 user_group_id 时默认挂 default 用户组;显式传 0 仍可创建不挂组用户。
+    let ugid = match body.user_group_id {
+        Some(g) if g > 0 => Some(g),
+        Some(_) => None,
+        None => storage::default_user_group_id(&state.db)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+    };
     if let Some(g) = ugid {
         let exists = storage::user_group_exists(&state.db, g)
             .await
@@ -439,7 +486,13 @@ pub async fn create_user(
     };
     let cl = resolve_cl(body.concurrency_limit, ug.as_ref().and_then(|g| g.max_concurrency));
     let limit = if cl == 0 { u32::MAX } else { cl };
-    let gid = body.group_id.filter(|g| *g > 0);
+    let gid = match body.group_id {
+        Some(g) if g > 0 => Some(g),
+        Some(_) => None,
+        None => storage::active_group_id(&state.db)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+    };
     let pwhash = storage::hash_password(&initial_plain);
     let email = body.email.as_deref().filter(|s| !s.is_empty());
     let phone = body.phone.as_deref().filter(|s| !s.is_empty());
@@ -1292,7 +1345,15 @@ pub async fn delete_provider(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// PUT /admin/providers/:name —— 更新供应商 base_url、api_key 和显示名。
+/// 并发字段三态:缺失=不改动 / null=继承全局 / 非负整数=设置上限(0=不限)。
+fn deser_opt_concurrency<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<i64>::deserialize(d)?))
+}
+
+/// PUT /admin/providers/:name —— 更新供应商连接与并发配置。
 #[derive(Deserialize)]
 pub struct UpdateProvider {
     pub base_url: String,
@@ -1300,6 +1361,8 @@ pub struct UpdateProvider {
     pub display_name: Option<String>,
     /// 自定义请求头(JSON 对象);None=不改,空/{}=清除,其余=覆盖。
     pub headers: Option<String>,
+    #[serde(default, deserialize_with = "deser_opt_concurrency")]
+    pub max_concurrency: Option<Option<i64>>,
 }
 
 /// 校验供应商自定义请求头:None=None;空/{}=Some("")清除语义;合法 JSON 对象=Some(原文)。
@@ -1332,7 +1395,10 @@ pub async fn update_provider(
     if !valid_base_url(&body.base_url) {
         return Err(ApiError::BadRequest("base_url must be a valid http(s) URL".into()));
     }
-    storage::update_provider(&state.db, &name, body.base_url.trim(), body.api_key.as_deref(), body.display_name.as_deref(), validate_provider_headers(body.headers.as_deref())?.as_deref())
+    if body.max_concurrency.flatten().is_some_and(|v| v < 0) {
+        return Err(ApiError::BadRequest("max_concurrency must be >= 0 or null".into()));
+    }
+    storage::update_provider(&state.db, &name, body.base_url.trim(), body.api_key.as_deref(), body.display_name.as_deref(), validate_provider_headers(body.headers.as_deref())?.as_deref(), body.max_concurrency)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;
@@ -1393,6 +1459,8 @@ pub struct AddModel {
     pub input_price: Option<f64>,  // 输入单价 $/1M tokens
     pub output_price: Option<f64>, // 输出单价 $/1M tokens
     pub display_name: Option<String>, // 供应商自定义显示名(新建时生效)
+    /// 新建供应商时生效:NULL=继承全局,0=不限。
+    pub max_concurrency: Option<i64>,
 }
 
 /// POST /admin/models —— 添加三方模型(自动建好它的上游连接)。
@@ -1414,8 +1482,11 @@ pub async fn add_model(
     if !price_ok(body.input_price) || !price_ok(body.output_price) {
         return Err(ApiError::BadRequest("prices must be finite and >= 0".into()));
     }
+    if body.max_concurrency.is_some_and(|v| v < 0) {
+        return Err(ApiError::BadRequest("max_concurrency must be >= 0 or null".into()));
+    }
     // 按 base_url 复用已有 provider，不重复创建;新建时写入自定义显示名与请求头
-    let (provider, _) = storage::find_or_create_provider_named(&state.db, &body.kind, &body.base_url, body.api_key.as_deref(), body.display_name.as_deref(), validate_provider_headers(body.headers.as_deref())?.as_deref())
+    let (provider, _) = storage::find_or_create_provider_named(&state.db, &body.kind, &body.base_url, body.api_key.as_deref(), body.display_name.as_deref(), validate_provider_headers(body.headers.as_deref())?.as_deref(), body.max_concurrency)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let id = storage::add_model(&state.db, &provider, &body.upstream_model, body.label.as_deref(), body.input_price, body.output_price)
@@ -1433,6 +1504,8 @@ pub struct AddModelsBatch {
     pub display_name: Option<String>, // 供应商自定义显示名(新建时生效)
     /// 供应商自定义请求头(JSON 对象,仅创建新供应商时写入)
     pub headers: Option<String>,
+    /// 新建供应商时生效:NULL=继承全局,0=不限。
+    pub max_concurrency: Option<i64>,
     pub models: Vec<AddModelBatchItem>,
 }
 #[derive(Deserialize)]
@@ -1462,7 +1535,10 @@ pub async fn add_models_batch(
     if body.models.iter().any(|m| !price_ok(m.input_price) || !price_ok(m.output_price)) {
         return Err(ApiError::BadRequest("prices must be finite and >= 0".into()));
     }
-    let (provider, provider_created) = storage::find_or_create_provider_named(&state.db, &body.kind, &body.base_url, body.api_key.as_deref(), body.display_name.as_deref(), validate_provider_headers(body.headers.as_deref())?.as_deref())
+    if body.max_concurrency.is_some_and(|v| v < 0) {
+        return Err(ApiError::BadRequest("max_concurrency must be >= 0 or null".into()));
+    }
+    let (provider, provider_created) = storage::find_or_create_provider_named(&state.db, &body.kind, &body.base_url, body.api_key.as_deref(), body.display_name.as_deref(), validate_provider_headers(body.headers.as_deref())?.as_deref(), body.max_concurrency)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let mut added = 0usize;
@@ -1570,26 +1646,81 @@ async fn probe_upstream(
     }
 }
 
-/// POST /admin/models/:id/test —— 向上游发最小请求校验连通性/密钥/模型名。
+/// 按模型能力选择探测方式:向量走 embeddings;语音/搜索仅验证上游连通性,避免误报 chat 404。
+async fn probe_model_capability(
+    http: &reqwest::Client,
+    kind: ProviderKind,
+    base_url: &str,
+    api_key: Option<String>,
+    upstream: &str,
+    extra_headers: &[(String, String)],
+    tags: Option<&str>,
+) -> (bool, u64, Option<String>, &'static str, bool) {
+    let capability = format!("{} {}", tags.unwrap_or(""), upstream).to_ascii_lowercase();
+    let is_embedding = capability.contains("向量") || capability.contains("embedding") || capability.contains("embed");
+    let unsupported = !is_embedding && ["语音", "搜索", "tts", "asr", "whisper", "speech", "transcri", "search"]
+        .iter().any(|k| capability.contains(k));
+    if !is_embedding && !unsupported {
+        let (ok, latency, err) = probe_upstream(http, kind, base_url, api_key, upstream, extra_headers).await;
+        return (ok, latency, err, "chat", true);
+    }
+    let base = base_url.trim_end_matches('/');
+    let key = api_key.filter(|k| !k.is_empty());
+    let started = std::time::Instant::now();
+    let mut req = if is_embedding && kind == ProviderKind::Openai {
+        let mut rb = http.post(format!("{base}/embeddings"));
+        if let Some(k) = &key { rb = rb.bearer_auth(k); }
+        rb.json(&json!({ "model": upstream, "input": "ping" }))
+    } else {
+        let mut rb = http.get(format!("{base}/models"));
+        if let Some(k) = &key {
+            rb = if kind == ProviderKind::Anthropic { rb.header("x-api-key", k) } else { rb.bearer_auth(k) };
+        }
+        rb
+    };
+    for (k, v) in extra_headers { req = req.header(k, v); }
+    let probe_kind = if is_embedding { "embeddings" } else { "connectivity" };
+    let forward_supported = is_embedding;
+    match req.timeout(std::time::Duration::from_secs(20)).send().await {
+        Ok(r) if r.status().is_success() => {
+            let note = if unsupported { Some("上游连接正常;该类型暂不经网关转发".to_string()) } else { None };
+            (true, started.elapsed().as_millis() as u64, note, probe_kind, forward_supported)
+        }
+        Ok(r) => {
+            let code = r.status().as_u16();
+            let body = r.text().await.unwrap_or_default();
+            let snippet: String = body.chars().take(200).collect();
+            (false, started.elapsed().as_millis() as u64, Some(format!("HTTP {code}: {snippet}")), probe_kind, forward_supported)
+        }
+        Err(e) => (false, started.elapsed().as_millis() as u64, Some(e.to_string()), probe_kind, forward_supported),
+    }
+}
+
+/// POST /admin/models/:id/test —— 按模型能力校验连通性/密钥/模型名。
 pub async fn test_model(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
-    let (kind, base_url, api_key, upstream, extra_headers) = {
+    let (kind, base_url, api_key, upstream, extra_headers, tags) = {
         let routing = state.routing.load();
         let m = routing.models.get(&id).ok_or_else(|| ApiError::BadRequest("model not found".into()))?;
         let p = routing.providers.get(&m.provider).ok_or_else(|| ApiError::BadRequest("provider missing".into()))?;
-        (p.kind, p.base_url.clone(), p.api_key.clone(), m.upstream_model.clone(), p.headers.clone())
+        (p.kind, p.base_url.clone(), p.api_key.clone(), m.upstream_model.clone(), p.headers.clone(), m.tags.clone())
     };
 
-    let (ok, latency, err) = probe_upstream(&state.http, kind, &base_url, api_key, &upstream, &extra_headers).await;
-    if ok {
-        Ok(Json(json!({ "ok": true, "latency_ms": latency })))
-    } else {
-        Ok(Json(json!({ "ok": false, "error": err.unwrap_or_else(|| "unknown".into()) })))
-    }
+    let (ok, latency, message, probe_kind, forward_supported) = probe_model_capability(
+        &state.http, kind, &base_url, api_key, &upstream, &extra_headers, tags.as_deref(),
+    ).await;
+    Ok(Json(json!({
+        "ok": ok,
+        "latency_ms": latency,
+        "error": if ok { Value::Null } else { json!(message) },
+        "note": if ok { json!(message) } else { Value::Null },
+        "probe_kind": probe_kind,
+        "forward_supported": forward_supported,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -1777,6 +1908,8 @@ pub async fn list_groups(
 #[derive(Deserialize)]
 pub struct AddGroup {
     pub name: String,
+    #[serde(default)]
+    pub max_concurrency: i64,
 }
 
 /// POST /admin/groups
@@ -1789,7 +1922,10 @@ pub async fn add_group(
     if body.name.trim().is_empty() {
         return Err(ApiError::BadRequest("name required".into()));
     }
-    let id = storage::add_group(&state.db, body.name.trim())
+    if body.max_concurrency < 0 {
+        return Err(ApiError::BadRequest("max_concurrency must be >= 0".into()));
+    }
+    let id = storage::add_group(&state.db, body.name.trim(), body.max_concurrency)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;
@@ -1818,6 +1954,8 @@ pub struct SetGroupStrategy {
 #[derive(Deserialize)]
 pub struct RenameGroup {
     pub name: String,
+    /// None=保持原值;0=不限。
+    pub max_concurrency: Option<i64>,
 }
 
 /// PATCH /admin/groups/:id —— 重命名模型组。
@@ -1831,7 +1969,10 @@ pub async fn rename_group(
     if body.name.trim().is_empty() {
         return Err(ApiError::BadRequest("name required".into()));
     }
-    let ok = storage::rename_group(&state.db, id, body.name.trim())
+    if body.max_concurrency.is_some_and(|v| v < 0) {
+        return Err(ApiError::BadRequest("max_concurrency must be >= 0".into()));
+    }
+    let ok = storage::rename_group(&state.db, id, body.name.trim(), body.max_concurrency)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     if !ok {
@@ -2016,6 +2157,10 @@ pub async fn add_route(
     if body.public_name.trim().is_empty() {
         return Err(ApiError::BadRequest("public_name required".into()));
     }
+    if storage::route_exists(&state.db, group_id, body.public_name.trim(), body.model_id).await
+        .map_err(|e| ApiError::Internal(e.to_string()))? {
+        return Err(ApiError::BadRequest(format!("路由已存在:{}(模型 #{})，请勿重复添加", body.public_name.trim(), body.model_id)));
+    }
     let id = storage::add_route(
         &state.db,
         group_id,
@@ -2048,6 +2193,18 @@ pub async fn add_routes_batch(
     Json(body): Json<AddRoutesBatch>,
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
+    // 先整体防重校验(库内已有 + 批内互重),全部通过后再逐条插入,避免部分成功的中间态。
+    let mut seen: Vec<(String, i64)> = Vec::new();
+    for r in &body.routes {
+        let pn = r.public_name.trim();
+        if pn.is_empty() { continue; }
+        if seen.contains(&(pn.to_string(), r.model_id))
+            || storage::route_exists(&state.db, group_id, pn, r.model_id).await
+                .map_err(|e| ApiError::Internal(e.to_string()))? {
+            return Err(ApiError::BadRequest(format!("路由已存在:{pn}(模型 #{})，请勿重复添加", r.model_id)));
+        }
+        seen.push((pn.to_string(), r.model_id));
+    }
     let mut ids = Vec::new();
     for r in &body.routes {
         if r.public_name.trim().is_empty() { continue; }

@@ -30,6 +30,8 @@ config/local.toml
 .omc/
 .trae/
 .ai-memory/
+.playwright-cli/
+.workbuddy/
 
 # TS 增量构建缓存
 *.tsbuildinfo

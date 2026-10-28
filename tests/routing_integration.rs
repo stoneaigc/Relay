@@ -64,6 +64,7 @@ fn make_test_routing() -> Routing {
         models,
         group_names,
         group_strategy,
+        group_concurrency: HashMap::new(),
         time_rules: HashMap::new(),
         groups,
         user_group_models: HashMap::new(),

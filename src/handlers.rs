@@ -18,6 +18,9 @@ use crate::state::{AppState, UpstreamKey, UsageEvent};
 use crate::providers;
 use crate::reqlog::{self, RequestAttempt};
 
+/// 每次请求按组缓存一个槽位,跨组 failover 不重复占用同组名额。
+type GroupSlots = std::collections::HashMap<i64, Option<OwnedSemaphorePermit>>;
+
 /// 一次请求的链路追踪上下文;贯穿 run_chat/run_messages 及各响应函数,
 /// 用于在拿到 tokens 后统一写 request_logs。
 pub struct RunTrace {
@@ -467,6 +470,7 @@ pub async fn run_chat(
         None
     };
     let mut attempts: Vec<RequestAttempt> = Vec::new();
+    let mut group_slots = GroupSlots::new();
     let run_start = std::time::Instant::now();
     let run_path: &'static str = "chat";
     let user_id_str = user.id.to_string();
@@ -474,6 +478,17 @@ pub async fn run_chat(
     let mut final_upstream: Option<String> = None;
     let final_status: i32 = 200;
     for r in candidates.iter().take(attempt_cap) {
+        if !group_slots.contains_key(&r.group_id) {
+            let permit = match state.try_acquire_group(r.group_id) {
+                Ok(p) => p,
+                Err(()) => {
+                    fail_global!();
+                    let name = routing.group_names.get(&r.group_id).map(String::as_str).unwrap_or("未知");
+                    return Err(ApiError::ConcurrencyLimit(format!("模型组并发已满: {name}")));
+                }
+            };
+            group_slots.insert(r.group_id, permit);
+        }
         let kind = r.kind;
         let (provider_name, base_url, api_key, upstream_model, multiplier) =
             (&r.provider, &r.base_url, r.api_key.as_deref(), &r.upstream_model, r.multiplier);
@@ -494,6 +509,7 @@ pub async fn run_chat(
         if let Some(key) = cache_key.as_ref() {
             if let Some(entry) = state.semantic_cache.get(key) {
                 state.semantic_cache.record_hit(crate::semantic_cache::HitRecord {
+                    id: uuid::Uuid::new_v4().to_string(),
                     ts: crate::semantic_cache::now_secs(),
                     hit_type: "exact".into(),
                     similarity: None,
@@ -547,6 +563,7 @@ pub async fn run_chat(
                         semantic_lookup(&state, &model, provider_name, text).await
                     {
                         state.semantic_cache.record_hit(crate::semantic_cache::HitRecord {
+                            id: uuid::Uuid::new_v4().to_string(),
                             ts: crate::semantic_cache::now_secs(),
                             hit_type: "semantic".into(),
                             similarity: Some(sim),
@@ -616,8 +633,14 @@ pub async fn run_chat(
             });
             continue;
         }
-        // ---- P1:占用上游并发槽(排队直到拿到;permit 持有到请求结束自动释放) ----
-        let slot = state.acquire_upstream(ukey.clone(), provider_name).await;
+        // ---- 上游并发槽:满员立即 429,permit 持有到请求/流结束自动释放 ----
+        let slot = match state.try_acquire_upstream(ukey.clone(), provider_name) {
+            Ok(s) => s,
+            Err(()) => {
+                fail_global!();
+                return Err(ApiError::ConcurrencyLimit(format!("供应商并发已满: {provider_name}")));
+            }
+        };
         // ---- 指标计时器:用于请求成功率 / RPS / 延迟 ----
         let up_start = std::time::Instant::now();
 
@@ -658,7 +681,7 @@ pub async fn run_chat(
                             resp_preview: None,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(cache_wrap(state.clone(), stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
+                        return Ok(cache_wrap(state.clone(), stream_response(state.clone(), resp, guard, group_slots, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -772,7 +795,7 @@ pub async fn run_chat(
                             resp_preview: None,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(cache_wrap(state.clone(), anthropic_stream_response(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
+                        return Ok(cache_wrap(state.clone(), anthropic_stream_response(state.clone(), resp, guard, group_slots, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -933,6 +956,7 @@ fn anthropic_stream_response(
     state: Arc<AppState>,
     resp: reqwest::Response,
     guard: crate::state::ConcurrencyGuard,
+    group_slots: GroupSlots,
     slot: Option<OwnedSemaphorePermit>,
     model: String,
     provider_name: String,
@@ -948,6 +972,7 @@ fn anthropic_stream_response(
     let hdrs = relay_headers(&provider_name, &trace.request_id);
     let s = async_stream::stream! {
         let _guard = guard;
+        let _group_slots = group_slots;
         let _slot = slot; // 持有上游并发槽直到流结束
         let mut upstream = resp.bytes_stream();
         let mut buf: Vec<u8> = Vec::new();
@@ -1179,6 +1204,7 @@ pub async fn run_messages(
         None
     };
     let mut attempts: Vec<RequestAttempt> = Vec::new();
+    let mut group_slots = GroupSlots::new();
     let run_start = std::time::Instant::now();
     let run_path: &'static str = "messages";
     let user_id_str = user.id.to_string();
@@ -1186,6 +1212,17 @@ pub async fn run_messages(
     let mut final_upstream: Option<String> = None;
     let final_status: i32 = 200;
     for r in candidates.iter().take(attempt_cap) {
+        if !group_slots.contains_key(&r.group_id) {
+            let permit = match state.try_acquire_group(r.group_id) {
+                Ok(p) => p,
+                Err(()) => {
+                    fail_global!();
+                    let name = routing.group_names.get(&r.group_id).map(String::as_str).unwrap_or("未知");
+                    return Err(ApiError::ConcurrencyLimit(format!("模型组并发已满: {name}")));
+                }
+            };
+            group_slots.insert(r.group_id, permit);
+        }
         let kind = r.kind;
         let (provider_name, base_url, api_key, upstream_model, multiplier) =
             (&r.provider, &r.base_url, r.api_key.as_deref(), &r.upstream_model, r.multiplier);
@@ -1206,6 +1243,7 @@ pub async fn run_messages(
         if let Some(key) = cache_key.as_ref() {
             if let Some(entry) = state.semantic_cache.get(key) {
                 state.semantic_cache.record_hit(crate::semantic_cache::HitRecord {
+                    id: uuid::Uuid::new_v4().to_string(),
                     ts: crate::semantic_cache::now_secs(),
                     hit_type: "exact".into(),
                     similarity: None,
@@ -1259,6 +1297,7 @@ pub async fn run_messages(
                         semantic_lookup(&state, &model, provider_name, text).await
                     {
                         state.semantic_cache.record_hit(crate::semantic_cache::HitRecord {
+                            id: uuid::Uuid::new_v4().to_string(),
                             ts: crate::semantic_cache::now_secs(),
                             hit_type: "semantic".into(),
                             similarity: Some(sim),
@@ -1328,8 +1367,14 @@ pub async fn run_messages(
             });
             continue;
         }
-        // ---- P1:上游并发槽(RAII,请求/流结束自动归还) ----
-        let slot = state.acquire_upstream(ukey.clone(), provider_name).await;
+        // ---- 上游并发槽:满员立即 429,RAII 在请求/流结束自动归还 ----
+        let slot = match state.try_acquire_upstream(ukey.clone(), provider_name) {
+            Ok(s) => s,
+            Err(()) => {
+                fail_global!();
+                return Err(ApiError::ConcurrencyLimit(format!("供应商并发已满: {provider_name}")));
+            }
+        };
         // ---- 指标计时器 ----
         let up_start = std::time::Instant::now();
 
@@ -1362,7 +1407,7 @@ pub async fn run_messages(
                             final_status, req_preview: req_preview.clone(), resp_preview: None,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(cache_wrap(state.clone(), anthropic_passthrough_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
+                        return Ok(cache_wrap(state.clone(), anthropic_passthrough_stream(state.clone(), resp, guard, group_slots, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -1460,7 +1505,7 @@ pub async fn run_messages(
                             final_status, req_preview: req_preview.clone(), resp_preview: None,
                             latency_ms: run_start.elapsed().as_millis() as u32,
                         };
-                        return Ok(cache_wrap(state.clone(), messages_openai_stream(state.clone(), resp, guard, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, kind, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
+                        return Ok(cache_wrap(state.clone(), messages_openai_stream(state.clone(), resp, guard, group_slots, slot, model.clone(), provider_name.clone(), upstream_model.clone(), multiplier, user.clone(), key_id, kind, base_url.to_string(), api_key.map(|s| s.to_string()), trace), cache_key, stream, embed_meta));
                     }
                     Ok(resp) => {
                         state.breaker_success(&ukey).await;
@@ -1605,6 +1650,7 @@ async fn anthropic_passthrough_nonstream(
 #[allow(clippy::too_many_arguments)]
 fn anthropic_passthrough_stream(
     state: Arc<AppState>, resp: reqwest::Response, guard: crate::state::ConcurrencyGuard,
+    group_slots: GroupSlots,
     slot: Option<OwnedSemaphorePermit>,
     model: String, provider_name: String, upstream_model: String, multiplier: f64, user: Arc<crate::state::UserState>,
     key_id: Option<uuid::Uuid>,
@@ -1615,6 +1661,7 @@ fn anthropic_passthrough_stream(
     let hdrs = relay_headers(&provider_name, &trace.request_id);
     let s = async_stream::stream! {
         let _guard = guard;
+        let _group_slots = group_slots;
         let _slot = slot;
         let mut upstream = resp.bytes_stream();
         let mut rw = SseRewriter::new(SseFlavor::AnthropicPassthrough);
@@ -1700,6 +1747,7 @@ enum Blk { Text, Think, Tool }
 #[allow(clippy::too_many_arguments)]
 fn messages_openai_stream(
     state: Arc<AppState>, resp: reqwest::Response, guard: crate::state::ConcurrencyGuard,
+    group_slots: GroupSlots,
     slot: Option<OwnedSemaphorePermit>,
     model: String, provider_name: String, upstream_model: String, multiplier: f64, user: Arc<crate::state::UserState>,
     key_id: Option<uuid::Uuid>,
@@ -1711,6 +1759,7 @@ fn messages_openai_stream(
     let hdrs = relay_headers(&provider_name, &trace.request_id);
     let s = async_stream::stream! {
         let _guard = guard;
+        let _group_slots = group_slots;
         let _slot = slot;
         let mut upstream = resp.bytes_stream();
         let mut buf: Vec<u8> = Vec::new();
@@ -1970,6 +2019,7 @@ fn stream_response(
     state: Arc<AppState>,
     resp: reqwest::Response,
     guard: crate::state::ConcurrencyGuard,
+    group_slots: GroupSlots,
     slot: Option<OwnedSemaphorePermit>,
     model: String,
     provider_name: String,
@@ -1986,6 +2036,7 @@ fn stream_response(
     let s = async_stream::stream! {
         // guard 在 stream 生命周期内持有,流结束(或客户端断开导致 drop)才释放并发名额。
         let _guard = guard;
+        let _group_slots = group_slots;
         let _slot = slot;
         let mut upstream = resp.bytes_stream();
         // 行缓冲 + JSON 级改写:修复跨 chunk 边界漏改(模型名泄露 / reasoning 漏转换)与值内容误伤。

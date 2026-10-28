@@ -8,7 +8,12 @@
 # 流程:查询版本 → 下载校验 → 备份当前二进制 → 调 install.sh 原地升级(保留配置与数据) → 健康检查
 set -euo pipefail
 
-INSTALL_DIR="${INSTALL_DIR:-/opt/relay}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "${INSTALL_DIR:-}" ]; then
+  # 就地执行已安装目录中的 upgrade.sh 时,优先跟随脚本所在目录;
+  # 从其他位置运行且未显式指定时,保持原来的 /opt/relay 默认值。
+  if [ -x "$SCRIPT_DIR/relay" ]; then INSTALL_DIR="$SCRIPT_DIR"; else INSTALL_DIR="/opt/relay"; fi
+fi
 REPO="${REPO:-stoneaigc/Relay}"
 VER="${1:-}"
 
@@ -84,7 +89,12 @@ if [ -f "$INSTALL_DIR/relay" ]; then
 fi
 
 echo "==> 执行安装/升级(保留 config 与 relay.env)"
-(cd "$TMP/$PKG" && ./install.sh)
+(cd "$TMP/$PKG" && INSTALL_DIR="$INSTALL_DIR" ./install.sh)
+
+if ! command -v systemctl >/dev/null 2>&1 || [ ! -d /run/systemd/system ]; then
+  echo "==> 无 systemd:文件升级完成,请手动重启 $INSTALL_DIR/relay 后访问 $HEALTH_URL 验证。"
+  exit 0
+fi
 
 echo "==> 健康检查:$HEALTH_URL"
 sleep 2
