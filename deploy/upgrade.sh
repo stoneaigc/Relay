@@ -10,9 +10,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -z "${INSTALL_DIR:-}" ]; then
-  # 就地执行已安装目录中的 upgrade.sh 时,优先跟随脚本所在目录;
-  # 从其他位置运行且未显式指定时,保持原来的 /opt/relay 默认值。
-  if [ -x "$SCRIPT_DIR/relay" ]; then INSTALL_DIR="$SCRIPT_DIR"; else INSTALL_DIR="/opt/relay"; fi
+  # 就地执行已安装目录中的 upgrade.sh 时,优先跟随脚本所在目录。
+  # 判定依据是 relay.env(只存在于安装完成的目录);发布包解压目录也有 relay
+  # 二进制但没有 relay.env——在包目录里误跑本脚本会把 INSTALL_DIR 指到临时目录,
+  # 离线包升级的正确入口是 install.sh。
+  if [ -x "$SCRIPT_DIR/relay" ] && [ -f "$SCRIPT_DIR/relay.env" ]; then
+    INSTALL_DIR="$SCRIPT_DIR"
+  else
+    INSTALL_DIR="/opt/relay"
+  fi
+fi
+if [ -x "$SCRIPT_DIR/relay" ] && [ ! -f "$SCRIPT_DIR/relay.env" ] && [ "$SCRIPT_DIR" != "$INSTALL_DIR" ]; then
+  echo "提示:当前目录像发布包解压目录(无 relay.env)。离线包安装/升级请执行:sudo ./install.sh" >&2
+  echo "     本脚本用于已安装目录的在线升级(自动下载最新版)。仍要继续在线升级 $INSTALL_DIR 吗? [y/N]" >&2
+  read -r _yn </dev/tty 2>/dev/null || _yn=""
+  case "$_yn" in [yY]*) ;; *) echo "已取消。"; exit 1 ;; esac
 fi
 REPO="${REPO:-stoneaigc/Relay}"
 VER="${1:-}"
