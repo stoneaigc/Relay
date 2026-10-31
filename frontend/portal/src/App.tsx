@@ -328,6 +328,16 @@ function PlanHero({ quota, summary }: { quota: QuotaInfo | null; summary: { gran
           已用 {summary ? summary.used.toLocaleString() : "…"} / 总量 {summary ? summary.granted.toLocaleString() : "…"}({pct}%)
         </p>
       </div>
+      {quota?.plan_buckets && quota.plan_buckets.length > 0 && (
+        <div className="relative mt-3 flex flex-wrap gap-1.5">
+          {quota.plan_buckets.map((b) => (
+            <span key={b.id} className={"rounded-full px-2.5 py-1 text-[11px] font-medium " + (b.expired ? "bg-white/10 text-white/50 line-through" : "bg-white/15 text-white")}
+              title={b.expired ? "已过期" : `到期:${new Date(b.expires_at * 1000).toLocaleDateString()}`}>
+              {b.plan_name} {b.remaining_tokens.toLocaleString()}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

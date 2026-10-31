@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { Users as UsersIcon, UsersRound, KeyRound, Copy, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen, SlidersHorizontal, Undo2, Ban, ChevronRight, ArrowUp, ArrowDown, Inbox } from "lucide-react";
-import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, UserGroupRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint, AdminKeyRow, AdminApiKeyRow } from "./api";
+import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, UserGroupRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint, AdminKeyRow, AdminApiKeyRow, PlanRow, PlanQuotaRow } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -99,6 +99,12 @@ const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: a
       { path: "/metrics", label: "实时监控", icon: Activity },
       { path: "/upstreams", label: "上游监控", icon: Zap },
       { path: "/usage", label: "调用日志", icon: BarChart3 },
+    ],
+  },
+  {
+    title: "计费",
+    items: [
+      { path: "/plans", label: "套餐管理", icon: DollarSign },
     ],
   },
   {
@@ -262,7 +268,9 @@ function Console({ onLogout }: { onLogout: () => void }) {
                 <Route path="/audit" element={<AuditPanel />} />
                 <Route path="/rewards" element={<RewardsPanel />} />
                 <Route path="/reward-tasks" element={<RewardTasksPanel />} />
-                <Route path="/usage" element={<UsagePanel />} />                <Route path="/cache" element={<CachePanel />} />
+                <Route path="/usage" element={<UsagePanel />} />
+                <Route path="/plans" element={<PlansPanel />} />
+                <Route path="/cache" element={<CachePanel />} />
                 <Route path="/docs" element={<ApiDocsPanel />} />
                 <Route path="/settings" element={<SettingsPanel />} />
                 <Route path="*" element={<NotFoundPanel />} />
@@ -415,6 +423,9 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
   const [rpm, setRpm] = useState("");
   const [tpm, setTpm] = useState("");
   const [amount, setAmount] = useState("");
+  // 充值目标:balance=主余额;其余值=套餐 id(写入套餐余量桶,临期优先消耗)
+  const [chargeTarget, setChargeTarget] = useState("balance");
+  const [chargePlans, setChargePlans] = useState<PlanRow[]>([]);
   const [budgetDaily, setBudgetDaily] = useState("");
   const [budgetMonthly, setBudgetMonthly] = useState("");
   const [err, setErr] = useState("");
@@ -423,6 +434,8 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
   const [copiedHint, setCopiedHint] = useState(false);
   useEffect(() => {
     if (open) {
+      api.plans().then((r) => setChargePlans(r.data)).catch(() => { /* 套餐加载失败不阻塞编辑 */ });
+      setChargeTarget("balance");
       setUsername(edit?.username ?? ""); setPassword("");
       setGroupId(edit ? (edit.group_id ?? 0) : (groups.find((g) => g.is_active)?.id ?? 0));
       setUserGroupId(edit ? (edit.user_group_id ?? 0) : (userGroups.find((g) => g.name === "default")?.id ?? 0));
@@ -466,7 +479,12 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
           budget_monthly_tokens: bm === undefined ? -1 : bm,
         };
         if (password) body.password = password;
-        if (Number(amount)) body.add_tokens = Number(amount);
+        if (chargeTarget !== "balance") {
+          // 充值到套餐:一次充入一份该套餐额度(额度与有效期由套餐定义)
+          await api.grantUserPlan(edit.id, chargeTarget);
+        } else if (Number(amount)) {
+          body.add_tokens = Number(amount);
+        }
         await api.patchUser(edit.id, body);
       } else {
         const r: any = await api.createUser({
@@ -581,7 +599,17 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
               </div>
             </SheetSection>
             <SheetSection title="额度">
-              <div><label className={lbl}>{edit ? "增减额度(可为负,0 不变)" : "赠送 tokens"}</label>
+              {edit && chargePlans.length > 0 && (
+                <div className="mb-2"><label className={lbl}>充值到</label>
+                  <select className={sel} value={chargeTarget} onChange={(e) => setChargeTarget(e.target.value)}>
+                    <option value="balance">主余额(可增减)</option>
+                    {chargePlans.filter((p) => p.enabled).map((p) => (
+                      <option key={p.id} value={p.id}>套餐:{p.name}(一次充入 {p.token_quota.toLocaleString()} tokens / {p.validity_days} 天)</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div><label className={lbl}>{edit ? (chargeTarget === "balance" ? "增减额度(可为负,0 不变)" : "充值份数(当前固定 1 份,填 0 或留空即充 1 份)") : "赠送 tokens"}</label>
                 <Input value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
             </SheetSection>
             {err && (
@@ -1079,9 +1107,175 @@ function LimitCell({ v, def, compact }: { v: number | null; def?: number; compac
   return <span className="mono" title={compact ? shown : undefined}>{compact ? compactTokens(v) : shown}</span>;
 }
 
+// ---- 套餐管理:定义 token 套餐(额度/有效期/售价预留),绑定到用户组后供充值选择 ----
+function PlansPanel() {
+  const [rows, setRows] = useState<PlanRow[]>([]);
+  const [dlg, setDlg] = useState<{ edit: PlanRow | null } | null>(null);
+  const [confirm, setConfirm] = useState<Confirm | null>(null);
+  const [err, setErr] = useState("");
+
+  const load = async () => {
+    setErr("");
+    try { setRows((await api.plans()).data); }
+    catch (e: any) { setErr(e.message || "加载失败"); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const del = (p: PlanRow) => setConfirm({
+    title: `删除套餐「${p.name}」?`,
+    desc: "组绑定与默认引用会一并清除;已发放的余量桶保留,存量用户不受影响。",
+    action: async () => { await api.deletePlan(p.id); load(); },
+  });
+
+  const fmtTokens = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M` : n >= 1000 ? `${(n / 1000).toFixed(n % 1000 === 0 ? 0 : 1)}k` : String(n));
+
+  return (
+    <div className="space-y-5">
+      <Card>
+        <CardHeader>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <CardTitle className="text-base">套餐管理</CardTitle>
+              <CardDescription>套餐 = 一次发放的 token 额度包(含有效期)。绑定到用户组后,该组成员可充值对应套餐;扣费时优先消耗临期套餐,耗尽后回落主余额。</CardDescription>
+            </div>
+            <Button size="sm" onClick={() => setDlg({ edit: null })}><Plus className="h-4 w-4" />创建套餐</Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>名称</TableHead>
+                <TableHead className="text-right">含 tokens</TableHead>
+                <TableHead className="text-right">有效期(天)</TableHead>
+                <TableHead className="text-right">售价(元)</TableHead>
+                <TableHead>说明</TableHead>
+                <TableHead className="text-right">绑定组</TableHead>
+                <TableHead className="text-right">已发放</TableHead>
+                <TableHead>状态</TableHead>
+                <TableHead className="text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((p) => (
+                <TableRow key={p.id}>
+                  <TableCell className="font-medium">{p.name}</TableCell>
+                  <TableCell className="mono text-right" title={p.token_quota.toLocaleString()}>{fmtTokens(p.token_quota)}</TableCell>
+                  <TableCell className="mono text-right">{p.validity_days}</TableCell>
+                  <TableCell className="mono text-right">{p.price_cents > 0 ? (p.price_cents / 100).toFixed(2) : "—"}</TableCell>
+                  <TableCell className="max-w-[240px] truncate text-xs text-muted-foreground" title={p.description}>{p.description || "—"}</TableCell>
+                  <TableCell className="mono text-right">{p.group_count ?? 0}</TableCell>
+                  <TableCell className="mono text-right">{p.issued_count ?? 0}</TableCell>
+                  <TableCell>
+                    {p.enabled
+                      ? <Badge className="bg-emerald-500/10 text-emerald-700 ring-1 ring-inset ring-emerald-500/20">启用</Badge>
+                      : <Badge variant="muted">停用</Badge>}
+                  </TableCell>
+                  <TableCell>
+                    <RowActions actions={[
+                      { label: "编辑", icon: <Pencil className="h-4 w-4" />, onClick: () => setDlg({ edit: p }) },
+                      { label: "删除", icon: <Trash2 className="h-4 w-4" />, variant: "destructive", onClick: () => del(p) },
+                    ]} />
+                  </TableCell>
+                </TableRow>
+              ))}
+              {rows.length === 0 && !err && (
+                <TableRow><TableCell colSpan={9} className="py-10 text-center text-sm text-muted-foreground">还没有套餐;创建后到「用户组」里绑定默认套餐与可充值范围</TableCell></TableRow>
+              )}
+              {err && (
+                <TableRow><TableCell colSpan={9} className="py-10 text-center text-sm text-destructive">
+                  加载失败:{err} <Button size="sm" variant="outline" className="ml-2 h-7" onClick={load}>重试</Button>
+                </TableCell></TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
+
+      <PlanDialog dlg={dlg} onClose={() => setDlg(null)} onSaved={load} />
+      <ConfirmDialog confirm={confirm} onClose={() => setConfirm(null)} />
+    </div>
+  );
+}
+
+function PlanDialog({ dlg, onClose, onSaved }: { dlg: { edit: PlanRow | null } | null; onClose: () => void; onSaved: () => void }) {
+  const open = !!dlg;
+  const edit = dlg?.edit ?? null;
+  const [name, setName] = useState("");
+  const [quota, setQuota] = useState("");
+  const [days, setDays] = useState("30");
+  const [price, setPrice] = useState("");
+  const [desc, setDesc] = useState("");
+  const [enabled, setEnabled] = useState(true);
+  const [err, setErr] = useState("");
+  useEffect(() => {
+    if (open) {
+      setName(edit?.name ?? ""); setErr("");
+      setQuota(edit ? String(edit.token_quota) : "");
+      setDays(edit ? String(edit.validity_days) : "30");
+      setPrice(edit && edit.price_cents > 0 ? (edit.price_cents / 100).toFixed(2) : "");
+      setDesc(edit?.description ?? "");
+      setEnabled(edit?.enabled ?? true);
+    }
+  }, [dlg]);
+
+  const submit = async () => {
+    setErr("");
+    if (!name.trim()) { setErr("请输入套餐名称"); return; }
+    const q = Number(quota), d = Number(days);
+    if (!Number.isInteger(q) || q <= 0) { setErr("token 额度需为正整数"); return; }
+    if (!Number.isInteger(d) || d <= 0) { setErr("有效期需为正整数(天)"); return; }
+    const pc = price.trim() === "" ? 0 : Math.round(Number(price) * 100);
+    if (!Number.isFinite(pc) || pc < 0) { setErr("售价格式不正确"); return; }
+    const body = { name: name.trim(), token_quota: q, validity_days: d, price_cents: pc, description: desc.trim() };
+    try {
+      if (edit) await api.updatePlan(edit.id, { ...body, enabled });
+      else await api.createPlan(body);
+      onSaved(); onClose();
+    } catch (e: any) { setErr(e.message); }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{edit ? "编辑套餐" : "创建套餐"}</DialogTitle>
+          <DialogDescription>套餐是面向付费的额度包:扣费优先消耗临期套餐余量,耗尽后扣主余额。</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div><label className="mb-1 block text-xs text-muted-foreground">名称 *</label>
+            <Input placeholder="如:体验版 / 标准版 / 旗舰版" value={name} maxLength={32} onChange={(e) => setName(e.target.value)} autoFocus /></div>
+          <div className="grid grid-cols-3 gap-3">
+            <div><label className="mb-1 block text-xs text-muted-foreground">含 tokens *</label>
+              <Input placeholder="如 1000000" value={quota} onChange={(e) => setQuota(e.target.value)} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">有效期(天) *</label>
+              <Input value={days} onChange={(e) => setDays(e.target.value)} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">售价(元,预留)</label>
+              <Input placeholder="如 9.90" value={price} onChange={(e) => setPrice(e.target.value)} /></div>
+          </div>
+          <div><label className="mb-1 block text-xs text-muted-foreground">说明</label>
+            <Input placeholder="套餐说明(展示给用户)" value={desc} maxLength={100} onChange={(e) => setDesc(e.target.value)} /></div>
+          {edit && (
+            <label className="flex items-center gap-2 text-sm">
+              <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+              启用(停用后不可再充值,已有余量仍可消耗)
+            </label>
+          )}
+          {err && <p className="text-sm text-destructive">{err}</p>}
+          <div className="flex justify-end gap-2 pt-1">
+            <Button variant="outline" onClick={onClose}>取消</Button>
+            <Button onClick={submit}>{edit ? "保存" : "创建"}</Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function UserGroupsPanel() {
   const [rows, setRows] = useState<UserGroupRow[]>([]);
   const [groups, setGroups] = useState<GroupRow[]>([]);
+  const [plansCache, setPlansCache] = useState<PlanRow[]>([]);
   const [defaults, setDefaults] = useState<{ concurrency_limit: number; rpm_limit: number; tpm_limit: number }>({ concurrency_limit: 0, rpm_limit: 0, tpm_limit: 0 });
   const [dlg, setDlg] = useState<{ edit: UserGroupRow | null } | null>(null);
   const [confirm, setConfirm] = useState<Confirm | null>(null);
@@ -1093,8 +1287,8 @@ function UserGroupsPanel() {
   const load = async () => {
     setErr("");
     try {
-      const [r, g] = await Promise.all([api.userGroups(), api.groups()]);
-      setRows(r.data); setDefaults(r.defaults); setGroups(g.data);
+      const [r, g, pl] = await Promise.all([api.userGroups(), api.groups(), api.plans()]);
+      setRows(r.data); setDefaults(r.defaults); setGroups(g.data); setPlansCache(pl.data);
     } catch (e: any) {
       // 401 已由 api 层广播全局跳登录;其余错误就地展示,避免整页静默空白。
       setErr(e.message || "加载失败");
@@ -1126,7 +1320,7 @@ function UserGroupsPanel() {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>名称</TableHead><TableHead>模型组绑定(优先级)</TableHead><TableHead>并发上限</TableHead><TableHead>RPM</TableHead><TableHead>TPM</TableHead>
+                <TableHead>名称</TableHead><TableHead>模型组绑定(优先级)</TableHead><TableHead>套餐</TableHead><TableHead>并发上限</TableHead><TableHead>RPM</TableHead><TableHead>TPM</TableHead>
                 <TableHead>日预算</TableHead><TableHead>月预算</TableHead><TableHead>成员数</TableHead><TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
@@ -1148,6 +1342,22 @@ function UserGroupsPanel() {
                       <span className="text-xs text-muted-foreground" title="组内用户沿用其直属模型组(users.group_id)">未绑定 · 沿用用户直属组</span>
                     )}
                   </TableCell>
+                  <TableCell className="max-w-[160px]">
+                    {g.default_plan_id || g.plan_ids.length > 0 ? (
+                      <div className="flex flex-wrap gap-1">
+                        {g.default_plan_id && (
+                          <span className="rounded-md bg-brand-100 px-1.5 py-0.5 text-xs font-medium text-brand-700 dark:bg-brand-950/40 dark:text-brand-300" title="默认套餐:注册/入组自动发放">
+                            ★ {plansCache.find((p) => p.id === g.default_plan_id)?.name ?? "默认套餐"}
+                          </span>
+                        )}
+                        {g.plan_ids.filter((pid) => pid !== g.default_plan_id).map((pid) => (
+                          <span key={pid} className="rounded-md bg-muted/60 px-1.5 py-0.5 text-xs">{plansCache.find((p) => p.id === pid)?.name ?? "套餐"}</span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">未绑定</span>
+                    )}
+                  </TableCell>
                   <TableCell><LimitCell v={g.max_concurrency} def={defaults.concurrency_limit} /></TableCell>
                   <TableCell><LimitCell v={g.rpm_limit} def={defaults.rpm_limit} /></TableCell>
                   <TableCell><LimitCell v={g.tpm_limit} def={defaults.tpm_limit} /></TableCell>
@@ -1167,10 +1377,10 @@ function UserGroupsPanel() {
                 </TableRow>
               ))}
               {rows.length === 0 && !err && (
-                <TableRow><TableCell colSpan={9} className="py-10 text-center text-sm text-muted-foreground">还没有用户组,创建后可在用户管理里批量套用限额</TableCell></TableRow>
+                <TableRow><TableCell colSpan={10} className="py-10 text-center text-sm text-muted-foreground">还没有用户组,创建后可在用户管理里批量套用限额</TableCell></TableRow>
               )}
               {err && (
-                <TableRow><TableCell colSpan={9} className="py-10 text-center text-sm text-destructive">
+                <TableRow><TableCell colSpan={10} className="py-10 text-center text-sm text-destructive">
                   加载失败:{err} <Button size="sm" variant="outline" className="ml-2 h-7" onClick={load}>重试</Button>
                 </TableCell></TableRow>
               )}
@@ -1198,10 +1408,18 @@ function UserGroupDialog({ dlg, defaults, groups, onClose, onSaved }: { dlg: { e
   // 绑定的有序模型组(下标即优先级,0=最高)。
   const [mgIds, setMgIds] = useState<number[]>([]);
   const [mgPick, setMgPick] = useState("0");
+  // 套餐:默认套餐(单选) + 绑定套餐(多选)
+  const [plans, setPlans] = useState<PlanRow[]>([]);
+  const [defPlan, setDefPlan] = useState<string>("");
+  const [planIds, setPlanIds] = useState<string[]>([]);
   const [err, setErr] = useState("");
+  useEffect(() => {
+    api.plans().then((r) => setPlans(r.data)).catch(() => { /* 套餐加载失败不阻塞组编辑 */ });
+  }, []);
   useEffect(() => {
     if (open) {
       setName(edit?.name ?? ""); setErr("");
+      setDefPlan(edit?.default_plan_id ?? ""); setPlanIds(edit?.plan_ids ?? []);
       setConc(edit?.max_concurrency == null ? "" : String(edit.max_concurrency));
       setRpm(edit?.rpm_limit == null ? "" : String(edit.rpm_limit));
       setTpm(edit?.tpm_limit == null ? "" : String(edit.tpm_limit));
@@ -1229,6 +1447,8 @@ function UserGroupDialog({ dlg, defaults, groups, onClose, onSaved }: { dlg: { e
       max_concurrency: num(conc), rpm_limit: num(rpm), tpm_limit: num(tpm),
       budget_daily_tokens: num(daily), budget_monthly_tokens: num(monthly),
       model_group_ids: mgIds,
+      default_plan_id: defPlan || null,
+      plan_ids: planIds,
     };
     for (const v of [vals.max_concurrency, vals.rpm_limit, vals.tpm_limit, vals.budget_daily_tokens, vals.budget_monthly_tokens]) {
       if (v != null && (!Number.isFinite(v) || v < 0)) { setErr("限额需为非负数字,留空 = 继承全局,0 = 不限"); return; }
@@ -1288,6 +1508,36 @@ function UserGroupDialog({ dlg, defaults, groups, onClose, onSaved }: { dlg: { e
             <p className="mt-2 text-xs leading-5 text-muted-foreground">
               请求先命中高优先级组;同名对外模型在组内按<b>该组自己的负载策略</b>分流,全部失败才跨组容灾到下一组。
             </p>
+          </div>
+          <div className="rounded-lg border border-border p-3">
+            <label className="mb-2 block text-xs font-medium text-muted-foreground">套餐绑定(充值可选范围;默认套餐在成员注册/入组时自动发放)</label>
+            {plans.length === 0 ? (
+              <p className="text-xs text-muted-foreground">还没有套餐,请先到「套餐管理」创建。</p>
+            ) : (
+              <>
+                <div className="mb-2">
+                  <select value={defPlan} onChange={(e) => setDefPlan(e.target.value)}
+                    className="h-9 w-full rounded-lg border border-input bg-card px-2.5 text-sm">
+                    <option value="">无默认套餐(注册只发系统赠送额度)</option>
+                    {plans.filter((p) => p.enabled || p.id === defPlan).map((p) => (
+                      <option key={p.id} value={p.id}>{p.name}(含 {p.token_quota.toLocaleString()} tokens / {p.validity_days} 天)</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {plans.filter((p) => p.enabled || planIds.includes(p.id)).map((p) => {
+                    const on = planIds.includes(p.id);
+                    return (
+                      <button key={p.id} type="button"
+                        className={cn("rounded-md border px-2 py-1 text-xs transition", on ? "border-brand-400 bg-brand-50 text-brand-700 dark:bg-brand-950/40 dark:text-brand-300" : "border-border text-muted-foreground hover:bg-muted/60")}
+                        onClick={() => setPlanIds(on ? planIds.filter((x) => x !== p.id) : [...planIds, p.id])}>
+                        {on ? "✓ " : ""}{p.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            )}
           </div>
           <div className="grid grid-cols-3 gap-3">
             <div><label className="mb-1 block text-xs text-muted-foreground">并发上限</label>
@@ -7035,7 +7285,7 @@ function RequestLogDetail({ row, userName }: { row: RequestLogRow; userName: str
           <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1.5 text-xs">
             <span className="text-muted-foreground">请求 ID</span>
             <span className="flex items-center gap-1.5">
-              <code className="mono rounded bg-muted px-1.5 py-0.5">{row.request_id}</code>
+              <code className="mono block max-w-full overflow-x-auto whitespace-nowrap rounded bg-muted px-1.5 py-0.5" title={row.request_id}>{row.request_id}</code>
               <button
                 className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                 title="复制请求 ID"

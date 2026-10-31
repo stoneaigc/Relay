@@ -80,6 +80,8 @@ export interface ModelCard {
 export interface QuotaInfo {
   plan: { id: number; name: string } | null;
   balance: number;
+  /** 套餐余量桶(临期优先扣减;expired=true 的桶不再可用) */
+  plan_buckets?: { id: string; plan_name: string; remaining_tokens: number; expires_at: number; expired: boolean }[];
   concurrency: { limit: number | null; used: number; source?: string };
   rpm: { limit: number | null; used: number; source?: string };
   tpm: { limit: number | null; used: number; source?: string };
