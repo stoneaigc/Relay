@@ -29,6 +29,10 @@ pub struct RunTrace {
     pub path: &'static str,
     pub requested_model: String,
     pub stream: bool,
+    /// 计时基准:构造点处的 run_start(流式首块耗时的相对原点)。
+    pub started: std::time::Instant,
+    /// 流式:上游首个数据块到达时刻(相对 started,ms);非流式/语义缓存回放为 None。
+    pub first_byte_ms: Option<u32>,
     /// resolve_all 的候选顺序(含权重)。
     pub candidates: Vec<RequestAttempt>,
     /// 每个候选的实际尝试结果(含 failover 链)。
@@ -67,6 +71,7 @@ impl RunTrace {
             input_tokens: input,
             output_tokens: output,
             charged_tokens: charged,
+            first_byte_ms: self.first_byte_ms,
             ts: crate::storage::now_secs(),
             req_body: self.req_preview.clone(),
             resp_body: self.resp_preview.clone(),
@@ -91,6 +96,7 @@ impl RunTrace {
             input_tokens: 0,
             output_tokens: 0,
             charged_tokens: 0,
+            first_byte_ms: self.first_byte_ms,
             ts: crate::storage::now_secs(),
             req_body: self.req_preview.clone(),
             resp_body: self.resp_preview.clone(),
@@ -258,6 +264,8 @@ async fn embeddings_inner(
     let req_preview = reqlog::body_preview(body, state.config.load().logging.body_preview_max_bytes);
 
     let mut trace = RunTrace {
+        started: std::time::Instant::now(),
+        first_byte_ms: None,
         request_id: request_id.clone(),
         user_id: user.id.to_string(),
         path: "embeddings",
@@ -538,6 +546,8 @@ pub async fn run_chat(
                     request_id: Some(request_id.clone()),
                 }).await;
                 let trace = RunTrace {
+                    started: run_start,
+                    first_byte_ms: None,
                     request_id: request_id.clone(),
                     user_id: user_id_str.clone(),
                     path: run_path,
@@ -592,6 +602,8 @@ pub async fn run_chat(
                             request_id: Some(request_id.clone()),
                         }).await;
                         let trace = RunTrace {
+                            started: run_start,
+                            first_byte_ms: None,
                             request_id: request_id.clone(),
                             user_id: user_id_str.clone(),
                             path: run_path,
@@ -667,6 +679,8 @@ pub async fn run_chat(
                             error: String::new(),
                         });
                         let trace = RunTrace {
+                            started: run_start,
+                            first_byte_ms: None,
                             request_id: request_id.clone(),
                             user_id: user_id_str.clone(),
                             path: run_path,
@@ -699,6 +713,8 @@ pub async fn run_chat(
                             error: String::new(),
                         });
                         let trace = RunTrace {
+                            started: run_start,
+                            first_byte_ms: None,
                             request_id: request_id.clone(),
                             user_id: user_id_str.clone(),
                             path: run_path,
@@ -748,6 +764,8 @@ pub async fn run_chat(
                             error: e.to_string(),
                         });
                         let trace = RunTrace {
+                            started: run_start,
+                            first_byte_ms: None,
                             request_id, user_id: user_id_str, path: run_path,
                             requested_model: model, stream,
                             candidates: cand_init, attempts,
@@ -781,6 +799,8 @@ pub async fn run_chat(
                             error: String::new(),
                         });
                         let trace = RunTrace {
+                            started: run_start,
+                            first_byte_ms: None,
                             request_id: request_id.clone(),
                             user_id: user_id_str.clone(),
                             path: run_path,
@@ -813,6 +833,8 @@ pub async fn run_chat(
                             error: String::new(),
                         });
                         let trace = RunTrace {
+                            started: run_start,
+                            first_byte_ms: None,
                             request_id: request_id.clone(),
                             user_id: user_id_str.clone(),
                             path: run_path,
@@ -861,6 +883,8 @@ pub async fn run_chat(
                             error: e.to_string(),
                         });
                         let trace = RunTrace {
+                            started: run_start,
+                            first_byte_ms: None,
                             request_id, user_id: user_id_str, path: run_path,
                             requested_model: model, stream,
                             candidates: cand_init, attempts,
@@ -879,6 +903,8 @@ pub async fn run_chat(
     fail_global!();
     let err = exhausted_error(&model, &attempts);
     let trace = RunTrace {
+        started: run_start,
+        first_byte_ms: None,
         request_id, user_id: user_id_str, path: run_path,
         requested_model: model.clone(), stream,
         candidates: cand_init, attempts,
@@ -971,6 +997,7 @@ fn anthropic_stream_response(
     let user_id = user.id;
     let hdrs = relay_headers(&provider_name, &trace.request_id);
     let s = async_stream::stream! {
+        let mut trace = trace;
         let _guard = guard;
         let _group_slots = group_slots;
         let _slot = slot; // 持有上游并发槽直到流结束
@@ -991,6 +1018,9 @@ fn anthropic_stream_response(
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(bytes) => {
+                    if trace.first_byte_ms.is_none() {
+                        trace.first_byte_ms = Some(trace.started.elapsed().as_millis() as u32);
+                    }
                     buf.extend_from_slice(&bytes);
                     while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                         let line: Vec<u8> = buf.drain(..=pos).collect();
@@ -1272,6 +1302,8 @@ pub async fn run_messages(
                     request_id: Some(request_id.clone()),
                 }).await;
                 let trace = RunTrace {
+                    started: run_start,
+                    first_byte_ms: None,
                     request_id: request_id.clone(),
                     user_id: user_id_str.clone(),
                     path: run_path,
@@ -1326,6 +1358,8 @@ pub async fn run_messages(
                             request_id: Some(request_id.clone()),
                         }).await;
                         let trace = RunTrace {
+                            started: run_start,
+                            first_byte_ms: None,
                             request_id: request_id.clone(),
                             user_id: user_id_str.clone(),
                             path: run_path,
@@ -1400,6 +1434,8 @@ pub async fn run_messages(
                             error: String::new(),
                         });
                         let trace = RunTrace {
+                            started: run_start,
+                            first_byte_ms: None,
                             request_id: request_id.clone(), user_id: user_id_str.clone(), path: run_path,
                             requested_model: model.clone(), stream,
                             candidates: cand_init.clone(), attempts: attempts.clone(),
@@ -1425,6 +1461,8 @@ pub async fn run_messages(
                             error: String::new(),
                         });
                         let trace = RunTrace {
+                            started: run_start,
+                            first_byte_ms: None,
                             request_id: request_id.clone(), user_id: user_id_str.clone(), path: run_path,
                             requested_model: model.clone(), stream,
                             candidates: cand_init.clone(), attempts: attempts.clone(),
@@ -1466,6 +1504,8 @@ pub async fn run_messages(
                             error: e.to_string(),
                         });
                         let trace = RunTrace {
+                            started: run_start,
+                            first_byte_ms: None,
                             request_id, user_id: user_id_str, path: run_path,
                             requested_model: model, stream,
                             candidates: cand_init, attempts,
@@ -1498,6 +1538,8 @@ pub async fn run_messages(
                             error: String::new(),
                         });
                         let trace = RunTrace {
+                            started: run_start,
+                            first_byte_ms: None,
                             request_id: request_id.clone(), user_id: user_id_str.clone(), path: run_path,
                             requested_model: model.clone(), stream,
                             candidates: cand_init.clone(), attempts: attempts.clone(),
@@ -1523,6 +1565,8 @@ pub async fn run_messages(
                             error: String::new(),
                         });
                         let trace = RunTrace {
+                            started: run_start,
+                            first_byte_ms: None,
                             request_id: request_id.clone(), user_id: user_id_str.clone(), path: run_path,
                             requested_model: model.clone(), stream,
                             candidates: cand_init.clone(), attempts: attempts.clone(),
@@ -1564,6 +1608,8 @@ pub async fn run_messages(
                             error: e.to_string(),
                         });
                         let trace = RunTrace {
+                            started: run_start,
+                            first_byte_ms: None,
                             request_id, user_id: user_id_str, path: run_path,
                             requested_model: model, stream,
                             candidates: cand_init, attempts,
@@ -1581,6 +1627,8 @@ pub async fn run_messages(
     fail_global!();
     let err = exhausted_error(&model, &attempts);
     let trace = RunTrace {
+        started: run_start,
+        first_byte_ms: None,
         request_id, user_id: user_id_str, path: run_path,
         requested_model: model.clone(), stream,
         candidates: cand_init, attempts,
@@ -1660,6 +1708,7 @@ fn anthropic_passthrough_stream(
 ) -> Response {
     let hdrs = relay_headers(&provider_name, &trace.request_id);
     let s = async_stream::stream! {
+        let mut trace = trace;
         let _guard = guard;
         let _group_slots = group_slots;
         let _slot = slot;
@@ -1671,6 +1720,9 @@ fn anthropic_passthrough_stream(
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(bytes) => {
+                    if trace.first_byte_ms.is_none() {
+                        trace.first_byte_ms = Some(trace.started.elapsed().as_millis() as u32);
+                    }
                     // 透传 Anthropic 事件:行缓冲后 JSON 级改写 model 名,同时扫 usage。
                     let out = rw.feed(&bytes, &model, &mut input, &mut output);
                     if !out.is_empty() {
@@ -1758,6 +1810,7 @@ fn messages_openai_stream(
 ) -> Response {
     let hdrs = relay_headers(&provider_name, &trace.request_id);
     let s = async_stream::stream! {
+        let mut trace = trace;
         let _guard = guard;
         let _group_slots = group_slots;
         let _slot = slot;
@@ -1773,7 +1826,7 @@ fn messages_openai_stream(
         let msg_id = format!("msg_{}", &uuid::Uuid::new_v4().to_string()[..12]);
 
         while let Some(item) = upstream.next().await {
-            let bytes = match item { Ok(b) => b, Err(e) => { yield Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())); break; } };
+            let bytes = match item { Ok(b) => { if trace.first_byte_ms.is_none() { trace.first_byte_ms = Some(trace.started.elapsed().as_millis() as u32); } b }, Err(e) => { yield Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())); break; } };
             buf.extend_from_slice(&bytes);
             while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=pos).collect();
@@ -2035,6 +2088,7 @@ fn stream_response(
     let hdrs = relay_headers(&provider_name, &trace.request_id);
     let s = async_stream::stream! {
         // guard 在 stream 生命周期内持有,流结束(或客户端断开导致 drop)才释放并发名额。
+        let mut trace = trace;
         let _guard = guard;
         let _group_slots = group_slots;
         let _slot = slot;
@@ -2048,6 +2102,9 @@ fn stream_response(
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(bytes) => {
+                    if trace.first_byte_ms.is_none() {
+                        trace.first_byte_ms = Some(trace.started.elapsed().as_millis() as u32);
+                    }
                     let out = rw.feed(&bytes, &model, &mut input, &mut output);
                     if !out.is_empty() {
                         yield Ok::<Bytes, std::io::Error>(Bytes::from(out));

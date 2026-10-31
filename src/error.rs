@@ -44,6 +44,9 @@ pub enum ApiError {
     /// 消息直接透出给前端展示,保持人话原文,不加技术前缀。
     #[error("{0}")]
     BadRequest(String),
+    /// 资源不存在(管理后台 CRUD 通用)。404。
+    #[error("{0}")]
+    NotFound(String),
     #[error("upstream error: {0}")]
     Upstream(String),
     /// 上游可重试错误(连接失败 / 超时 / 5xx / 429)。failover 时应切换下一目标。
@@ -62,7 +65,7 @@ impl ApiError {
             ApiError::Unauthorized | ApiError::InvalidCredentials | ApiError::InvalidKey => StatusCode::UNAUTHORIZED,
             ApiError::AccountDisabled => StatusCode::FORBIDDEN,
             ApiError::InsufficientBalance => StatusCode::PAYMENT_REQUIRED,
-            ApiError::ModelNotFound(_) | ApiError::ModelNotAllowed(_) => StatusCode::NOT_FOUND,
+            ApiError::ModelNotFound(_) | ApiError::ModelNotAllowed(_) | ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::NoTarget(_) | ApiError::AllFailed { .. } => StatusCode::BAD_GATEWAY,
             ApiError::Upstream(_) => StatusCode::BAD_GATEWAY,
             ApiError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -77,7 +80,7 @@ impl ApiError {
             ApiError::Unauthorized | ApiError::InvalidCredentials | ApiError::InvalidKey => "authentication_error",
             ApiError::AccountDisabled => "permission_error",
             ApiError::InsufficientBalance | ApiError::BudgetExhausted(_) => "insufficient_quota",
-            ApiError::ModelNotFound(_) | ApiError::ModelNotAllowed(_) => "not_found_error",
+            ApiError::ModelNotFound(_) | ApiError::ModelNotAllowed(_) | ApiError::NotFound(_) => "not_found_error",
             ApiError::TooManyRequests | ApiError::ConcurrencyLimit(_) | ApiError::TooManyAttempts(_) => "rate_limit_error",
             ApiError::BadRequest(_) => "invalid_request_error",
             ApiError::NoTarget(_) | ApiError::AllFailed { .. } | ApiError::Upstream(_) => "upstream_error",
@@ -105,7 +108,7 @@ impl ApiError {
             ApiError::Unauthorized | ApiError::InvalidCredentials | ApiError::InvalidKey => "authentication_error",
             ApiError::AccountDisabled => "permission_error",
             ApiError::InsufficientBalance => "api_error",
-            ApiError::ModelNotFound(_) | ApiError::ModelNotAllowed(_) => "not_found_error",
+            ApiError::ModelNotFound(_) | ApiError::ModelNotAllowed(_) | ApiError::NotFound(_) => "not_found_error",
             ApiError::TooManyRequests | ApiError::ConcurrencyLimit(_) | ApiError::TooManyAttempts(_) | ApiError::BudgetExhausted(_) => "rate_limit_error",
             ApiError::BadRequest(_) => "invalid_request_error",
             ApiError::NoTarget(_) | ApiError::AllFailed { .. } | ApiError::Upstream(_) | ApiError::Unavailable(_) => "api_error",

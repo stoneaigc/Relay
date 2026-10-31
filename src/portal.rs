@@ -443,7 +443,21 @@ pub async fn config(
         .get(crate::settings::K_PORTAL_REWARDS_ENABLED)
         .map(|v| v == "true")
         .unwrap_or(false);
-    Ok(Json(json!({ "rewards_enabled": rewards_enabled })))
+    // 费用显示币种(仅影响展示单位,计价口径仍为 cost_usd)。
+    let cfg = state.config();
+    let currency = kv
+        .get(crate::settings::K_BILLING_CURRENCY)
+        .cloned()
+        .unwrap_or_else(|| cfg.defaults.currency.clone());
+    let cny_rate = kv
+        .get(crate::settings::K_BILLING_CNY_RATE)
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(cfg.defaults.cny_rate);
+    Ok(Json(json!({
+        "rewards_enabled": rewards_enabled,
+        "currency": currency,
+        "cny_rate": cny_rate,
+    })))
 }
 
 /// GET /portal/me
@@ -457,11 +471,21 @@ pub async fn me(
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or(ApiError::InvalidKey)?;
     let balance = state.user(&uid).map(|u| u.balance()).unwrap_or(row.token_balance);
+    // 管理员身份:经「进入用户门户」SSO 创建的账号(source=admin),
+    // 或用户名与管理员账号名一致。用于在门户侧边栏显示「返回管理端」。
+    let cfg = state.config();
+    let is_admin = row.source.as_deref() == Some("admin")
+        || row
+            .username
+            .as_deref()
+            .map(|u| u == cfg.admin.username)
+            .unwrap_or(false);
     Ok(Json(json!({
         "id": row.id,
         "phone": row.phone,
         "balance": balance,
         "used_total": row.token_used_total,
+        "is_admin": is_admin,
     })))
 }
 
@@ -512,29 +536,45 @@ pub async fn quota(
     let tpm_limit = u.tpm_limit.load(std::sync::atomic::Ordering::Relaxed);
     let bd = u.budget_daily.load(std::sync::atomic::Ordering::Relaxed);
     let bm = u.budget_monthly.load(std::sync::atomic::Ordering::Relaxed);
+    // 各限额的来源标注:「用户」显式设置 >「用户组」>「全局默认」,便于用户理解数值出处。
+    let src = |user_val: Option<i64>, group_val: Option<i64>| -> &'static str {
+        if user_val.is_some() {
+            "用户"
+        } else if group_val.is_some() {
+            "用户组"
+        } else {
+            "全局默认"
+        }
+    };
+    let g = group.as_ref();
     Ok(Json(json!({
-        "plan": group.as_ref().map(|g| json!({ "id": g.id, "name": g.name })),
+        "plan": g.map(|g| json!({ "id": g.id, "name": g.name })),
         "balance": u.balance(),
         "concurrency": {
             "limit": conc_limit,
             "used": u.in_flight,
+            "source": src(row.concurrency_limit, g.and_then(|g| g.max_concurrency)),
         },
         "rpm": {
             "limit": if rpm_limit == 0 { Value::Null } else { json!(rpm_limit) },
             "used": u.rpm_used(),
+            "source": src(row.rpm_limit, g.and_then(|g| g.rpm_limit)),
         },
         "tpm": {
             "limit": if tpm_limit == 0 { Value::Null } else { json!(tpm_limit) },
             "used": u.tpm_used(),
+            "source": src(row.tpm_limit, g.and_then(|g| g.tpm_limit)),
         },
         "budget": {
             "daily": {
                 "limit": if bd == 0 { Value::Null } else { json!(bd) },
                 "used": u.used_daily.load(std::sync::atomic::Ordering::Relaxed),
+                "source": src(row.budget_daily_tokens, g.and_then(|g| g.budget_daily)),
             },
             "monthly": {
                 "limit": if bm == 0 { Value::Null } else { json!(bm) },
                 "used": u.used_monthly.load(std::sync::atomic::Ordering::Relaxed),
+                "source": src(row.budget_monthly_tokens, g.and_then(|g| g.budget_monthly)),
             },
         },
     })))

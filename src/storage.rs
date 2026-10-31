@@ -293,6 +293,13 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE providers ADD COLUMN IF NOT EXISTS max_concurrency BIGINT")
             .execute(pool)
             .await;
+        // 最近一次连通性校验结果(健康徽标用):NULL=从未校验。
+        let _ = q!("ALTER TABLE providers ADD COLUMN IF NOT EXISTS last_test_ok BIGINT")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE providers ADD COLUMN IF NOT EXISTS last_test_at TEXT")
+            .execute(pool)
+            .await;
         // Key 明文列:门户端随时查看/复制完整 Key(认证仍走 key_hash)。
         let _ = q!("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS key_plain TEXT")
             .execute(pool)
@@ -404,6 +411,9 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         // 供应商自定义请求头(JSON 对象,加密存储;随上游请求附带,如 x-opencode-session)。
         let _ = q!("ALTER TABLE providers ADD COLUMN headers TEXT").execute(pool).await;
         let _ = q!("ALTER TABLE providers ADD COLUMN max_concurrency INTEGER").execute(pool).await;
+        // 最近一次连通性校验结果(健康徽标用):NULL=从未校验。
+        let _ = q!("ALTER TABLE providers ADD COLUMN last_test_ok INTEGER").execute(pool).await;
+        let _ = q!("ALTER TABLE providers ADD COLUMN last_test_at TEXT").execute(pool).await;
         // Key 明文列:门户端随时查看/复制完整 Key(认证仍走 key_hash)。
         let _ = q!("ALTER TABLE api_keys ADD COLUMN key_plain TEXT").execute(pool).await;
         // 分级密钥管控:模型范围 + 审批状态。
@@ -448,6 +458,10 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
             .execute(pool)
             .await;
         let _ = q!("ALTER TABLE request_logs ADD COLUMN resp_body TEXT")
+            .execute(pool)
+            .await;
+        // 请求链路:流式首块到达耗时(ms,可空)——生成耗时 = latency_ms - first_byte_ms。
+        let _ = q!("ALTER TABLE request_logs ADD COLUMN first_byte_ms INTEGER")
             .execute(pool)
             .await;
         // 语义缓存徽标:usage_logs 按 request_id 关联 request_logs 取 final_kind,两侧补索引防大表全扫。
@@ -807,6 +821,7 @@ pub async fn list_providers(pool: &Db, page: Option<u32>, page_size: Option<u32>
     let offset = ((current_page - 1) as i64 * limit).max(0);
     let rows_sql = format!(
         "SELECT p.name, p.kind, p.base_url, p.display_name, p.max_concurrency,
+                p.last_test_ok, p.last_test_at,
                 (SELECT COUNT(*) FROM models m WHERE m.provider = p.name) as model_count
          FROM providers p{where_sql} ORDER BY p.name LIMIT ? OFFSET ?"
     );
@@ -820,8 +835,21 @@ pub async fn list_providers(pool: &Db, page: Option<u32>, page_size: Option<u32>
         "base_url": r.get::<String,_>("base_url"),
         "display_name": r.try_get::<Option<String>,_>("display_name").unwrap_or(None),
         "max_concurrency": r.try_get::<Option<i64>,_>("max_concurrency").unwrap_or(None),
+        "last_test_ok": r.try_get::<Option<i64>,_>("last_test_ok").unwrap_or(None),
+        "last_test_at": r.try_get::<Option<String>,_>("last_test_at").unwrap_or(None),
         "model_count": r.get::<i64,_>("model_count"),
     })).collect(), total as u64))
+}
+
+/// 记录供应商最近一次连通性校验结果(健康徽标用)。
+/// 返回是否命中了已存在的供应商(false = 供应商不存在,调用方可据此返回 404)。
+pub async fn set_provider_test_result(pool: &Db, name: &str, ok: bool) -> anyhow::Result<bool> {
+    let res = q!("UPDATE providers SET last_test_ok = ?, last_test_at = ? WHERE name = ?")
+        .bind(if ok { 1i64 } else { 0i64 })
+        .bind(format!("@{}", now_secs()))
+        .bind(name)
+        .execute(pool).await?;
+    Ok(res.rows_affected() > 0)
 }
 
 /// 级联删除 provider 及其所有模型和关联路由。

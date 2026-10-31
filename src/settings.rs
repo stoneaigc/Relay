@@ -294,14 +294,68 @@ pub fn has_embedding_key(kv: &HashMap<String, String>) -> bool {
 pub const LOG_PREFIX: &str = "logging.";
 pub const K_LOG_PREVIEW: &str = "logging.body_preview_max_bytes";
 pub const K_LOG_RETENTION: &str = "logging.retention_days";
+/// 请求链路日志存储后端:"sqlite" | "elasticsearch"。启动时读取;热改需重启生效。
+pub const K_LOG_STORE: &str = "logging.store";
+pub const K_LOG_ES_URL: &str = "logging.elasticsearch_url";
+pub const K_LOG_ES_INDEX_PREFIX: &str = "logging.elasticsearch_index_prefix";
+pub const K_LOG_ES_USERNAME: &str = "logging.elasticsearch_username";
+/// ES Basic 认证密码(AES-256-GCM 加密存)。
+pub const K_LOG_ES_PASSWORD_ENC: &str = "logging.elasticsearch_password_enc";
 
-/// settings 表里门户相关 key 的前缀。
-pub const PORTAL_PREFIX: &str = "portal.";
-pub const K_PORTAL_REWARDS_ENABLED: &str = "portal.rewards_enabled";
+/// settings 表里全局默认限额相关 key(用户未显式配置、用户组也未配置时生效)。
+pub const DEFAULTS_PREFIX: &str = "defaults.";
+pub const K_DEF_CONCURRENCY: &str = "defaults.concurrency_limit";
+pub const K_DEF_RPM: &str = "defaults.rpm_limit";
+pub const K_DEF_TPM: &str = "defaults.tpm_limit";
+
+/// settings 表里计费显示相关 key(仅影响前端展示单位,不影响 cost_usd 落库口径)。
+pub const BILLING_PREFIX: &str = "billing.";
+pub const K_BILLING_CURRENCY: &str = "billing.currency";
+pub const K_BILLING_CNY_RATE: &str = "billing.cny_rate";
+
+/// 把 DB 里的 defaults.* 覆盖到内存 Config.defaults(DB 优先于配置文件)。
+pub fn apply_defaults_settings(cfg: &mut Config, kv: &HashMap<String, String>) {
+    let mut d = cfg.defaults.clone();
+
+    if let Some(v) = kv.get(K_DEF_CONCURRENCY) {
+        if let Ok(n) = v.parse::<u32>() {
+            d.concurrency_limit = n;
+        }
+    }
+    if let Some(v) = kv.get(K_DEF_RPM) {
+        if let Ok(n) = v.parse::<u32>() {
+            d.rpm_limit = n;
+        }
+    }
+    if let Some(v) = kv.get(K_DEF_TPM) {
+        if let Ok(n) = v.parse::<u32>() {
+            d.tpm_limit = n;
+        }
+    }
+    cfg.defaults = d;
+}
+
+/// 把 DB 里的 billing.* 覆盖到内存 Config.defaults(DB 优先于配置文件)。
+pub fn apply_billing_settings(cfg: &mut Config, kv: &HashMap<String, String>) {
+    if let Some(v) = kv.get(K_BILLING_CURRENCY) {
+        let v = v.trim().to_lowercase();
+        if v == "usd" || v == "cny" {
+            cfg.defaults.currency = v;
+        }
+    }
+    if let Some(v) = kv.get(K_BILLING_CNY_RATE) {
+        if let Ok(f) = v.parse::<f64>() {
+            if f > 0.0 {
+                cfg.defaults.cny_rate = f;
+            }
+        }
+    }
+}
 
 /// 把 DB 里的 logging.* 覆盖到内存 Config.logging(DB 优先于配置文件)。
 /// 解析失败时静默保持原值,与 fallback.* 行为一致。
-pub fn apply_logging_settings(cfg: &mut Config, kv: &HashMap<String, String>) {
+/// ES 密码为密文列,在此解密;解密失败按未配置处理(不阻断启动)。
+pub fn apply_logging_settings(cfg: &mut Config, kv: &HashMap<String, String>, secret: &str) {
     let mut lc = cfg.logging.clone();
 
     if let Some(v) = kv.get(K_LOG_PREVIEW) {
@@ -314,5 +368,38 @@ pub fn apply_logging_settings(cfg: &mut Config, kv: &HashMap<String, String>) {
             lc.retention_days = n;
         }
     }
+    if let Some(v) = kv.get(K_LOG_STORE) {
+        let v = v.trim().to_lowercase();
+        if v == "sqlite" || v == "elasticsearch" {
+            lc.store = v;
+        }
+    }
+    if let Some(v) = kv.get(K_LOG_ES_URL) {
+        lc.elasticsearch_url = v.trim().to_string();
+    }
+    if let Some(v) = kv.get(K_LOG_ES_INDEX_PREFIX) {
+        lc.elasticsearch_index_prefix = v.trim().to_string();
+    }
+    if let Some(v) = kv.get(K_LOG_ES_USERNAME) {
+        lc.elasticsearch_username = v.trim().to_string();
+    }
+    if let Some(v) = kv.get(K_LOG_ES_PASSWORD_ENC) {
+        match decrypt(secret, v) {
+            Ok(pw) => lc.elasticsearch_password = pw,
+            Err(e) => {
+                tracing::warn!("解密 logging.elasticsearch_password_enc 失败,按未配置处理: {e}");
+                lc.elasticsearch_password = String::new();
+            }
+        }
+    }
     cfg.logging = lc;
 }
+
+/// 供管理后台 GET 时判断「是否已设置 ES 密码」。
+pub fn has_logging_es_password(kv: &HashMap<String, String>) -> bool {
+    kv.get(K_LOG_ES_PASSWORD_ENC).map(|s| !s.is_empty()).unwrap_or(false)
+}
+
+/// settings 表里门户相关 key 的前缀。
+pub const PORTAL_PREFIX: &str = "portal.";
+pub const K_PORTAL_REWARDS_ENABLED: &str = "portal.rewards_enabled";

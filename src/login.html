@@ -460,6 +460,24 @@ $("f-reset").addEventListener("submit", async (ev) => {
     $("s-err").textContent = e.message || "重置失败";
   }
 });
+
+// ---- 免登录回流:已持有有效令牌时(?back=admin / ?back=portal)直接进入对应工作台 ----
+// 门户「返回管理端」等切换入口带上 back 参数;探测失败(过期/无效)则清除该令牌留在登录页。
+// 无 back 参数的正常访问不受影响:退出登录后手动打开 /login 不会被自动拉回。
+(async () => {
+  const back = new URLSearchParams(location.search).get("back");
+  if (back !== "admin" && back !== "portal") return;
+  history.replaceState(null, "", location.pathname); // 清掉参数,防刷新重复触发
+  const key = back === "admin" ? "relay_admin_token" : "relay_portal_token";
+  const t = localStorage.getItem(key);
+  if (!t) return;
+  const probe = back === "admin" ? "admin/api/overview" : "portal/api/me";
+  try {
+    const res = await fetch(probe, { headers: { Authorization: "Bearer " + t } });
+    if (res.ok) { location.replace(back === "admin" ? "admin/" : "portal/"); return; }
+    localStorage.removeItem(key);
+  } catch (_) { /* 网络异常:留在登录页,不误清令牌 */ }
+})();
 </script>
 </body>
 </html>

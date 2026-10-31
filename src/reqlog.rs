@@ -53,6 +53,9 @@ pub struct RequestLog {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub charged_tokens: i64,
+    /// 流式:上游首块到达时刻(相对请求起点,ms);非流式/旧数据为 None。生成耗时 = latency_ms - first_byte_ms。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_byte_ms: Option<u32>,
     /// 落库时间(unix 秒)。
     pub ts: i64,
     /// 请求体预览(截断到 logging.body_preview_max_bytes;跟随存储后端:SQLite/PG 落 req_body 列,ES 落文档字段)。
@@ -77,13 +80,17 @@ pub trait RequestLogStore: Send + Sync {
         log: &RequestLog,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>>;
 
-    /// 按关键字/失败状态/时间范围倒序查询。
+    /// 按关键字/失败状态/时间范围/用户/模型倒序查询。
     /// - `q`:匹配 request_id 或 requested_model;
+    /// - `user`:按 user_id 精确过滤(空 = 不过滤);
+    /// - `model`:按 requested_model 精确过滤(空 = 不过滤);
     /// - `failed`:Some(true)=只看失败,Some(false)=只看成功,None=不过滤;
     /// - `hours`:只看最近 N 小时,None=不过滤。
     fn recent(
         &self,
         q: &str,
+        user: &str,
+        model: &str,
         failed: Option<bool>,
         hours: Option<u64>,
         limit: u32,
@@ -93,6 +100,8 @@ pub trait RequestLogStore: Send + Sync {
     fn count(
         &self,
         q: &str,
+        user: &str,
+        model: &str,
         failed: Option<bool>,
         hours: Option<u64>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<i64>> + Send + '_>>;
@@ -150,22 +159,32 @@ impl SqliteRequestLogStore {
 const INSERT_SQL: &str = "INSERT INTO request_logs
   (request_id, user_id, path, requested_model, stream, candidates, attempts,
    final_kind, final_upstream_model, final_status, latency_ms,
-   input_tokens, output_tokens, charged_tokens, created_at, req_body, resp_body)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+   input_tokens, output_tokens, charged_tokens, created_at, req_body, resp_body, first_byte_ms)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
 /// 分页计数封顶:COUNT 在子查询 LIMIT 处截断,超大表下避免 O(全表) 扫描。
 const COUNT_CAP: i64 = 20000;
 
-/// 根据筛选条件拼接动态 WHERE(q 关键字 / failed 状态 / hours 时间窗)。
-fn sqlite_where(q: &str, failed: Option<bool>, hours: Option<u64>) -> (String, Option<String>) {
+/// 根据筛选条件拼接动态 WHERE(q 关键字 / user 用户 / model 模型 / failed 状态 / hours 时间窗)。
+fn sqlite_where(q: &str, user: &str, model: &str, failed: Option<bool>, hours: Option<u64>) -> (String, Option<String>, Option<String>, Option<String>) {
     let qt = q.trim();
     let has_q = !qt.is_empty();
+    let ut = user.trim();
+    let has_user = !ut.is_empty();
+    let mt = model.trim();
+    let has_model = !mt.is_empty();
     let cutoff = hours
         .map(|h| format!("@{}", now_secs().saturating_sub(h as i64 * 3600)));
 
     let mut conds: Vec<&str> = Vec::new();
     if has_q {
         conds.push("(request_id LIKE ? OR requested_model LIKE ?)");
+    }
+    if has_user {
+        conds.push("user_id = ?");
+    }
+    if has_model {
+        conds.push("requested_model = ?");
     }
     match failed {
         Some(true) => conds.push("final_status != 200"),
@@ -181,7 +200,7 @@ fn sqlite_where(q: &str, failed: Option<bool>, hours: Option<u64>) -> (String, O
     } else {
         format!(" WHERE {}", conds.join(" AND "))
     };
-    (where_sql, cutoff)
+    (where_sql, if has_user { Some(ut.to_string()) } else { None }, if has_model { Some(mt.to_string()) } else { None }, cutoff)
 }
 
 impl RequestLogStore for SqliteRequestLogStore {
@@ -212,6 +231,7 @@ impl RequestLogStore for SqliteRequestLogStore {
         let input_tokens = log.input_tokens;
         let output_tokens = log.output_tokens;
         let charged_tokens = log.charged_tokens;
+        let first_byte_ms = log.first_byte_ms;
         let db = self.db.clone();
         Box::pin(async move {
             sqlx::query(&pq(INSERT_SQL))
@@ -232,6 +252,7 @@ impl RequestLogStore for SqliteRequestLogStore {
                 .bind(&created_at)
                 .bind(&req_body)
                 .bind(&resp_body)
+                .bind(first_byte_ms.map(|v| v as i64))
                 .execute(&db)
                 .await
                 .map(|_| ())
@@ -285,6 +306,7 @@ impl RequestLogStore for SqliteRequestLogStore {
                     .bind(format!("@{}", log.ts))
                     .bind(&log.req_body)
                     .bind(&log.resp_body)
+                    .bind(log.first_byte_ms.map(|v| v as i64))
                     .execute(&mut *tx)
                     .await
                 {
@@ -301,12 +323,14 @@ impl RequestLogStore for SqliteRequestLogStore {
     fn recent(
         &self,
         q: &str,
+        user: &str,
+        model: &str,
         failed: Option<bool>,
         hours: Option<u64>,
         limit: u32,
         offset: u32,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<RequestLog>>> + Send + '_>> {
-        let (where_sql, cutoff) = sqlite_where(q, failed, hours);
+        let (where_sql, userf, modelf, cutoff) = sqlite_where(q, user, model, failed, hours);
         let limit = limit.clamp(1, 200);
         let offset = offset as i64;
         let db = self.db.clone();
@@ -316,7 +340,7 @@ impl RequestLogStore for SqliteRequestLogStore {
             "SELECT request_id, user_id, path, requested_model, stream, candidates, attempts,
                     final_kind, final_upstream_model, final_status, latency_ms,
                     input_tokens, output_tokens, charged_tokens, created_at,
-                    req_body, resp_body
+                    req_body, resp_body, first_byte_ms
              FROM request_logs{where_sql}
              ORDER BY id DESC LIMIT ? OFFSET ?"
         );
@@ -325,6 +349,12 @@ impl RequestLogStore for SqliteRequestLogStore {
             let mut query = sqlx::query(&sql);
             if has_q {
                 query = query.bind(&pat).bind(&pat);
+            }
+            if let Some(u) = &userf {
+                query = query.bind(u);
+            }
+            if let Some(m) = &modelf {
+                query = query.bind(m);
             }
             if let Some(c) = &cutoff {
                 query = query.bind(c);
@@ -360,6 +390,7 @@ impl RequestLogStore for SqliteRequestLogStore {
                     ts: parse_ts(&r.try_get::<String, _>("created_at").unwrap_or_default()),
                     req_body: r.try_get("req_body").ok(),
                     resp_body: r.try_get("resp_body").ok(),
+                    first_byte_ms: r.try_get::<i64, _>("first_byte_ms").ok().map(|v| v as u32),
                 });
             }
             Ok(out)
@@ -369,10 +400,12 @@ impl RequestLogStore for SqliteRequestLogStore {
     fn count(
         &self,
         q: &str,
+        user: &str,
+        model: &str,
         failed: Option<bool>,
         hours: Option<u64>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<i64>> + Send + '_>> {
-        let (where_sql, cutoff) = sqlite_where(q, failed, hours);
+        let (where_sql, userf, modelf, cutoff) = sqlite_where(q, user, model, failed, hours);
         let db = self.db.clone();
         let has_q = !q.trim().is_empty();
         let pat = format!("%{}%", q.trim());
@@ -384,6 +417,12 @@ impl RequestLogStore for SqliteRequestLogStore {
             let mut query = sqlx::query(&sql);
             if has_q {
                 query = query.bind(&pat).bind(&pat);
+            }
+            if let Some(u) = &userf {
+                query = query.bind(u);
+            }
+            if let Some(m) = &modelf {
+                query = query.bind(m);
             }
             if let Some(c) = &cutoff {
                 query = query.bind(c);
@@ -499,8 +538,8 @@ fn es_timestamp(ts: i64) -> String {
         .unwrap_or_else(|| ts.to_string())
 }
 
-/// 构造 ES query 子句(bool 组合):关键字 / 失败筛选 / 时间窗。
-fn es_query(q: &str, failed: Option<bool>, hours: Option<u64>) -> serde_json::Value {
+/// 构造 ES query 子句(bool 组合):关键字 / 用户 / 模型 / 失败筛选 / 时间窗。
+fn es_query(q: &str, user: &str, model: &str, failed: Option<bool>, hours: Option<u64>) -> serde_json::Value {
     let mut must: Vec<serde_json::Value> = Vec::new();
     let mut filter: Vec<serde_json::Value> = Vec::new();
     let mut must_not: Vec<serde_json::Value> = Vec::new();
@@ -516,6 +555,14 @@ fn es_query(q: &str, failed: Option<bool>, hours: Option<u64>) -> serde_json::Va
                 "minimum_should_match": 1
             }
         }));
+    }
+    let ut = user.trim();
+    if !ut.is_empty() {
+        filter.push(serde_json::json!({ "term": { "user_id.keyword": ut } }));
+    }
+    let mt = model.trim();
+    if !mt.is_empty() {
+        filter.push(serde_json::json!({ "term": { "requested_model.keyword": mt } }));
     }
     match failed {
         Some(true) => must_not.push(serde_json::json!({ "term": { "final_status": 200 } })),
@@ -633,6 +680,8 @@ impl RequestLogStore for EsRequestLogStore {
     fn recent(
         &self,
         q: &str,
+        user: &str,
+        model: &str,
         failed: Option<bool>,
         hours: Option<u64>,
         limit: u32,
@@ -644,7 +693,7 @@ impl RequestLogStore for EsRequestLogStore {
             "from": offset,
             "size": limit,
             "sort": [{ "ts": { "order": "desc", "unmapped_type": "long" } }],
-            "query": es_query(q, failed, hours),
+            "query": es_query(q, user, model, failed, hours),
         });
         let authed = self.authed(self.client.post(&url).json(&body));
         Box::pin(async move {
@@ -676,11 +725,13 @@ impl RequestLogStore for EsRequestLogStore {
     fn count(
         &self,
         q: &str,
+        user: &str,
+        model: &str,
         failed: Option<bool>,
         hours: Option<u64>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<i64>> + Send + '_>> {
         let url = format!("{}/{}-*/_count", self.base_url, self.index_prefix);
-        let body = serde_json::json!({ "query": es_query(q, failed, hours) });
+        let body = serde_json::json!({ "query": es_query(q, user, model, failed, hours) });
         let authed = self.authed(self.client.post(&url).json(&body));
         Box::pin(async move {
             let resp = authed
@@ -827,6 +878,7 @@ mod tests {
             input_tokens: 12,
             output_tokens: 8,
             charged_tokens: 20,
+            first_byte_ms: None,
             ts: 1726000000,
             req_body: Some("{\"model\":\"model-a\"}".into()),
             resp_body: None,
@@ -874,10 +926,10 @@ mod tests {
 
     #[test]
     fn es_query_filters() {
-        let q = es_query("", None, None);
+        let q = es_query("", "", "", None, None);
         assert_eq!(q["bool"].as_object().map(|m| m.len()), Some(0));
 
-        let q = es_query("req_1", Some(true), Some(24));
+        let q = es_query("req_1", "", "", Some(true), Some(24));
         let must_not = q["bool"]["must_not"].as_array().unwrap();
         assert_eq!(must_not[0]["term"]["final_status"], 200);
         assert!(q["bool"]["filter"].as_array().unwrap()[0]["range"]["ts"]["gte"].is_i64());
@@ -887,7 +939,7 @@ mod tests {
             .unwrap()
             .contains("req_1"));
 
-        let q = es_query("m1", Some(false), None);
+        let q = es_query("m1", "", "", Some(false), None);
         assert_eq!(q["bool"]["filter"][0]["term"]["final_status"], 200);
         assert!(q["bool"]["must_not"].is_null());
     }
@@ -927,6 +979,7 @@ mod tests {
             input_tokens: 1,
             output_tokens: 2,
             charged_tokens: 3,
+            first_byte_ms: None,
             ts: 1726000000,
             req_body: rb.map(|s| s.into()),
             resp_body: sb.map(|s| s.into()),
@@ -940,7 +993,7 @@ mod tests {
             .write(&body_log("req_w1", Some("req-payload"), Some("resp-payload")))
             .await
             .unwrap();
-        let got = store.recent("", None, None, 10, 0).await.unwrap();
+        let got = store.recent("", "", "", None, None, 10, 0).await.unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].request_id, "req_w1");
         assert_eq!(got[0].req_body.as_deref(), Some("req-payload"));
@@ -958,7 +1011,7 @@ mod tests {
             .await
             .unwrap();
         // recent 按 id DESC:后写入的 b2 在前。
-        let got = store.recent("", None, None, 10, 0).await.unwrap();
+        let got = store.recent("", "", "", None, None, 10, 0).await.unwrap();
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].request_id, "req_b2");
         assert_eq!(got[0].req_body, None);
@@ -978,7 +1031,7 @@ mod tests {
         recent.ts = now - 29 * 86400;
         store.write_batch(vec![old, recent]).await.unwrap();
         assert_eq!(store.prune(30).await.unwrap(), 1);
-        let got = store.recent("", None, None, 10, 0).await.unwrap();
+        let got = store.recent("", "", "", None, None, 10, 0).await.unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].request_id, "req_recent");
     }

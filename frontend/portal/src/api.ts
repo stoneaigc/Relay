@@ -76,16 +76,16 @@ export interface ModelCard {
   output_price: number | null;
 }
 
-/** 我的套餐与实时用量(limit 为 null = 不限)。 */
+/** 我的套餐与实时用量(limit 为 null = 不限;source = 限额来源:用户/用户组/全局默认)。 */
 export interface QuotaInfo {
   plan: { id: number; name: string } | null;
   balance: number;
-  concurrency: { limit: number | null; used: number };
-  rpm: { limit: number | null; used: number };
-  tpm: { limit: number | null; used: number };
+  concurrency: { limit: number | null; used: number; source?: string };
+  rpm: { limit: number | null; used: number; source?: string };
+  tpm: { limit: number | null; used: number; source?: string };
   budget: {
-    daily: { limit: number | null; used: number };
-    monthly: { limit: number | null; used: number };
+    daily: { limit: number | null; used: number; source?: string };
+    monthly: { limit: number | null; used: number; source?: string };
   };
 }
 
@@ -114,8 +114,18 @@ export const api = {
   rewards: (): Promise<RewardInfo> => req("/portal/api/rewards"),
   claimReward: (task_id: number, evidence?: string) =>
     req("/portal/api/rewards", { method: "POST", body: JSON.stringify({ task_id, evidence }) }),
-  config: (): Promise<{ rewards_enabled: boolean }> => req("/portal/api/config"),
+  config: (): Promise<{ rewards_enabled: boolean; currency?: "usd" | "cny"; cny_rate?: number }> => req("/portal/api/config"),
 };
+
+/** 费用展示格式化:按全局币种设置把 cost_usd 换算为展示值(cny 时乘汇率)。 */
+export function makeCostFormatter(currency: "usd" | "cny" | undefined, cnyRate: number | undefined) {
+  const rate = currency === "cny" && cnyRate && cnyRate > 0 ? cnyRate : 1;
+  const symbol = currency === "cny" ? "¥" : "$";
+  return (usd: number | null | undefined): string => {
+    if (usd == null) return "—";
+    return `${symbol}${(usd * rate).toFixed(4)}`;
+  };
+}
 
 export type EvidenceType = "screenshot" | "link" | "text" | "none";
 

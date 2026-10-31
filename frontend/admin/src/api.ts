@@ -115,6 +115,10 @@ export interface ProviderRow {
   display_name?: string | null;
   /** null = 继承全局上游并发;0 = 不限 */
   max_concurrency: number | null;
+  /** 最近一次批量校验结果:null=从未校验;1=全部通过(健康);0=存在失败 */
+  last_test_ok?: number | null;
+  /** 最近一次校验时间("@unix秒" 或 ISO 字符串) */
+  last_test_at?: string | null;
   model_count: number;
 }
 
@@ -338,8 +342,9 @@ export const api = {
   deleteModel: (id: number) => req(`/admin/api/models/${id}`, { method: "DELETE" }),
   deleteModelsBatch: (ids: number[]): Promise<{ ok: boolean; deleted: number }> =>
     req("/admin/api/models/batch-delete", { method: "POST", body: JSON.stringify({ ids }) }),
+  // 30s 客户端兜底超时:后端单模型测试 15s 封顶,若连接层挂起(网关冷启动等)不让整批校验被无限阻塞。
   testModel: (id: number): Promise<{ ok: boolean; latency_ms?: number; error?: string; note?: string; probe_kind?: "chat" | "embeddings" | "connectivity"; forward_supported?: boolean }> =>
-    req(`/admin/api/models/${id}/test`, { method: "POST" }),
+    req(`/admin/api/models/${id}/test`, { method: "POST", signal: AbortSignal.timeout(30_000) }),
   fetchModelList: (body: { kind: string; base_url: string; api_key?: string; provider?: string }): Promise<{ ok: boolean; models?: string[]; error?: string }> =>
     req("/admin/api/models/fetch-list", { method: "POST", body: JSON.stringify(body) }),
   addModelsBatch: (body: { kind: string; base_url: string; api_key?: string; display_name?: string; headers?: string; max_concurrency?: number | null; models: { upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null }[] }): Promise<{ ok: boolean; provider?: string; provider_created?: boolean; added?: number; skipped?: number }> =>
@@ -350,6 +355,9 @@ export const api = {
     req("/admin/api/providers/exists", { method: "POST", body: JSON.stringify({ base_url, api_key }) }),
   providerHealth: (rangeSecs = 3600): Promise<ProviderHealthResp> =>
     req(`/admin/api/providers/health?range_secs=${rangeSecs}`),
+  /** 持久化供应商最近一次批量校验结果(健康徽标在无请求时展示用) */
+  providerTestResult: (name: string, ok: boolean): Promise<{ ok: boolean }> =>
+    req(`/admin/api/providers/${encodeURIComponent(name)}/test-result`, { method: "POST", body: JSON.stringify({ ok }) }),
 
   groups: (): Promise<{ data: GroupRow[] }> => req("/admin/api/groups"),
   addGroup: (name: string, maxConcurrency = 0): Promise<{ ok: boolean; id: number }> =>
@@ -453,10 +461,28 @@ export const api = {
   ): Promise<{ ok: boolean; dim?: number; error?: string }> =>
     req("/admin/api/settings/embedding/test", { method: "POST", body: JSON.stringify(body) }),
 
-  // ---- 日志设置 ----
+  // ---- 日志设置(含请求链路存储后端:sqlite | elasticsearch,切换后需重启生效) ----
   loggingSettings: (): Promise<LoggingSettingsResp> => req("/admin/api/settings/logging"),
   saveLoggingSettings: (body: LoggingSettingsBody) =>
     req("/admin/api/settings/logging", { method: "POST", body: JSON.stringify(body) }),
+  testEsConnection: (body: {
+    elasticsearch_url?: string;
+    elasticsearch_index_prefix?: string;
+    elasticsearch_username?: string;
+    elasticsearch_password?: string;
+  }): Promise<{ ok: boolean; latency_ms?: number; cluster_name?: string; health?: string; error?: string }> =>
+    req("/admin/api/settings/logging/test-es", { method: "POST", body: JSON.stringify(body) }),
+
+  // ---- 全局默认限额(用户/用户组未显式配置时生效) ----
+  defaultsSettings: (): Promise<{ concurrency_limit: number; rpm_limit: number; tpm_limit: number }> =>
+    req("/admin/api/settings/defaults"),
+  saveDefaultsSettings: (body: { concurrency_limit: number; rpm_limit: number; tpm_limit: number }) =>
+    req("/admin/api/settings/defaults", { method: "POST", body: JSON.stringify(body) }),
+
+  // ---- 计费显示(币种仅影响前端展示单位,计价口径仍为 cost_usd) ----
+  billingSettings: (): Promise<{ currency: "usd" | "cny"; cny_rate: number }> => req("/admin/api/settings/billing"),
+  saveBillingSettings: (body: { currency: "usd" | "cny"; cny_rate: number }) =>
+    req("/admin/api/settings/billing", { method: "POST", body: JSON.stringify(body) }),
 
   // ---- 门户设置 ----
   portalSettings: (): Promise<{ rewards_enabled: boolean; phone_register_enabled: boolean; key_approval_required?: boolean }> => req("/admin/api/settings/portal"),
@@ -496,13 +522,15 @@ export const api = {
   },
 
   // ---- 请求链路追踪 ----
-  requestLogs: (q?: string, page?: number, pageSize?: number, failed?: boolean | null, hours?: number | null): Promise<{ data: RequestLogRow[]; total: number; page: number; page_size: number; total_pages: number }> => {
+  requestLogs: (q?: string, page?: number, pageSize?: number, failed?: boolean | null, hours?: number | null, user?: string | null, model?: string | null): Promise<{ data: RequestLogRow[]; total: number; page: number; page_size: number; total_pages: number }> => {
     const qs = new URLSearchParams();
     if (q) qs.set("q", q);
     if (typeof page === "number") qs.set("page", String(page));
     if (typeof pageSize === "number") qs.set("page_size", String(pageSize));
     if (typeof failed === "boolean") qs.set("failed", String(failed));
     if (typeof hours === "number") qs.set("hours", String(hours));
+    if (user && user.trim()) qs.set("user", user.trim());
+    if (model && model.trim()) qs.set("model", model.trim());
     const s = qs.toString();
     return req(`/admin/api/request-logs${s ? "?" + s : ""}`);
   },
@@ -525,6 +553,16 @@ export interface AuditLogRow {
   ip: string;
   latency_ms: number;
   ts: number;
+}
+
+/** 费用展示格式化:按全局币种设置把 cost_usd 换算为展示值(cny 时乘汇率)。 */
+export function makeCostFormatter(currency: "usd" | "cny" | undefined, cnyRate: number | undefined) {
+  const rate = currency === "cny" && cnyRate && cnyRate > 0 ? cnyRate : 1;
+  const symbol = currency === "cny" ? "¥" : "$";
+  return (usd: number | null | undefined): string => {
+    if (usd == null) return "—";
+    return `${symbol}${(usd * rate).toFixed(4)}`;
+  };
 }
 
 export type EvidenceType = "screenshot" | "link" | "text" | "none";
@@ -683,9 +721,19 @@ export interface LoggingSettingsResp {
   body_preview_max_bytes: number;
   /** 日志保留天数;0=永久保留 */
   retention_days: number;
+  /** 请求链路存储后端:"sqlite" | "elasticsearch"(切换后需重启生效) */
+  store?: string;
+  elasticsearch_url?: string;
+  elasticsearch_index_prefix?: string;
+  elasticsearch_username?: string;
+  /** 是否已配置 ES 密码(不回显明文) */
+  has_password?: boolean;
 }
 
-export interface LoggingSettingsBody extends LoggingSettingsResp {}
+export interface LoggingSettingsBody extends LoggingSettingsResp {
+  /** 明文密码;留空/不传 = 保持已存值,传空串 = 清除 */
+  elasticsearch_password?: string;
+}
 
 export interface EmbeddingSettingsBody {
   enabled: boolean;
@@ -868,6 +916,8 @@ export interface RequestLogRow {
   req_body: string | null;
   /** 响应体预览(同 req_body;可能为 null) */
   resp_body: string | null;
+  /** 流式:上游首块到达时刻(ms);非流式/旧数据为 null。生成耗时 = latency_ms - first_byte_ms */
+  first_byte_ms: number | null;
 }
 
 // ================== 用量分布 ==================

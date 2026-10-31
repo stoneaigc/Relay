@@ -1345,6 +1345,30 @@ pub async fn delete_provider(
     Ok(Json(json!({ "ok": true })))
 }
 
+#[derive(Deserialize)]
+pub struct ProviderTestResultBody {
+    /// 本供应商整批模型校验是否全部通过。
+    pub ok: bool,
+}
+
+/// POST /admin/providers/:name/test-result —— 持久化最近一次批量校验结果,
+/// 供列表「健康」徽标在无请求时展示(校验通过 = 健康)。
+pub async fn save_provider_test_result(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<ProviderTestResultBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let hit = storage::set_provider_test_result(&state.db, &name, body.ok)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if !hit {
+        return Err(ApiError::NotFound(format!("供应商 {name} 不存在")));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
 /// 并发字段三态:缺失=不改动 / null=继承全局 / 非负整数=设置上限(0=不限)。
 fn deser_opt_concurrency<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
 where
@@ -2745,10 +2769,149 @@ pub async fn get_logging_settings(
         .get(crate::settings::K_LOG_RETENTION)
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(lc.retention_days);
+    let store = kv
+        .get(crate::settings::K_LOG_STORE)
+        .cloned()
+        .unwrap_or_else(|| lc.store.clone());
+    let elasticsearch_url = kv
+        .get(crate::settings::K_LOG_ES_URL)
+        .cloned()
+        .unwrap_or_else(|| lc.elasticsearch_url.clone());
+    let elasticsearch_index_prefix = kv
+        .get(crate::settings::K_LOG_ES_INDEX_PREFIX)
+        .cloned()
+        .unwrap_or_else(|| lc.elasticsearch_index_prefix.clone());
+    let elasticsearch_username = kv
+        .get(crate::settings::K_LOG_ES_USERNAME)
+        .cloned()
+        .unwrap_or_else(|| lc.elasticsearch_username.clone());
+    let has_password = crate::settings::has_logging_es_password(&kv)
+        || !lc.elasticsearch_password.is_empty();
     Ok(Json(json!({
         "body_preview_max_bytes": body_preview_max_bytes,
         "retention_days": retention_days,
+        "store": store,
+        "elasticsearch_url": elasticsearch_url,
+        "elasticsearch_index_prefix": elasticsearch_index_prefix,
+        "elasticsearch_username": elasticsearch_username,
+        "has_password": has_password,
     })))
+}
+
+#[derive(Deserialize)]
+pub struct TestEsBody {
+    #[serde(default)]
+    pub elasticsearch_url: Option<String>,
+    #[serde(default)]
+    pub elasticsearch_index_prefix: Option<String>,
+    #[serde(default)]
+    pub elasticsearch_username: Option<String>,
+    /// 明文密码;缺省 = 使用已存密码。
+    #[serde(default)]
+    pub elasticsearch_password: Option<String>,
+}
+
+/// POST /admin/settings/logging/test-es -- 测试 Elasticsearch 连通性。
+/// 缺省字段回退「DB 已存 > 内存 Config」的当前生效配置;密码仅用于本次请求,不回传。
+pub async fn test_es_connection(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<TestEsBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let kv = storage::load_settings(&state.db, crate::settings::LOG_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let cfg = state.config();
+    let lc = &cfg.logging;
+    let pick = |body_v: &Option<String>, key: &str, fallback: &str| -> String {
+        body_v
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| kv.get(key).cloned())
+            .unwrap_or_else(|| fallback.to_string())
+    };
+    let url = pick(&body.elasticsearch_url, crate::settings::K_LOG_ES_URL, &lc.elasticsearch_url);
+    if url.trim().is_empty() {
+        return Err(ApiError::BadRequest("未填写 Elasticsearch 连接地址".into()));
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(ApiError::BadRequest(
+            "Elasticsearch 地址需以 http:// 或 https:// 开头".into(),
+        ));
+    }
+    let prefix = pick(
+        &body.elasticsearch_index_prefix,
+        crate::settings::K_LOG_ES_INDEX_PREFIX,
+        &lc.elasticsearch_index_prefix,
+    );
+    let prefix = if prefix.trim().is_empty() {
+        "relay-logs".to_string()
+    } else {
+        prefix
+    };
+    let username = pick(
+        &body.elasticsearch_username,
+        crate::settings::K_LOG_ES_USERNAME,
+        &lc.elasticsearch_username,
+    );
+    let password = match body.elasticsearch_password.as_deref() {
+        Some(pw) if !pw.is_empty() => pw.to_string(),
+        _ => {
+            let secret = cfg.auth.jwt_secret.clone();
+            let stored = kv
+                .get(crate::settings::K_LOG_ES_PASSWORD_ENC)
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+            if let Some(enc) = stored {
+                crate::settings::decrypt(&secret, enc)
+                    .map_err(|e| ApiError::Internal(format!("读取已存密码失败: {e}")))?
+            } else {
+                lc.elasticsearch_password.clone()
+            }
+        }
+    };
+
+    let started = std::time::Instant::now();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .build()
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut req = client.get(format!("{}/_cluster/health", url.trim_end_matches('/')));
+    if !username.is_empty() {
+        req = req.basic_auth(&username, Some(&password));
+    }
+    let latency_ms = started.elapsed().as_millis() as u64;
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            let latency_ms = started.elapsed().as_millis() as u64;
+            if status.is_success() {
+                let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+                Ok(Json(json!({
+                    "ok": true,
+                    "latency_ms": latency_ms,
+                    "cluster_name": v["cluster_name"].as_str().unwrap_or(""),
+                    "health": v["status"].as_str().unwrap_or(""),
+                    "index_prefix": prefix,
+                })))
+            } else {
+                let short: String = text.chars().take(200).collect();
+                Ok(Json(json!({
+                    "ok": false,
+                    "latency_ms": latency_ms,
+                    "error": format!("HTTP {status}: {short}"),
+                })))
+            }
+        }
+        Err(e) => {
+            let latency_ms = started.elapsed().as_millis() as u64;
+            Ok(Json(json!({ "ok": false, "latency_ms": latency_ms, "error": e.to_string() })))
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -2757,6 +2920,18 @@ pub struct LoggingSettingsBody {
     pub body_preview_max_bytes: usize,
     /// 日志保留天数;0=永久保留。
     pub retention_days: u32,
+    /// 存储后端:"sqlite" | "elasticsearch"(切换后需重启生效)。
+    #[serde(default)]
+    pub store: Option<String>,
+    #[serde(default)]
+    pub elasticsearch_url: Option<String>,
+    #[serde(default)]
+    pub elasticsearch_index_prefix: Option<String>,
+    #[serde(default)]
+    pub elasticsearch_username: Option<String>,
+    /// 明文密码;None=不改,Some("")=清除。
+    #[serde(default)]
+    pub elasticsearch_password: Option<String>,
 }
 
 /// 校验日志配置合理范围。
@@ -2767,10 +2942,23 @@ fn validate_logging(b: &LoggingSettingsBody) -> Result<(), ApiError> {
     if b.retention_days > 365 {
         return Err(ApiError::BadRequest("保留天数需在 0~365 之间(0=永久)".into()));
     }
+    if let Some(s) = &b.store {
+        let s = s.trim();
+        if !s.is_empty() && s != "sqlite" && s != "elasticsearch" {
+            return Err(ApiError::BadRequest("store 仅支持 sqlite | elasticsearch".into()));
+        }
+    }
+    if let Some(u) = &b.elasticsearch_url {
+        let u = u.trim();
+        if !u.is_empty() && !u.starts_with("http://") && !u.starts_with("https://") {
+            return Err(ApiError::BadRequest("Elasticsearch 地址需以 http:// 或 https:// 开头".into()));
+        }
+    }
     Ok(())
 }
 
 /// POST /admin/settings/logging -- 保存日志配置,刷新内存 Config。
+/// 注意:store/ES 连接信息在启动时构建存储后端,保存后需重启服务才切换后端。
 pub async fn save_logging_settings(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -2779,10 +2967,56 @@ pub async fn save_logging_settings(
     admin_guard(&state, &headers)?;
     validate_logging(&body)?;
 
-    let items: Vec<(String, String)> = vec![
+    let mut items: Vec<(String, String)> = vec![
         (crate::settings::K_LOG_PREVIEW.to_string(), body.body_preview_max_bytes.to_string()),
         (crate::settings::K_LOG_RETENTION.to_string(), body.retention_days.to_string()),
     ];
+    if let Some(s) = &body.store {
+        let s = s.trim();
+        if !s.is_empty() {
+            items.push((crate::settings::K_LOG_STORE.to_string(), s.to_lowercase()));
+        }
+    }
+    if let Some(v) = &body.elasticsearch_url {
+        items.push((crate::settings::K_LOG_ES_URL.to_string(), v.trim().to_string()));
+    }
+    if let Some(v) = &body.elasticsearch_index_prefix {
+        items.push((crate::settings::K_LOG_ES_INDEX_PREFIX.to_string(), v.trim().to_string()));
+    }
+    if let Some(v) = &body.elasticsearch_username {
+        items.push((crate::settings::K_LOG_ES_USERNAME.to_string(), v.trim().to_string()));
+    }
+    if let Some(pw) = &body.elasticsearch_password {
+        if pw.is_empty() {
+            items.push((crate::settings::K_LOG_ES_PASSWORD_ENC.to_string(), String::new()));
+        } else {
+            let secret = state.config().auth.jwt_secret.clone();
+            let enc = crate::settings::encrypt(&secret, pw)
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            items.push((crate::settings::K_LOG_ES_PASSWORD_ENC.to_string(), enc));
+        }
+    }
+    // 对抗校验:按「本次提交 + 库中已有」合并出最终生效的 store/url,
+    // store=elasticsearch 而连接地址为空会导致重启后日志后端构建失败,这里提前拦截。
+    let existing = storage::load_settings(&state.db, crate::settings::LOG_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let pick = |key: &str| -> Option<String> {
+        items
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+            .or_else(|| existing.get(key).cloned())
+    };
+    let final_store = pick(crate::settings::K_LOG_STORE)
+        .unwrap_or_else(|| "sqlite".into());
+    let final_url = pick(crate::settings::K_LOG_ES_URL).unwrap_or_default();
+    if final_store == "elasticsearch" && final_url.trim().is_empty() {
+        return Err(ApiError::BadRequest(
+            "切换到 Elasticsearch 需先填写连接地址".into(),
+        ));
+    }
+
     storage::set_settings(&state.db, &items)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -2791,8 +3025,152 @@ pub async fn save_logging_settings(
     let kv = storage::load_settings(&state.db, crate::settings::LOG_PREFIX)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let secret = state.config().auth.jwt_secret.clone();
     let mut new_cfg = (**state.config()).clone();
-    crate::settings::apply_logging_settings(&mut new_cfg, &kv);
+    crate::settings::apply_logging_settings(&mut new_cfg, &kv, &secret);
+    state.config.store(Arc::new(new_cfg));
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---- 系统配置:全局默认限额 ----
+
+/// GET /admin/settings/defaults -- 回显全局默认限额(用户/用户组未配置时生效)。
+pub async fn get_defaults_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let kv = storage::load_settings(&state.db, crate::settings::DEFAULTS_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let d = &state.config().defaults;
+    let concurrency_limit = kv
+        .get(crate::settings::K_DEF_CONCURRENCY)
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(d.concurrency_limit);
+    let rpm_limit = kv
+        .get(crate::settings::K_DEF_RPM)
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(d.rpm_limit);
+    let tpm_limit = kv
+        .get(crate::settings::K_DEF_TPM)
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(d.tpm_limit);
+    Ok(Json(json!({
+        "concurrency_limit": concurrency_limit,
+        "rpm_limit": rpm_limit,
+        "tpm_limit": tpm_limit,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct DefaultsSettingsBody {
+    /// 默认并发上限(0 = 不限)。
+    pub concurrency_limit: u32,
+    /// 默认 RPM(0 = 不限)。
+    pub rpm_limit: u32,
+    /// 默认 TPM(0 = 不限)。
+    pub tpm_limit: u32,
+}
+
+/// POST /admin/settings/defaults -- 保存全局默认限额,刷新内存 Config,
+/// 并对所有限额继承全局默认的在线用户即时重算。
+pub async fn save_defaults_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<DefaultsSettingsBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if body.concurrency_limit > 10_000 || body.rpm_limit > 1_000_000 || body.tpm_limit > 100_000_000 {
+        return Err(ApiError::BadRequest("限额数值超出合理范围".into()));
+    }
+
+    let items: Vec<(String, String)> = vec![
+        (crate::settings::K_DEF_CONCURRENCY.to_string(), body.concurrency_limit.to_string()),
+        (crate::settings::K_DEF_RPM.to_string(), body.rpm_limit.to_string()),
+        (crate::settings::K_DEF_TPM.to_string(), body.tpm_limit.to_string()),
+    ];
+    storage::set_settings(&state.db, &items)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    // 重建内存 Config:从 DB 重读 defaults.* 覆盖当前快照,store() 刷新。
+    let kv = storage::load_settings(&state.db, crate::settings::DEFAULTS_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut new_cfg = (**state.config()).clone();
+    crate::settings::apply_defaults_settings(&mut new_cfg, &kv);
+    state.config.store(Arc::new(new_cfg));
+
+    // 全量重算在线用户限额:显式值/用户组值优先,只有落到全局默认的才被本次修改影响。
+    let uids: Vec<Uuid> = state.users.iter().map(|e| *e.key()).collect();
+    for uid in uids {
+        let gid = state.user(&uid).map(|u| u.user_group()).unwrap_or(0);
+        let group_id = if gid == 0 { None } else { Some(gid) };
+        let _ = recompute_members(&state, vec![uid], group_id).await;
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---- 系统配置:计费显示 ----
+
+/// GET /admin/settings/billing -- 回显费用显示币种配置。
+pub async fn get_billing_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let kv = storage::load_settings(&state.db, crate::settings::BILLING_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let d = &state.config().defaults;
+    let currency = kv
+        .get(crate::settings::K_BILLING_CURRENCY)
+        .cloned()
+        .unwrap_or_else(|| d.currency.clone());
+    let cny_rate = kv
+        .get(crate::settings::K_BILLING_CNY_RATE)
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(d.cny_rate);
+    Ok(Json(json!({ "currency": currency, "cny_rate": cny_rate })))
+}
+
+#[derive(Deserialize)]
+pub struct BillingSettingsBody {
+    /// "usd" | "cny"。
+    pub currency: String,
+    /// 美元→人民币展示汇率(cny 时生效,> 0)。
+    pub cny_rate: f64,
+}
+
+/// POST /admin/settings/billing -- 保存币种配置,刷新内存 Config。
+pub async fn save_billing_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<BillingSettingsBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let currency = body.currency.trim().to_lowercase();
+    if currency != "usd" && currency != "cny" {
+        return Err(ApiError::BadRequest("currency 仅支持 usd | cny".into()));
+    }
+    if !(body.cny_rate > 0.0 && body.cny_rate < 1000.0) {
+        return Err(ApiError::BadRequest("汇率需在 0~1000 之间".into()));
+    }
+
+    let items: Vec<(String, String)> = vec![
+        (crate::settings::K_BILLING_CURRENCY.to_string(), currency),
+        (crate::settings::K_BILLING_CNY_RATE.to_string(), body.cny_rate.to_string()),
+    ];
+    storage::set_settings(&state.db, &items)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let kv = storage::load_settings(&state.db, crate::settings::BILLING_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut new_cfg = (**state.config()).clone();
+    crate::settings::apply_billing_settings(&mut new_cfg, &kv);
     state.config.store(Arc::new(new_cfg));
     Ok(Json(json!({ "ok": true })))
 }
@@ -3672,6 +4050,12 @@ pub struct RequestLogsQuery {
     /// 检索关键字(request_id / 模型名)。空 = 最近全部。
     #[serde(default)]
     pub q: Option<String>,
+    /// 按用户 ID 精确过滤。空 = 全部用户。
+    #[serde(default)]
+    pub user: Option<String>,
+    /// 按对外模型名精确过滤。空 = 全部模型。
+    #[serde(default)]
+    pub model: Option<String>,
     /// 状态筛选:true=只看失败,false=只看成功,缺省=全部。
     #[serde(default)]
     pub failed: Option<bool>,
@@ -3694,17 +4078,19 @@ pub async fn list_request_logs(
 ) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
     let keyword = q.q.as_deref().unwrap_or("");
+    let user = q.user.as_deref().unwrap_or("");
+    let model = q.model.as_deref().unwrap_or("");
     let page = q.page.unwrap_or(1).max(1);
     let page_size = q.page_size.unwrap_or(50).clamp(1, 200);
     let offset = (page - 1) * page_size;
     let logs = state
         .request_log
-        .recent(keyword, q.failed, q.hours, page_size, offset)
+        .recent(keyword, user, model, q.failed, q.hours, page_size, offset)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let total = state
         .request_log
-        .count(keyword, q.failed, q.hours)
+        .count(keyword, user, model, q.failed, q.hours)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({

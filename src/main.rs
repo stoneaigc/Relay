@@ -284,8 +284,27 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("load settings: {e}"))?;
         if !kv.is_empty() {
-            settings::apply_logging_settings(&mut cfg, &kv);
+            let secret = cfg.auth.jwt_secret.clone();
+            settings::apply_logging_settings(&mut cfg, &kv, &secret);
             tracing::info!("loaded {} logging settings from DB", kv.len());
+        }
+    }
+    {
+        let kv = storage::load_settings(&db, settings::DEFAULTS_PREFIX)
+            .await
+            .map_err(|e| anyhow::anyhow!("load settings: {e}"))?;
+        if !kv.is_empty() {
+            settings::apply_defaults_settings(&mut cfg, &kv);
+            tracing::info!("loaded {} defaults settings from DB", kv.len());
+        }
+    }
+    {
+        let kv = storage::load_settings(&db, settings::BILLING_PREFIX)
+            .await
+            .map_err(|e| anyhow::anyhow!("load settings: {e}"))?;
+        if !kv.is_empty() {
+            settings::apply_billing_settings(&mut cfg, &kv);
+            tracing::info!("loaded {} billing settings from DB", kv.len());
         }
     }
 
@@ -445,6 +464,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/providers/:name/models", get(admin::list_provider_models))
         .route("/providers/:name/models/batch", post(admin::add_models_to_provider_batch))
         .route("/providers/:name", axum::routing::put(admin::update_provider).delete(admin::delete_provider))
+        .route("/providers/:name/test-result", post(admin::save_provider_test_result))
         .route("/groups", get(admin::list_groups).post(admin::add_group))
         .route("/groups/:id", axum::routing::delete(admin::delete_group).patch(admin::rename_group))
         .route("/groups/:id/activate", post(admin::activate_group))
@@ -471,6 +491,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/settings/embedding", get(admin::get_embedding_settings).post(admin::save_embedding_settings))
         .route("/settings/embedding/test", post(admin::test_embedding))
         .route("/settings/logging", get(admin::get_logging_settings).post(admin::save_logging_settings))
+        .route("/settings/logging/test-es", post(admin::test_es_connection))
+        .route("/settings/defaults", get(admin::get_defaults_settings).post(admin::save_defaults_settings))
+        .route("/settings/billing", get(admin::get_billing_settings).post(admin::save_billing_settings))
         .route("/settings/portal", get(admin::get_portal_settings).post(admin::save_portal_settings))
         .route("/settings/sms", get(admin::get_sms_settings).put(admin::save_sms_settings))
         .route("/settings/sms/test", post(admin::test_sms_settings))

@@ -31,8 +31,31 @@ const LOGIN_URL = (() => {
   return (m?.[1] ?? "") + "/login";
 })();
 
+// ---- 全局费用展示币种(设置页可切,启动时拉取一次) ----
+// 仅影响展示单位与换算,计价口径仍是后端落库的 cost_usd。
+let CURRENCY: "usd" | "cny" = "usd";
+let CNY_RATE = 7.2;
+/** 更新全局币种偏好(登录后与设置页保存后调用)。 */
+export function setCurrencyPrefs(currency: "usd" | "cny", cnyRate: number) {
+  CURRENCY = currency;
+  CNY_RATE = cnyRate > 0 ? cnyRate : 7.2;
+}
+/** 按全局币种格式化费用:dynamic=true 时用高精度小数(小金额场景)。 */
+export function fmtMoney(usd: number | null | undefined, dynamic = false): string {
+  const v = usd ?? 0;
+  const shown = CURRENCY === "cny" ? v * CNY_RATE : v;
+  const sym = CURRENCY === "cny" ? "¥" : "$";
+  if (dynamic) return `${sym}${v !== 0 && shown < 0.01 ? shown.toPrecision(3) : shown < 100 ? shown.toFixed(4) : shown.toFixed(2)}`;
+  return `${sym}${shown >= 1 ? shown.toFixed(2) : shown.toFixed(6)}`;
+}
+
 export default function App() {
   const [authed, setAuthed] = useState(!!getToken());
+  // 登录态下拉取一次币种设置,供各面板的费用格式化使用(失败静默按默认 $)。
+  useEffect(() => {
+    if (!authed) return;
+    api.billingSettings().then((c) => setCurrencyPrefs(c.currency, c.cny_rate)).catch(() => {});
+  }, [authed]);
   // 401 凭证失效统一登出:api 层清除 token 后广播此事件,这里跳回统一登录页。
   useEffect(() => {
     const onExpired = () => setAuthed(false);
@@ -48,7 +71,7 @@ export default function App() {
     <>
       <Toaster position="top-center" richColors />
       <BrowserRouter basename={APP_BASE}>
-        <Console onLogout={() => { clearToken(); setAuthed(false); }} />
+        <Console onLogout={() => { clearToken(); localStorage.removeItem("relay_portal_token"); setAuthed(false); }} />
       </BrowserRouter>
     </>
   );
@@ -68,11 +91,21 @@ function NotFoundPanel() {
   );
 }
 
-// 侧边栏分组:按管理员心智模型归组——日常运营 / 模型与上游 / 监控排查 / 系统;空标题组(概览)置顶不缩进。
+// 侧边栏分组:监控组置顶(接口指标为其首项)——实时监控是管理员最高频入口;其余按运营 / 模型与上游 / 系统归组。
 const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: any }[] }[] = [
   {
+    title: "监控",
+    items: [
+      { path: "/metrics", label: "接口指标", icon: Activity },
+      { path: "/upstreams", label: "上游治理", icon: Zap },
+      { path: "/usage", label: "调用日志", icon: BarChart3 },
+    ],
+  },
+  {
     title: "",
-    items: [{ path: "/overview", label: "概览", icon: LayoutDashboard }],
+    items: [
+      { path: "/overview", label: "概览", icon: LayoutDashboard },
+    ],
   },
   {
     title: "运营",
@@ -89,15 +122,6 @@ const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: a
     items: [
       { path: "/models", label: "上游模型", icon: Boxes },
       { path: "/groups", label: "模型组", icon: Layers },
-    ],
-  },
-  {
-    title: "监控",
-    items: [
-      { path: "/upstreams", label: "上游治理", icon: Zap },
-      { path: "/metrics", label: "接口指标", icon: Activity },
-      { path: "/request-logs", label: "请求链路", icon: GitBranch },
-      { path: "/usage", label: "全局用量", icon: BarChart3 },
     ],
   },
   {
@@ -234,12 +258,11 @@ function Console({ onLogout }: { onLogout: () => void }) {
                 <Route path="/models" element={<ModelsPanel />} />
                 <Route path="/upstreams" element={<UpstreamsPanel />} />
                 <Route path="/metrics" element={<MetricsPanel />} />
-                <Route path="/request-logs" element={<RequestLogPanel />} />
+                <Route path="/request-logs" element={<Navigate to="/usage" replace />} />
                 <Route path="/audit" element={<AuditPanel />} />
                 <Route path="/rewards" element={<RewardsPanel />} />
                 <Route path="/reward-tasks" element={<RewardTasksPanel />} />
-                <Route path="/usage" element={<UsagePanel />} />
-                <Route path="/cache" element={<CachePanel />} />
+                <Route path="/usage" element={<UsagePanel />} />                <Route path="/cache" element={<CachePanel />} />
                 <Route path="/docs" element={<ApiDocsPanel />} />
                 <Route path="/settings" element={<SettingsPanel />} />
                 <Route path="*" element={<NotFoundPanel />} />
@@ -665,7 +688,7 @@ function TrendCard() {
               <span>
                 共 {total.toLocaleString()} tokens
                 {sumIn + sumOut > 0 ? `（输入 ${sumIn.toLocaleString()} · 输出 ${sumOut.toLocaleString()}）` : ""}
-                {sumCost > 0 ? ` · 费用 $${sumCost.toFixed(4)}` : ""}
+                {sumCost > 0 ? ` · 费用 ${fmtMoney(sumCost, true)}` : ""}
                 {" "}· 峰值 {peak.toLocaleString()} / {peakUnit}
               </span>
               <span>{fmtX(data[data.length - 1].ts)}</span>
@@ -773,7 +796,7 @@ function OverviewPanel() {
   useEffect(() => { load(); }, []);
   const fmt = (n: number | undefined | null) => (n ?? 0).toLocaleString();
   // 费用动态精度:小于 1 分钱时保留 3 位有效数字(0.0000305 -> "$0.0000305"),避免被抹成 $0.0000。
-  const money = (n: number | undefined | null) => { const v = n ?? 0; return `$${v !== 0 && v < 0.01 ? v.toPrecision(3) : v < 100 ? v.toFixed(4) : v.toFixed(2)}`; };
+  const money = (n: number | undefined | null) => fmtMoney(n, true);
   const t = d?.today;
   if (err) return (
     <div className="flex flex-col items-center gap-2 py-16">
@@ -786,7 +809,7 @@ function OverviewPanel() {
     <div className="space-y-5">
       {/* 今日运营 KPI:调用 / tokens(输入·输出) / 费用 / 缓存 */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <OverviewKpi tone="sky" icon={<Activity className="h-4 w-4" />} label="今日调用" value={fmt(t?.calls)} sub={`计费 ${fmt(t?.tokens)} tokens`} />
+        <OverviewKpi tone="sky" icon={<Activity className="h-4 w-4" />} label="今日调用" value={`${fmt(t?.calls)} 次`} sub={`计费 ${fmt(t?.tokens)} tokens`} />
         <OverviewKpi tone="indigo" icon={<Zap className="h-4 w-4" />} label="今日 tokens" value={fmt(t?.tokens)} sub={`输入 ${fmt(t?.input_tokens)} · 输出 ${fmt(t?.output_tokens)}`} />
         <OverviewKpi tone="amber" icon={<DollarSign className="h-4 w-4" />} label="今日费用" value={money(t?.cost_usd)} sub={`累计 ${money(d?.total_cost_usd)}`} />
         <OverviewKpi tone="emerald" icon={<Database className="h-4 w-4" />} label="缓存命中率" value={cs ? `${(cs.hit_rate * 100).toFixed(1)}%` : "…"} sub={cs ? `命中 ${fmt(cs.hits)} 次 · 节省 ${fmt(cs.tokens_saved)} tokens` : "语义缓存统计"} />
@@ -796,7 +819,7 @@ function OverviewPanel() {
       <Card>
         <CardContent className="grid grid-cols-2 gap-4 py-4 sm:grid-cols-4">
           <MiniStat label="用户数" value={fmt(d?.total_users)} sub={`活跃 ${fmt(d?.active_users)}`} />
-          <MiniStat label="总调用" value={fmt(d?.total_requests)} />
+          <MiniStat label="总调用" value={`${fmt(d?.total_requests)} 次`} />
           <MiniStat label="总消耗 tokens" value={fmt(d?.total_used)} sub={`输入 ${fmt(d?.total_input_tokens)} · 输出 ${fmt(d?.total_output_tokens)}`} />
           <MiniStat label="总余额 tokens" value={fmt(d?.total_balance)} />
         </CardContent>
@@ -956,7 +979,9 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
                       <BudgetBar label="月" used={u.used_month} budget={u.budget_monthly_tokens} />
                     </div>
                   </TableCell>
-                  <TableCell className="mono">{u.balance.toLocaleString()}</TableCell>
+                  <TableCell className="mono">
+                    <span className={cn(u.balance < 0 && "font-semibold text-destructive")}>{u.balance.toLocaleString()}</span>
+                  </TableCell>
                   <TableCell>
                     {u.concurrency_limit == null
                       ? <span className="text-xs text-muted-foreground">默认</span>
@@ -978,7 +1003,12 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
                       {userGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
                     </select>
                   </TableCell>
-                  <TableCell>{u.status === 0 ? <Badge variant="success">正常</Badge> : <Badge variant="muted">禁用</Badge>}</TableCell>
+                  <TableCell>
+                    {/* 欠费(余额为负)优先展示:余额<=0 后端已拒绝调用,负数说明最后一笔大请求击穿了零余额 */}
+                    {u.balance < 0
+                      ? <Badge variant="destructive" title="余额已为负,继续调用会被拒绝;请充值或调增额度">欠费</Badge>
+                      : u.status === 0 ? <Badge variant="success">正常</Badge> : <Badge variant="muted">禁用</Badge>}
+                  </TableCell>
                   <TableCell>
                     <RowActions actions={[
                       { label: "趋势", icon: <TrendingUp className="h-4 w-4" />, onClick: () => setChart(u) },
@@ -1087,7 +1117,7 @@ function UserGroupsPanel() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="space-y-1">
               <CardTitle className="text-base">用户组(限额模板)</CardTitle>
-              <CardDescription>用户组控制"能用多少"——并发 / 速率 / 预算;绑定模型组后同时接管"能用什么"——请求按绑定优先级选组,组内按该组负载策略分流。</CardDescription>
+              <CardDescription>控制并发 / 速率 / 预算;绑定模型组后决定可调用的模型。</CardDescription>
             </div>
             <Button size="sm" onClick={() => setDlg({ edit: null })}><Plus className="h-4 w-4" />创建用户组</Button>
           </div>
@@ -1495,9 +1525,15 @@ const HEALTH_META: Record<ProviderHealthItem["status"], { label: string; cls: st
   idle:     { label: "无请求", cls: "bg-muted text-muted-foreground", dot: "bg-muted-foreground/60" },
 };
 
-function HealthBadge({ h, name }: { h?: ProviderHealthItem; name?: string }) {
+// 校验过但存在失败:独立于「无请求」展示,避免刚跑完失败校验还显示成从未测过的样子。
+const TEST_FAIL_META: { label: string; cls: string; dot: string; pulse?: boolean } = { label: "校验未过", cls: "bg-warning/10 text-warning-foreground ring-1 ring-warning/20", dot: "bg-warning" };
+
+function HealthBadge({ h, name, lastTestOk }: { h?: ProviderHealthItem; name?: string; lastTestOk?: number | null }) {
   if (!h) return null;
-  const meta = HEALTH_META[h.status] ?? HEALTH_META.idle;
+  // 无请求但最近一次连通性校验全部通过 → 展示「健康」而非「无请求」。
+  const testHealthy = h.status === "idle" && lastTestOk === 1;
+  const testFailed = h.status === "idle" && lastTestOk === 0;
+  const meta = testHealthy ? HEALTH_META.ok : testFailed ? TEST_FAIL_META : (HEALTH_META[h.status] ?? HEALTH_META.idle);
   const br = h.breaker;
   const display = name || h.provider;
   const stat = "flex items-center justify-between gap-2";
@@ -1526,7 +1562,15 @@ function HealthBadge({ h, name }: { h?: ProviderHealthItem; name?: string }) {
             </span>
           </div>
           {h.status === "idle" ? (
-            <p className="text-xs text-muted-foreground">统计窗口内无请求。</p>
+            <p className="text-xs text-muted-foreground">
+              统计窗口内无请求。
+              {lastTestOk != null && (
+                lastTestOk === 1
+                  ? " 最近一次连通性校验已全部通过,上游可用。"
+                  : " 最近一次连通性校验存在失败,建议重新「测试全部」。"
+              )}
+              {lastTestOk == null && " 尚未执行过连通性校验。"}
+            </p>
           ) : (
             <>
               <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
@@ -1755,10 +1799,17 @@ function ModelsPanel() {
         }
       };
       await Promise.all(Array.from({ length: Math.min(5, ids.length) }, worker));
+      const allPass = !job.cancelled && okCount === ids.length;
       setProvTest((t) => ({ ...t, [p.name]: {
-        ok: !job.cancelled && okCount === ids.length,
+        ok: allPass,
         msg: job.cancelled ? `已取消 · ${okCount}/${done} 已测通过` : `${okCount}/${ids.length} 通过`,
       } }));
+      // 持久化整批校验结果:无请求窗口内徽标可据此显示「健康」而非「无请求」。
+      if (!job.cancelled) {
+        api.providerTestResult(p.name, allPass)
+          .then(() => loadProviders(page))
+          .catch(() => {});
+      }
       loadHealth();
     } catch (e: any) {
       setProvTest((t) => ({ ...t, [p.name]: { ok: false, msg: e.message } }));
@@ -1807,7 +1858,7 @@ function ModelsPanel() {
                   <div>
                     <div className="flex items-center gap-2 text-sm font-medium">
                       {providerDisplayName(p)}
-                      <HealthBadge h={health[p.name]} name={providerDisplayName(p)} />
+                      <HealthBadge h={health[p.name]} name={providerDisplayName(p)} lastTestOk={p.last_test_ok ?? null} />
                     </div>
                     <div className="text-xs text-muted-foreground">{p.base_url}</div>
                   </div>
@@ -3721,7 +3772,7 @@ function RewardTaskDialog({ task, onClose, onDone }: {
   );
 }
 
-const fmtCost = (n: number) => (n >= 1 ? `$${n.toFixed(2)}` : `$${n.toFixed(6)}`);
+const fmtCost = (n: number) => fmtMoney(n);
 
 // 获取 provider 的可读名称(模块级:模型页与用量页共用);自定义显示名优先,否则按域名推断
 const providerDisplayName = (p: { display_name?: string | null; base_url: string }) => {
@@ -3823,29 +3874,62 @@ function BreakdownBars({ title, rows, metric }: { title: string; rows: UsageBrea
   );
 }
 
+/// 「全局用量」页:用量统计与请求链路合并为一个页面的两个 Tab(原先两处入口重复展示调用日志)。
 function UsagePanel() {
+  // 调用趋势:复用实时监控的聚合序列(近 24 小时,成功/失败堆叠柱)。
+  const [series, setSeries] = useState<MetricsSeriesPoint[]>([]);
+  useEffect(() => { api.metricsDashboard(86400, 5).then((d) => setSeries(d.series ?? [])).catch(() => { /* 静默 */ }); }, []);
+  return (
+    <div className="space-y-5">
+      <UsageTrendCard series={series} />
+      <UsageChartsBody />
+      <RequestLogPanel />
+    </div>
+  );
+}
+
+/** 调用趋势卡:近 24 小时成功/失败堆叠柱(ECharts)。 */
+function UsageTrendCard({ series }: { series: MetricsSeriesPoint[] }) {
+  const has = series.some((p) => p.requests > 0);
+  const option: EChartsCoreOption = {
+    grid: { left: 2, right: 2, top: 28, bottom: 0, containLabel: true },
+    legend: { top: 0, left: 0, itemWidth: 10, itemHeight: 10, textStyle: { fontSize: 11 } },
+    tooltip: {
+      trigger: "axis",
+      confine: true,
+      formatter: (params: any) => {
+        const arr = Array.isArray(params) ? params : [params];
+        const p = series[arr[0]?.dataIndex];
+        if (!p) return "";
+        const fail = p.fail_unavailable + p.fail_other;
+        return `${fmtTsShort(p.ts)}<br/>成功 <b>${p.success.toLocaleString()}</b> · 失败 <b>${fail.toLocaleString()}</b>${p.avg_ms > 0 ? ` · 平均 ${p.avg_ms}ms` : ""}`;
+      },
+    },
+    xAxis: { type: "category", data: series.map((p) => fmtTsShort(p.ts)), axisLabel: { fontSize: 10 } },
+    yAxis: { type: "value", splitLine: { lineStyle: { type: "dashed" } } },
+    series: [
+      { name: "成功", type: "bar", stack: "t", data: series.map((p) => p.success), itemStyle: { color: "#10b981" }, barMaxWidth: 14 },
+      { name: "失败", type: "bar", stack: "t", data: series.map((p) => p.fail_unavailable + p.fail_other), itemStyle: { color: "#f43f5e" }, barMaxWidth: 14 },
+    ],
+  };
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">调用趋势(近 24 小时)</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {!has ? <p className="text-sm text-muted-foreground">暂无调用数据</p> : <EChart option={option} height={220} />}
+      </CardContent>
+    </Card>
+  );
+}
+
+/** 用量分布图区:Top 10 维度分布(供应商/用户/模型/密钥)。明细统一在下方「调用日志」展示。 */
+function UsageChartsBody() {
   const navigate = useNavigate();
-  const [rows, setRows] = useState<any[]>([]);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
-  const [total, setTotal] = useState(0);
   const [bd, setBd] = useState<UsageBreakdownResp | null>(null);
   const [metric, setMetric] = useState<"tokens" | "cost">("tokens");
   const [allModels, setAllModels] = useState<ModelRow[]>([]);
-  // 调用明细筛选:模型名/状态/时间区间(组合生效,变更即回第 1 页)
-  const [fModel, setFModel] = useState("all");
-  const [fStatus, setFStatus] = useState<"all" | "ok" | "fail">("all");
-  const [fRange, setFRange] = useState<"all" | "1h" | "24h" | "7d">("all");
-  const RANGE_SECS: Record<string, number> = { "1h": 3600, "24h": 86400, "7d": 604800 };
-  const loadUsage = async (p: number, size: number) => {
-    const r = await api.usage(p, size, {
-      model: fModel,
-      status: fStatus === "all" ? undefined : fStatus,
-      start: fRange === "all" ? undefined : Math.floor(Date.now() / 1000) - RANGE_SECS[fRange],
-    });
-    setRows(r.data); setTotal(r.total); setPage(p);
-  };
-  useEffect(() => { loadUsage(1, pageSize).catch(() => { /* 静默,重试由用户触发 */ }); }, [fModel, fStatus, fRange]);
   useEffect(() => { api.usageBreakdown().then(setBd).catch(() => { /* 静默,下轮刷新重试 */ }); }, []);
   useEffect(() => { api.models().then((r) => setAllModels(r.data)).catch(() => { /* 静默 */ }); }, []);
   // ID → 友好名称映射(供应商 prov-xxx → 展示名;用户 UUID → 用户名),拉一次全量构建字典。
@@ -3870,7 +3954,7 @@ function UsagePanel() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <CardTitle className="text-base">用量分布</CardTitle>
-              <CardDescription className="mt-0.5">Top 10 · 费用按计费口径(单价×倍率)折算,未定价模型记 $0</CardDescription>
+              <CardDescription className="mt-0.5">Top 10(费用为折算值)</CardDescription>
             </div>
             <div className="inline-flex rounded-lg border border-input bg-card p-0.5 text-xs">
               {([["tokens", "Tokens"], ["cost", "费用"]] as const).map(([v, label]) => (
@@ -3890,88 +3974,6 @@ function UsagePanel() {
             <BreakdownBars title="按模型" rows={bd?.models ?? []} metric={metric} />
             <BreakdownBars title="按密钥" rows={(bd?.keys ?? []).map((r) => ({ ...r, label: r.label }))} metric={metric} />
           </div>
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader>
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <CardTitle className="text-base">调用明细({total})</CardTitle>
-            {/* 多维筛选:模型 / 状态 / 时间区间 */}
-            <div className="flex flex-wrap items-center gap-2">
-              <select value={fModel} onChange={(e) => setFModel(e.target.value)}
-                className="h-8 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring" title="按模型筛选">
-                <option value="all">全部模型</option>
-                {[...new Set(allModels.map((m) => m.upstream_model))].map((m) => <option key={m} value={m}>{m}</option>)}
-              </select>
-              <select value={fStatus} onChange={(e) => setFStatus(e.target.value as any)}
-                className="h-8 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring" title="按状态筛选">
-                <option value="all">全部状态</option>
-                <option value="ok">仅成功</option>
-                <option value="fail">仅失败</option>
-              </select>
-              <div className="inline-flex rounded-lg border border-input bg-card p-0.5 text-xs">
-                {([["all", "全部"], ["1h", "近 1 小时"], ["24h", "近 24 小时"], ["7d", "近 7 天"]] as const).map(([v, label]) => (
-                  <button key={v} onClick={() => setFRange(v)}
-                    className={cn("rounded-md px-2.5 py-1 transition-colors",
-                      fRange === v ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground")}>
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          {rows.length === 0 ? <p className="text-sm text-muted-foreground">暂无记录</p> : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>时间</TableHead>
-                  <TableHead>用户</TableHead><TableHead>模型</TableHead>
-                  <TableHead className="text-right">输入 (tokens)</TableHead>
-                  <TableHead className="text-right">输出 (tokens)</TableHead>
-                  <TableHead className="text-right">计费 (tokens)</TableHead>
-                  <TableHead className="text-right" title="最终生效计费倍率 = 模型倍率 × 时段倍率 × 用户倍率">倍率</TableHead>
-                  <TableHead className="text-right">耗时</TableHead>
-                  <TableHead className="text-right">费用</TableHead>
-                  <TableHead>状态</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {rows.map((r, i) => {
-                  // created_at 存储约定为 "@unix秒";兼容纯数字与 ISO 字符串。
-                  const raw = String(r.created_at ?? "").replace(/^@/, "");
-                  const tsMs = /^\d+$/.test(raw) ? Number(raw) * 1000 : NaN;
-                  const d = isFinite(tsMs) ? new Date(tsMs) : (r.created_at ? new Date(r.created_at) : null);
-                  const time = d && !isNaN(d.getTime())
-                    ? `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`
-                    : "—";
-                  const ms = r.latency_ms;
-                  const latency = ms != null ? (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`) : "—";
-                  const bm = r.bill_multiplier;
-                  const mult = bm != null ? `×${Number.isInteger(bm) ? bm : bm.toFixed(2)}` : "—";
-                  const ok = r.status != null && r.status >= 200 && r.status < 400;
-                  return (
-                    <TableRow key={i}>
-                      <TableCell className="mono whitespace-nowrap text-xs text-muted-foreground" title={r.created_at}>{time}</TableCell>
-                      <TableCell className="mono text-xs">{userMap[r.user_id] ?? String(r.user_id).slice(0, 8)}</TableCell>
-                      <TableCell className="mono text-xs">{r.model || "—"}</TableCell>
-                      <TableCell className="mono text-right tabular-nums">{(r.input_tokens ?? 0).toLocaleString()}</TableCell>
-                      <TableCell className="mono text-right tabular-nums">{(r.output_tokens ?? 0).toLocaleString()}</TableCell>
-                      <TableCell className="mono text-right tabular-nums">{(r.charged_tokens ?? 0).toLocaleString()}</TableCell>
-                      <TableCell className="mono text-right tabular-nums" title="模型倍率 × 时段倍率 × 用户倍率的最终值">{mult}</TableCell>
-                      <TableCell className="mono text-right tabular-nums">{latency}</TableCell>
-                      <TableCell className="mono text-right tabular-nums">{r.cost_usd == null ? "—" : fmtCost(r.cost_usd)}</TableCell>
-                      <TableCell>{r.status != null && (ok
-                        ? <Badge variant="muted">{r.status}</Badge>
-                        : <Badge variant="default" className="border-destructive/30 bg-destructive/15 text-destructive">{r.status || "失败"}</Badge>)}</TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          )}
-          <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={(p) => loadUsage(p, pageSize).catch(() => {})} onPageSizeChange={(s) => { setPageSize(s); loadUsage(1, s).catch(() => {}); }} />
         </CardContent>
       </Card>
     </div>
@@ -4184,6 +4186,14 @@ const PORT_OPTIONS = [
   { port: 25, label: "25 (STARTTLS)" },
 ];
 
+type SettingsTabKey = "base" | "comm" | "engine" | "admin";
+const SETTINGS_TABS: { key: SettingsTabKey; label: string }[] = [
+  { key: "base", label: "通用与限额" },
+  { key: "comm", label: "通信与门户" },
+  { key: "engine", label: "转发与缓存" },
+  { key: "admin", label: "管理员" },
+];
+
 function SettingsPanel() {
   const [host, setHost] = useState("");
   const [port, setPort] = useState(465);
@@ -4228,6 +4238,30 @@ function SettingsPanel() {
   const [logSaving, setLogSaving] = useState(false);
   const [logNote, setLogNote] = useState("");
   const [logErr, setLogErr] = useState("");
+  // 请求链路存储后端(sqlite | elasticsearch,切换后需重启生效)
+  const [logStore, setLogStore] = useState("sqlite");
+  const [esUrl, setEsUrl] = useState("");
+  const [esPrefix, setEsPrefix] = useState("");
+  const [esUsername, setEsUsername] = useState("");
+  const [esPassword, setEsPassword] = useState("");
+  const [esHasPassword, setEsHasPassword] = useState(false);
+  // ES 测试连接:loading 中 / 结果(ok+摘要 或 err 文案)
+  const [esTesting, setEsTesting] = useState<null | "loading" | { ok: boolean; msg: string }>(null);
+  // 全局默认限额(用户/用户组未显式配置时生效)
+  const [defConcurrency, setDefConcurrency] = useState(16);
+  const [defRpm, setDefRpm] = useState(0);
+  const [defTpm, setDefTpm] = useState(0);
+  const [defSaving, setDefSaving] = useState(false);
+  const [defNote, setDefNote] = useState("");
+  const [defErr, setDefErr] = useState("");
+  // 计费显示(币种仅影响前端展示单位)
+  const [billCurrency, setBillCurrency] = useState<"usd" | "cny">("usd");
+  const [billRate, setBillRate] = useState(7.2);
+  const [billSaving, setBillSaving] = useState(false);
+  const [billNote, setBillNote] = useState("");
+  const [billErr, setBillErr] = useState("");
+  // 设置页 Tab 分组:卡片较多,按心智模型归组展示。
+  const [settingsTab, setSettingsTab] = useState<SettingsTabKey>("base");
   // 门户设置
   const [portalRewards, setPortalRewards] = useState(false);
   const [portalPhone, setPortalPhone] = useState(true);
@@ -4325,8 +4359,20 @@ function SettingsPanel() {
       })
       .catch((e: any) => { setEmbErr(e?.message || "加载失败"); markLoaded("embedding", false); });
     api.loggingSettings()
-      .then((r) => { setLogPreview(r.body_preview_max_bytes); setLogRetention(r.retention_days); setLogErr(""); markLoaded("logging", true); })
+      .then((r) => {
+        setLogPreview(r.body_preview_max_bytes); setLogRetention(r.retention_days);
+        setLogStore(r.store || "sqlite");
+        setEsUrl(r.elasticsearch_url ?? ""); setEsPrefix(r.elasticsearch_index_prefix ?? "");
+        setEsUsername(r.elasticsearch_username ?? ""); setEsHasPassword(!!r.has_password); setEsPassword("");
+        setLogErr(""); markLoaded("logging", true);
+      })
       .catch((e: any) => { setLogErr(e?.message || "加载失败"); markLoaded("logging", false); });
+    api.defaultsSettings()
+      .then((r) => { setDefConcurrency(r.concurrency_limit); setDefRpm(r.rpm_limit); setDefTpm(r.tpm_limit); setDefErr(""); markLoaded("defaults", true); })
+      .catch((e: any) => { setDefErr(e?.message || "加载失败"); markLoaded("defaults", false); });
+    api.billingSettings()
+      .then((r) => { setBillCurrency(r.currency); setBillRate(r.cny_rate); setBillErr(""); markLoaded("billing", true); })
+      .catch((e: any) => { setBillErr(e?.message || "加载失败"); markLoaded("billing", false); });
     api.portalSettings()
       .then((r) => {
         setPortalRewards(r.rewards_enabled);
@@ -4444,20 +4490,74 @@ function SettingsPanel() {
     }
   };
 
+  // 测试 ES 连通性:用当前表单值(空密码回退已存),请求 /_cluster/health。
+  const testEs = async () => {
+    setEsTesting("loading");
+    try {
+      const body: any = {
+        elasticsearch_url: esUrl.trim(),
+        elasticsearch_index_prefix: esPrefix.trim(),
+        elasticsearch_username: esUsername.trim(),
+      };
+      if (esPassword) body.elasticsearch_password = esPassword;
+      const r = await api.testEsConnection(body);
+      setEsTesting(r.ok
+        ? { ok: true, msg: `连接成功 · ${r.latency_ms}ms · 集群 ${r.cluster_name || "?"}(${r.health || "?"})` }
+        : { ok: false, msg: r.error || "连接失败" });
+    } catch (e: any) {
+      setEsTesting({ ok: false, msg: e.message });
+    }
+  };
+
   const saveLogging = async () => {
     setLogErr(""); setLogNote("");
     if (logPreview < 0 || logPreview > 1048576) { setLogErr("预览上限需在 0~1048576 字节(1MB)之间"); return; }
     if (logRetention < 0 || logRetention > 365) { setLogErr("保留天数需在 0~365 之间(0=永久)"); return; }
+    const storeChanged = logStore !== "sqlite";
+    if (storeChanged && !esUrl.trim()) { setLogErr("启用 Elasticsearch 存储需填写连接地址"); return; }
     setLogSaving(true);
     try {
-      await api.saveLoggingSettings({
+      const body: any = {
         body_preview_max_bytes: Math.floor(logPreview),
         retention_days: Math.floor(logRetention),
-      });
-      setLogNote("已保存,即时生效。");
+        store: logStore,
+        elasticsearch_url: esUrl.trim(),
+        elasticsearch_index_prefix: esPrefix.trim(),
+        elasticsearch_username: esUsername.trim(),
+      };
+      if (esPassword) body.elasticsearch_password = esPassword; // 留空 = 保持已存密码
+      await api.saveLoggingSettings(body);
+      setEsHasPassword(!!esPassword || esHasPassword);
+      setEsPassword("");
+      setLogNote(storeChanged ? "已保存。存储后端在启动时构建,重启服务后切换生效。" : "已保存,即时生效。");
     } catch (e: any) {
       setLogErr(e.message);
     } finally { setLogSaving(false); }
+  };
+
+  const saveDefaults = async () => {
+    setDefErr(""); setDefNote("");
+    if (defConcurrency < 0 || defRpm < 0 || defTpm < 0) { setDefErr("限额不能为负数(0 = 不限)"); return; }
+    setDefSaving(true);
+    try {
+      await api.saveDefaultsSettings({ concurrency_limit: Math.floor(defConcurrency), rpm_limit: Math.floor(defRpm), tpm_limit: Math.floor(defTpm) });
+      setDefNote("已保存,即时生效:未显式配置限额的用户/用户组已按新默认值重算。");
+    } catch (e: any) {
+      setDefErr(e.message);
+    } finally { setDefSaving(false); }
+  };
+
+  const saveBilling = async () => {
+    setBillErr(""); setBillNote("");
+    if (!(billRate > 0 && billRate < 1000)) { setBillErr("汇率需在 0~1000 之间"); return; }
+    setBillSaving(true);
+    try {
+      await api.saveBillingSettings({ currency: billCurrency, cny_rate: billRate });
+      setCurrencyPrefs(billCurrency, billRate);
+      setBillNote("已保存,各页面费用展示单位即时切换。");
+    } catch (e: any) {
+      setBillErr(e.message);
+    } finally { setBillSaving(false); }
   };
 
   const savePortal = async () => {
@@ -4542,11 +4642,24 @@ function SettingsPanel() {
   const cardLabel: Record<string, string> = {
     email: "邮箱配置", fallback: "降级配置", cache: "语义缓存", embedding: "向量嵌入",
     logging: "日志策略", portal: "门户设置", admKeys: "管理员密钥", sms: "短信网关",
+    defaults: "全局默认限额", billing: "费用显示",
   };
   const retryAll = () => { load(); loadAll(); };
+  // Tab 内的卡片显隐:未命中当前 Tab 的卡片隐藏(DOM 保留,切换零开销)。
+  const tabCls = (t: SettingsTabKey) => cn(settingsTab === t ? "" : "hidden");
 
   return (
     <div className="space-y-5">
+      {/* 顶部 Tab:卡片较多,按「通用/通信/转发/管理员」归组,避免长页滚动找卡。 */}
+      <div className="flex flex-wrap items-center gap-1 rounded-xl border border-border bg-card p-1">
+        {SETTINGS_TABS.map((t) => (
+          <button key={t.key} onClick={() => setSettingsTab(t.key)}
+            className={cn("rounded-lg px-4 py-1.5 text-sm transition-colors",
+              settingsTab === t.key ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:bg-muted hover:text-foreground")}>
+            {t.label}
+          </button>
+        ))}
+      </div>
       {failedCards.length > 0 && (
         <div className="flex flex-wrap items-center gap-3 rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm">
           <span className="text-destructive">
@@ -4555,7 +4668,67 @@ function SettingsPanel() {
           <Button variant="outline" size="sm" onClick={retryAll}>重试加载</Button>
         </div>
       )}
-      <Card>
+
+      {/* 全局默认限额:用户未显式配置、用户组也未配置时生效(即「继承全局」的值)。 */}
+      <Card className={tabCls("base")}>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-base">全局默认限额</CardTitle>
+            <Badge variant="muted">并发 {defConcurrency} · RPM {defRpm || "不限"} · TPM {defTpm || "不限"}</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-xs text-muted-foreground">
+            用户与用户组都未显式配置时的兜底限额(0 = 不限)。保存后对所有「继承全局」的在线用户即时重算;
+            用户门户概览里的「并发 x/16」就来自这里的并发默认值。
+          </p>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div><label className="mb-1 block text-xs text-muted-foreground">并发上限(0=不限)</label>
+              <Input type="number" min={0} value={defConcurrency} onChange={(e) => setDefConcurrency(Number(e.target.value))} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">RPM · 次/分(0=不限)</label>
+              <Input type="number" min={0} value={defRpm} onChange={(e) => setDefRpm(Number(e.target.value))} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">TPM · tokens/分(0=不限)</label>
+              <Input type="number" min={0} value={defTpm} onChange={(e) => setDefTpm(Number(e.target.value))} /></div>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 border-t pt-4">
+            <Button onClick={saveDefaults} disabled={defSaving || !loaded.defaults}>{defSaving ? "保存中…" : "保存配置"}</Button>
+            {defNote && <span className="text-xs text-success">{defNote}</span>}
+            {defErr && <span className="text-xs text-destructive">{defErr}</span>}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* 计费显示:费用单位与币种切换(全局配置,统计页与日志页共用)。 */}
+      <Card className={tabCls("base")}>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-base">费用显示</CardTitle>
+            <Badge variant="muted">{billCurrency === "cny" ? "¥ 人民币" : "$ 美元"}</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-xs text-muted-foreground">
+            仅影响概览、全局用量、对话日志等页面的费用展示单位;计价与落库口径仍为美元(cost_usd),
+            切换为人民币时按下方汇率换算显示。
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div><label className="mb-1 block text-xs text-muted-foreground">显示币种</label>
+              <select value={billCurrency} onChange={(e) => setBillCurrency(e.target.value as "usd" | "cny")} className={sel}>
+                <option value="usd">$ 美元(USD)</option>
+                <option value="cny">¥ 人民币(CNY)</option>
+              </select></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">美元→人民币汇率(cny 时生效)</label>
+              <Input type="number" step="0.01" min={0} value={billRate} onChange={(e) => setBillRate(Number(e.target.value))} /></div>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 border-t pt-4">
+            <Button onClick={saveBilling} disabled={billSaving || !loaded.billing}>{billSaving ? "保存中…" : "保存配置"}</Button>
+            {billNote && <span className="text-xs text-success">{billNote}</span>}
+            {billErr && <span className="text-xs text-destructive">{billErr}</span>}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className={tabCls("comm")}>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
             <CardTitle className="text-base">邮箱配置</CardTitle>
@@ -4605,7 +4778,7 @@ function SettingsPanel() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card className={tabCls("engine")}>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
             <CardTitle className="text-base">容错与降级</CardTitle>
@@ -4643,7 +4816,7 @@ function SettingsPanel() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card className={tabCls("engine")}>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
             <CardTitle className="text-base">语义缓存</CardTitle>
@@ -4703,7 +4876,7 @@ function SettingsPanel() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card className={tabCls("engine")}>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
             <CardTitle className="text-base">语义向量(embedding)</CardTitle>
@@ -4752,7 +4925,7 @@ function SettingsPanel() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card className={tabCls("base")}>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
             <CardTitle className="text-base">日志采集与保留</CardTitle>
@@ -4773,6 +4946,38 @@ function SettingsPanel() {
               <Input type="number" min={0} max={365} value={logRetention}
                 onChange={(e) => setLogRetention(Number(e.target.value))} /></div>
           </div>
+          {/* 请求链路存储后端:请求体等日志可对接 Elasticsearch 保存(可配项,默认 sqlite)。 */}
+          <div className="grid gap-3 border-t pt-4 sm:grid-cols-2">
+            <div><label className="mb-1 block text-xs text-muted-foreground">存储后端</label>
+              <select value={logStore} onChange={(e) => setLogStore(e.target.value)} className={sel}>
+                <option value="sqlite">SQLite(默认,写本地 request_logs 表)</option>
+                <option value="elasticsearch">Elasticsearch(按日索引)</option>
+              </select></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">ES 连接地址</label>
+              <Input placeholder="如 http://127.0.0.1:9200" disabled={logStore !== "elasticsearch"}
+                className={logStore === "elasticsearch" ? "" : "opacity-50"}
+                value={esUrl} onChange={(e) => setEsUrl(e.target.value)} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">索引前缀</label>
+              <Input placeholder="relay-logs" disabled={logStore !== "elasticsearch"}
+                className={logStore === "elasticsearch" ? "" : "opacity-50"}
+                value={esPrefix} onChange={(e) => setEsPrefix(e.target.value)} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">用户名</label>
+              <Input placeholder="留空 = 匿名" disabled={logStore !== "elasticsearch"}
+                className={logStore === "elasticsearch" ? "" : "opacity-50"}
+                value={esUsername} onChange={(e) => setEsUsername(e.target.value)} /></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">密码{esHasPassword ? "(已设置,留空不变)" : ""}</label>
+              <Input type="password" placeholder={esHasPassword ? "留空保持不变" : "密码"} disabled={logStore !== "elasticsearch"}
+                className={logStore === "elasticsearch" ? "" : "opacity-50"}
+                value={esPassword} onChange={(e) => setEsPassword(e.target.value)} /></div>
+            <div className="flex flex-wrap items-center gap-2 sm:col-span-2">
+              <Button variant="outline" size="sm" onClick={testEs} disabled={esTesting === "loading"}>
+                <Zap className="h-4 w-4" />{esTesting === "loading" ? "测试中…" : "测试连接"}
+              </Button>
+              {esTesting && esTesting !== "loading" && (
+                <span className={cn("text-xs", esTesting.ok ? "text-success" : "text-destructive")}>{esTesting.msg}</span>
+              )}
+            </div>
+          </div>
           <div className="flex flex-wrap items-center gap-2 border-t pt-4">
             <Button onClick={saveLogging} disabled={logSaving || !loaded.logging}>{logSaving ? "保存中…" : "保存配置"}</Button>
             {logNote && <span className="text-xs text-success">{logNote}</span>}
@@ -4781,7 +4986,7 @@ function SettingsPanel() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card className={tabCls("comm")}>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
             <CardTitle className="text-base">门户设置</CardTitle>
@@ -4820,7 +5025,7 @@ function SettingsPanel() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card className={tabCls("comm")}>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
             <CardTitle className="text-base">短信网关</CardTitle>
@@ -4881,7 +5086,7 @@ function SettingsPanel() {
         </DialogContent>
       </Dialog>
 
-      <Card>
+      <Card className={tabCls("admin")}>
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="space-y-1">
@@ -4963,7 +5168,7 @@ function SettingsPanel() {
 
       <ConfirmDialog confirm={admKeyConfirm} onClose={() => setAdmKeyConfirm(null)} />
 
-      <Card>
+      <Card className={tabCls("admin")}>
         <CardHeader>
           <CardTitle className="text-base">管理员账号</CardTitle>
         </CardHeader>
@@ -4991,7 +5196,7 @@ function SettingsPanel() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card className={tabCls("admin")}>
         <CardHeader>
           <div className="flex items-center gap-2">
             <CardTitle className="text-base">软件更新</CardTitle>
@@ -5279,6 +5484,38 @@ function fmtRel(ts_ms: number): string {
   return `${mm}-${dd} ${hh}:${mi}`;
 }
 
+// 上游治理演示数据:无真实流量时预览熔断/并发/失败审计的展示效果(纯前端,不写库)。
+const DEMO_UPSTREAMS: UpstreamsResp = {
+  total: 3,
+  broken_count: 1,
+  items: [
+    { kind: "openai", base_url: "https://api.openai.com/v1", has_key: true, key_fingerprint: "a1b2c3d4e5f60718",
+      breaker: { fail_count: 0, threshold: 5, is_broken: false, recover_remaining_ms: 0, window_secs: 60 },
+      concurrency: { limit: 16, in_flight: 3, utilization_pct: 19 } },
+    { kind: "openai", base_url: "https://ai.fit2cloud.cn/gateway/v1", has_key: true, key_fingerprint: "9f8e7d6c5b4a3210",
+      breaker: { fail_count: 6, threshold: 5, is_broken: true, recover_remaining_ms: 47000, window_secs: 60 },
+      concurrency: { limit: 8, in_flight: 0, utilization_pct: 0 } },
+    { kind: "anthropic", base_url: "https://api.anthropic.com/v1", has_key: true, key_fingerprint: "1a2b3c4d5e6f7089",
+      breaker: { fail_count: 1, threshold: 5, is_broken: false, recover_remaining_ms: 0, window_secs: 60 },
+      concurrency: { limit: 12, in_flight: 2, utilization_pct: 17 } },
+  ],
+};
+const DEMO_FAILURES: AuditFailuresResp = {
+  stored: 3,
+  capacity: 200,
+  items: [
+    { ts_ms: Date.now() - 12_000, kind: "openai", base_url: "https://ai.fit2cloud.cn/gateway/v1", key_fingerprint: "9f8e7d6c5b4a3210",
+      upstream_id: "openai|https://ai.fit2cloud.cn/gateway/v1|9f8e7d6c5b4a3210", requested_model: "f2c-deepseek-v4-flash", path: "chat",
+      error_summary: "HTTP 404 Not Found: model not found", fail_count_after: 5, threshold: 5, triggered_break: true },
+    { ts_ms: Date.now() - 45_000, kind: "openai", base_url: "https://ai.fit2cloud.cn/gateway/v1", key_fingerprint: "9f8e7d6c5b4a3210",
+      upstream_id: "openai|https://ai.fit2cloud.cn/gateway/v1|9f8e7d6c5b4a3210", requested_model: "f2c-auto", path: "chat",
+      error_summary: "HTTP 404 Not Found: model not found", fail_count_after: 4, threshold: 5, triggered_break: false },
+    { ts_ms: Date.now() - 96_000, kind: "anthropic", base_url: "https://api.anthropic.com/v1", key_fingerprint: "1a2b3c4d5e6f7089",
+      upstream_id: "anthropic|https://api.anthropic.com/v1|1a2b3c4d5e6f7089", requested_model: "claude-sonnet-4-5", path: "messages",
+      error_summary: "HTTP 429 Too Many Requests: rate limited, retry after 8s", fail_count_after: 1, threshold: 5, triggered_break: false },
+  ],
+};
+
 function UpstreamsPanel() {
   const [data, setData] = useState<UpstreamsResp | null>(null);
   const [failures, setFailures] = useState<AuditFailuresResp | null>(null);
@@ -5293,8 +5530,12 @@ function UpstreamsPanel() {
   const [resetAllBusy, setResetAllBusy] = useState(false);
   const [failuresLimit, setFailuresLimit] = useState<number>(50);
   const loadSeq = useRef(0);
+  // 演示模式:展示模拟数据;真实流量进来后退出演示恢复实时监控。
+  const [demo, setDemo] = useState(false);
+  const demoRef = useRef(false);
 
   const load = async () => {
+    if (demoRef.current) return; // 演示模式不拉真实数据,避免覆盖演示内容
     const seq = ++loadSeq.current;
     try {
       const [u, f] = await Promise.all([
@@ -5372,6 +5613,35 @@ function UpstreamsPanel() {
         )}>
           {toast.type === "ok" ? <Check className="h-4 w-4" /> : <ShieldAlert className="h-4 w-4" />}
           <span>{toast.msg}</span>
+        </div>
+      )}
+
+      {/* 定位说明 */}
+      <p className="text-sm text-muted-foreground">
+        基于真实流量的熔断 / 并发 / 失败实时监控,问题发生时在此呈现;也可在「上游模型」页主动发起连通性测试。
+      </p>
+
+      {/* 定位说明 + 演示数据入口 */}
+      {!demo && !loading && (data?.total ?? 0) === 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-dashed border-border bg-muted/30 px-4 py-3 text-sm">
+          <span className="text-muted-foreground">基于真实流量的熔断 / 并发 / 失败实时监控;也可在「上游模型」页主动发起连通性测试。</span>
+          <Button size="sm" variant="outline" onClick={() => {
+            demoRef.current = true;
+            setDemo(true);
+            setData(DEMO_UPSTREAMS);
+            setFailures(DEMO_FAILURES);
+          }}>加载演示数据</Button>
+        </div>
+      )}
+      {demo && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-amber-500/40 bg-amber-500/10 px-4 py-2 text-xs text-amber-700">
+          <Sparkles className="h-3.5 w-3.5 shrink-0" />
+          当前为模拟数据,仅演示展示效果;真实流量进来后可退出演示恢复实时监控。
+          <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={() => {
+            demoRef.current = false;
+            setDemo(false);
+            load();
+          }}>退出演示</Button>
         </div>
       )}
 
@@ -6321,19 +6591,70 @@ function AuditPanel() {
   );
 }
 
+/** 耗时分解:总耗时 = 上游耗时(最终成功尝试) + 网关耗时(认证/路由/编排/回传)。 */
+/** 链路耗时拆分:总 / 上游(首响应) / token 消耗(流式生成) / 网关(其余处理)。
+ * 口径:总 = 上游 + token消耗 + 网关;流式下下游回传与 token 生成同步进行,不单列。 */
+function splitLatency(r: { latency_ms: number; stream: boolean; first_byte_ms: number | null; attempts: RequestAttempt[] }) {
+  const ok = r.attempts.find((a) => a.status === 200);
+  const upstream = ok?.latency_ms ?? 0;
+  const generate = r.stream && r.first_byte_ms != null ? Math.max(0, r.latency_ms - r.first_byte_ms) : null;
+  const gateway = Math.max(0, r.latency_ms - upstream - (generate ?? 0));
+  const retryMs = r.attempts.filter((a) => a.status !== 200 && a.status !== -1 && a.latency_ms > 0).reduce((s, a) => s + a.latency_ms, 0);
+  return { upstream, generate, gateway, retryMs };
+}
+
+
+/** 耗时数字色阶:快速=常规,慢速=琥珀,极慢=红。 */
+const latencyTone = (ms: number | null) =>
+  ms == null ? "text-muted-foreground" : ms < 1000 ? "" : ms < 5000 ? "text-amber-600 dark:text-amber-400" : "text-rose-600 dark:text-rose-400";
+
+function LatencyBreakdown({ row }: { row: RequestLogRow }) {
+  const { upstream, generate, gateway, retryMs } = splitLatency(row);
+  const pct = (v: number) => (row.latency_ms > 0 ? Math.min(100, Math.round((v * 100) / row.latency_ms)) : 0);
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs font-medium text-muted-foreground">耗时分解</p>
+      {row.latency_ms > 0 ? (
+        <div className="flex h-2 w-full max-w-md overflow-hidden rounded-full bg-muted">
+          <div className="h-full bg-sky-500/80" style={{ width: `${pct(upstream)}%` }} title={`上游 ${fmtMs(upstream)}`} />
+          {generate != null && <div className="h-full bg-violet-500/70" style={{ width: `${pct(generate)}%` }} title={`token 消耗 ${fmtMs(generate)}`} />}
+          <div className="h-full bg-slate-400/60" style={{ width: `${pct(gateway)}%` }} title={`网关 ${fmtMs(gateway)}`} />
+        </div>
+      ) : null}
+      <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-muted-foreground">
+        <span>请求总耗时 <span className="mono text-foreground">{fmtMs(row.latency_ms)}</span></span>
+        <span title="上游建连并返回首个响应的耗时(成功尝试)">上游耗时 <span className={cn("mono", latencyTone(upstream || null))}>{fmtMs(upstream)}</span></span>
+        {generate != null && <span title="流式:上游首块到达后持续生成/回传 tokens 的耗时;下游回传与之同步">token 消耗 <span className="mono text-foreground">{fmtMs(generate)}</span></span>}
+        <span title="网关侧处理:鉴权/路由/改写/计费等(含未拆分余量)">网关耗时 <span className="mono text-foreground">{fmtMs(gateway)}</span></span>
+        {retryMs > 0 && <span title="失败尝试(重试)累计耗时,已计入总耗时">含失败重试 <span className="mono text-foreground">{fmtMs(retryMs)}</span></span>}
+      </div>
+    </div>
+  );
+}
+
 function RequestLogPanel() {
   const [rows, setRows] = useState<RequestLogRow[]>([]);
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
-  const [expanded, setExpanded] = useState<string | null>(null);
+  // 详情改为右侧抽屉(手风琴分区),不再嵌在表格行内
+  const [detail, setDetail] = useState<RequestLogRow | null>(null);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
   const [failed, setFailed] = useState<"all" | "ok" | "fail">("all");
   const [hours, setHours] = useState<number | null>(null);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 筛选:用户(下拉选用户名,按 user_id 精确过滤) + 模型(下拉选对外模型名)
+  const [fUser, setFUser] = useState("");
+  const [fModel, setFModel] = useState("");
+  const [userRows, setUserRows] = useState<UserRow[]>([]);
+  const [modelNames, setModelNames] = useState<string[]>([]);
   const qRef = useRef("");
+  const userRef = useRef("");
+  const modelRef = useRef("");
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const userTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const modelTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const load = async () => {
     setLoading(true); setErr("");
@@ -6342,6 +6663,8 @@ function RequestLogPanel() {
         qRef.current || undefined, page, pageSize,
         failed === "all" ? null : failed === "fail",
         hours,
+        userRef.current || undefined,
+        modelRef.current || undefined,
       );
       setRows(r.data); setTotal(r.total);
     } catch (e: any) {
@@ -6350,49 +6673,69 @@ function RequestLogPanel() {
   };
 
   useEffect(() => { load(); }, [page, pageSize, failed, hours]);
+  // 用户名/模型名下拉数据:一次性拉取
+  useEffect(() => {
+    api.users(1, 500).then((r) => setUserRows(r.data)).catch(() => {});
+    api.groups().then((r) => setModelNames(r.data.map((g) => g.name).filter(Boolean).sort())).catch(() => {});
+  }, []);
   // 卸载时清掉搜索防抖定时器,避免组件销毁后 setState。
-  useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
+  useEffect(() => () => {
+    for (const t of [timerRef, userTimerRef, modelTimerRef]) if (t.current) clearTimeout(t.current);
+  }, []);
 
-  const onSearch = (v: string) => {
-    setQ(v);
-    qRef.current = v;
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => {
-      if (page !== 1) setPage(1);
-      else load();
-    }, 500);
+  const debounced = (ref: React.MutableRefObject<string>, v: string, set: (v: string) => void, timer: React.MutableRefObject<ReturnType<typeof setTimeout> | null>) => {
+    set(v); ref.current = v;
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => { if (page !== 1) setPage(1); else load(); }, 400);
   };
 
   const onFailed = (v: "all" | "ok" | "fail") => { setFailed(v); setPage(1); };
   const onHours = (v: string) => { setHours(v ? Number(v) : null); setPage(1); };
+  const onUserPick = (v: string) => { debounced(userRef, v, setFUser, userTimerRef); setPage(1); };
+  const onModelPick = (v: string) => { debounced(modelRef, v, setFModel, modelTimerRef); setPage(1); };
 
   const fmtTime = (ts: number) => {
     const d = new Date(ts * 1000);
     const p = (n: number) => String(n).padStart(2, "0");
     return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${d.toLocaleTimeString("zh-CN", { hour12: false })}.${String(d.getMilliseconds()).padStart(3, "0")}`;
   };
-
-  const toggle = (id: string) => setExpanded((prev) => prev === id ? null : id);
+  // user_id → 展示名(用户名 > 邮箱 > 手机号 > ID 前缀)
+  const nameOf = (uid: string) => {
+    const u = userRows.find((x) => x.id === uid);
+    return u?.username || u?.email || u?.phone || `${uid.slice(0, 8)}…`;
+  };
 
   return (
     <div className="space-y-5">
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <CardTitle className="text-base">请求链路({loading ? "…" : total})</CardTitle>
-              <p className="mt-1 text-xs text-muted-foreground">数据面 API（/v1/...）每次调用的自动追踪：候选顺序、failover 时间线、tokens 与耗时。管理后台的人工操作记录在「操作审计」，两者互不相关。</p>
+              <CardTitle className="text-base">调用日志({loading ? "…" : total.toLocaleString()})</CardTitle>
+              <p className="mt-1 text-xs text-muted-foreground">每次 API 调用的链路追踪;点击行在右侧展开完整详情,支持按请求 ID / 模型 / 用户检索。</p>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <div className="relative">
                 <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   placeholder="搜索 request_id / 模型…"
-                  className="h-8 w-56 pl-7 text-xs"
+                  className="h-8 w-52 pl-7 text-xs"
                   value={q}
-                  onChange={(e) => onSearch(e.target.value)}
+                  onChange={(e) => debounced(qRef, e.target.value, setQ, timerRef)}
                 />
               </div>
+              <select value={fModel} onChange={(e) => onModelPick(e.target.value)}
+                className="h-8 max-w-44 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring" title="按模型过滤">
+                <option value="">全部模型</option>
+                {modelNames.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <select value={fUser} onChange={(e) => onUserPick(e.target.value)}
+                className="h-8 max-w-40 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring" title="按用户过滤">
+                <option value="">全部用户</option>
+                {userRows.map((u) => (
+                  <option key={u.id} value={u.id}>{u.username || u.email || u.phone || u.id.slice(0, 8)}</option>
+                ))}
+              </select>
               <select value={failed} onChange={(e) => onFailed(e.target.value as "all" | "ok" | "fail")}
                 className="h-8 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring">
                 <option value="all">全部状态</option>
@@ -6423,187 +6766,227 @@ function RequestLogPanel() {
           ) : rows.length === 0 ? (
             <p className="text-sm text-muted-foreground">暂无请求记录</p>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-8" />
-                  <TableHead>时间</TableHead>
-                  <TableHead>用户</TableHead>
-                  <TableHead>模型</TableHead>
-                  <TableHead>路径</TableHead>
-                  <TableHead>最终上游</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead className="text-right" title="↑ 输入 tokens · ↓ 输出 tokens；悬停单元格看精确值">Tokens（↑入 ↓出）</TableHead>
-                  <TableHead className="text-right">延迟 (ms)</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {rows.map((r) => {
-                  const isOpen = expanded === r.request_id;
-                  const isFail = r.final_status !== 200;
-                  // 命中供应商:取首个成功尝试的 provider,缺省回退 final_kind(旧记录无 provider 字段)
-                  const hitProvider = r.attempts.find((a) => a.status === 200)?.provider || r.final_kind || "";
-                  return (
-                    <React.Fragment key={r.request_id}>
+            <div className="overflow-x-auto rounded-lg border">
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-muted/50 hover:bg-muted/50">
+                    <TableHead>时间</TableHead>
+                    <TableHead>用户</TableHead>
+                    <TableHead>模型</TableHead>
+                    <TableHead>状态</TableHead>
+                    <TableHead className="text-right" title="↑ 输入 tokens · ↓ 输出 tokens;悬停看计费值">Tokens（↑入 ↓出）</TableHead>
+                    <TableHead className="text-right" title="上游建连并返回首个响应的耗时(成功尝试)">上游耗时</TableHead>
+                    <TableHead className="text-right" title="流式:上游首块到达后持续生成 tokens 的耗时;下游回传与之同步;非流式/旧数据为 —">token 消耗</TableHead>
+                    <TableHead className="text-right" title="网关侧处理:鉴权 / 路由 / 改写 / 计费等">网关耗时</TableHead>
+                    <TableHead className="text-right">总耗时</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {rows.map((r) => {
+                    const isFail = r.final_status !== 200;
+                    const { upstream, generate, gateway } = splitLatency(r);
+                    return (
                       <TableRow
-                        className={cn(
-                          "cursor-pointer transition-colors",
-                          isFail && "bg-rose-500/[0.04] hover:bg-rose-500/[0.07]",
-                        )}
-                        onClick={() => toggle(r.request_id)}
+                        key={r.request_id}
+                        className={cn("cursor-pointer transition-colors", isFail ? "bg-rose-500/[0.04] hover:bg-rose-500/[0.08]" : "hover:bg-muted/40")}
+                        onClick={() => setDetail(r)}
                       >
-                        <TableCell className="w-8 px-1">
-                          <span className={cn("inline-block text-xs transition-transform", isOpen && "rotate-90")}>▶</span>
-                        </TableCell>
-                        <TableCell className="mono text-xs whitespace-nowrap">{fmtTime(r.ts)}</TableCell>
-                        <TableCell className="mono text-xs text-muted-foreground">{r.user_id.slice(0, 8)}</TableCell>
-                        <TableCell className="text-xs">{r.requested_model}</TableCell>
-                        <TableCell>
-                          <Badge
-                            variant={r.path === "chat" ? "default" : "muted"}
-                            className={cn(
-                              "text-[10px]",
-                              r.path === "embeddings" && "bg-emerald-500/10 text-emerald-700 ring-1 ring-emerald-500/20",
-                            )}
-                          >
-                            {r.path}
-                          </Badge>
+                        <TableCell className="mono whitespace-nowrap text-xs" title={`请求 ID: ${r.request_id}\\n点击右侧查看完整详情`}>{fmtTime(r.ts)}</TableCell>
+                        <TableCell className="whitespace-nowrap text-xs">
+                          <span className="font-medium" title={r.user_id}>{nameOf(r.user_id)}</span>
                         </TableCell>
                         <TableCell className="text-xs">
-                          {r.final_upstream_model ? (
-                            <span className="inline-flex items-center gap-1">
-                              <span className="text-muted-foreground">{hitProvider}</span>
-                              <span>{r.final_upstream_model}</span>
-                            </span>
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="font-medium">{r.requested_model}</span>
+                            {r.path !== "chat" && <Badge variant="muted" className="text-[10px]">{r.path}</Badge>}
+                            {r.stream && <span className="text-[10px] text-muted-foreground" title="流式请求">SSE</span>}
+                          </span>
                         </TableCell>
                         <TableCell>
                           <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(r.final_status))}>
                             {attemptStatusLabel(r.final_status)}
                           </span>
                         </TableCell>
-                        <TableCell className="text-right mono text-xs whitespace-nowrap">
+                        <TableCell className="mono whitespace-nowrap text-right text-xs">
                           {r.input_tokens > 0 || r.output_tokens > 0 ? (
-                            <span title={`输入 ${r.input_tokens.toLocaleString()} tokens · 输出 ${r.output_tokens.toLocaleString()} tokens · 计费 ${r.charged_tokens.toLocaleString()} tokens`}>
-                              ↑{r.input_tokens.toLocaleString()} ↓{r.output_tokens.toLocaleString()}
+                            <span title={`输入 ${r.input_tokens.toLocaleString()} · 输出 ${r.output_tokens.toLocaleString()} · 计费 ${r.charged_tokens.toLocaleString()} tokens`}>
+                              ↑{r.input_tokens.toLocaleString()} <span className="text-muted-foreground">↓</span>{r.output_tokens.toLocaleString()}
                             </span>
                           ) : <span className="text-muted-foreground">—</span>}
                         </TableCell>
-                        <TableCell className="text-right text-xs whitespace-nowrap">
-                          {r.latency_ms > 0 ? <span>{r.latency_ms.toLocaleString()}ms</span> : <span className="text-muted-foreground">—</span>}
+                        <TableCell className={cn("mono whitespace-nowrap text-right text-xs", latencyTone(upstream || null))} title={`命中 ${r.attempts.find((a) => a.status === 200)?.provider || r.final_kind || "—"} · ${r.final_upstream_model || "—"}`}>
+                          {upstream > 0 ? fmtMs(upstream) : <span className="text-muted-foreground">—</span>}
+                        </TableCell>
+                        <TableCell className={cn("mono whitespace-nowrap text-right text-xs", latencyTone(generate))}>
+                          {generate != null ? fmtMs(generate) : <span className="text-muted-foreground">—</span>}
+                        </TableCell>
+                        <TableCell className={cn("mono whitespace-nowrap text-right text-xs", latencyTone(gateway || null))}>
+                          {r.latency_ms > 0 ? fmtMs(gateway) : <span className="text-muted-foreground">—</span>}
+                        </TableCell>
+                        <TableCell className={cn("mono whitespace-nowrap text-right text-xs font-medium", latencyTone(r.latency_ms || null))}>
+                          {r.latency_ms > 0 ? fmtMs(r.latency_ms) : <span className="text-muted-foreground">—</span>}
                         </TableCell>
                       </TableRow>
-                      {isOpen && (
-                        <TableRow className="bg-muted/30 hover:bg-muted/30">
-                          <TableCell colSpan={9} className="p-0">
-                            <div className="space-y-3 px-4 py-3">
-                              {/* 候选顺序 */}
-                              <div>
-                                <p className="mb-1 text-xs font-medium text-muted-foreground">候选顺序（负载策略）</p>
-                                <table className="w-full text-xs">
-                                  <thead>
-                                    <tr className="border-b text-left text-muted-foreground">
-                                      <th className="pb-1 font-normal">#</th>
-                                      <th className="pb-1 font-normal">供应商</th>
-                                      <th className="pb-1 font-normal">上游</th>
-                                      <th className="pb-1 font-normal">模型</th>
-                                      <th className="pb-1 font-normal">权重</th>
-                                      <th className="pb-1 font-normal">状态</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {r.candidates.map((c, i) => (
-                                      <tr key={i} className="border-b border-dashed last:border-0">
-                                        <td className="py-1 text-muted-foreground">{i + 1}</td>
-                                        <td className="py-1 font-medium">{c.provider || "—"}</td>
-                                        <td className="py-1">
-                                          <span className="text-muted-foreground">{c.kind}</span>
-                                          <span className="ml-1 text-muted-foreground/60">{c.base_url.length > 30 ? c.base_url.slice(0, 30) + "…" : c.base_url}</span>
-                                        </td>
-                                        <td className="py-1">{c.upstream_model}</td>
-                                        <td className="py-1 mono">{c.weight}</td>
-                                        <td className="py-1">
-                                          {(() => {
-                                            // 在 attempts 中查找对应候选的状态(熔断跳过条目 kind="skipped",按上游模型兜底匹配)
-                                            const att = r.attempts.find((a) => (a.kind === c.kind || a.kind === "skipped") && a.upstream_model === c.upstream_model);
-                                            if (att) {
-                                              return <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(att.status))}>{attemptStatusLabel(att.status)}</span>;
-                                            }
-                                            // 有 status=0 说明在 candidates 里但未尝试
-                                            return <span className="text-muted-foreground">未尝试</span>;
-                                          })()}
-                                        </td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                              </div>
-                              {/* 实际尝试链:降级时间线 */}
-                              {r.attempts.length > 0 && (
-                                <div>
-                                  <p className="mb-2 text-xs font-medium text-muted-foreground">实际尝试（failover 时间线）</p>
-                                  <div className="relative ml-2 space-y-3 border-l border-border pl-4">
-                                    {r.attempts.map((a, i) => {
-                                      const dot = a.status === 200
-                                        ? "bg-success"
-                                        : a.status === -1 || a.status === 503
-                                          ? "bg-warning"
-                                          : "bg-destructive";
-                                      return (
-                                        <div key={i} className="relative">
-                                          <span className={cn("absolute -left-[21px] top-1 h-[9px] w-[9px] rounded-full ring-2 ring-background", dot)} />
-                                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
-                                            <span className="font-medium">{a.provider || a.kind}</span>
-                                            <span className="text-muted-foreground">{a.provider ? `${a.kind} · ` : ""}{a.upstream_model}</span>
-                                            <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(a.status))}>
-                                              {attemptStatusLabel(a.status)}
-                                            </span>
-                                            <span className="mono text-muted-foreground">{a.latency_ms > 0 ? `${a.latency_ms}ms` : ""}</span>
-                                            {a.status === 200 && <span className="text-[10px] font-semibold text-success">✓ 命中</span>}
-                                          </div>
-                                          {a.error && (
-                                            <p className="mt-0.5 max-w-[420px] truncate text-[11px] text-muted-foreground" title={a.error}>{a.error}</p>
-                                          )}
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                </div>
-                              )}
-                              {/* 请求/响应体预览(跟随存储后端;旧记录或未采集时为空) */}
-                              {(r.req_body || r.resp_body) && (
-                                <div className="grid gap-3 md:grid-cols-2">
-                                  {([["请求体", r.req_body], ["响应体", r.resp_body]] as const).map(([label, body]) => body ? (
-                                    <div key={label}>
-                                      <p className="mb-1 text-xs font-medium text-muted-foreground">{label}预览</p>
-                                      <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-background p-2 text-[11px] leading-relaxed text-muted-foreground">{body}</pre>
-                                    </div>
-                                  ) : null)}
-                                </div>
-                              )}
-                              {/* Tokens 汇总(↑=输入 ↓=输出;计费口径见提示) */}
-                              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                                <span>输入 <span className="mono text-foreground">{r.input_tokens.toLocaleString()}</span> tokens</span>
-                                <span>输出 <span className="mono text-foreground">{r.output_tokens.toLocaleString()}</span> tokens</span>
-                                <span title="计费口径 tokens；语义缓存命中时按折扣计费">计费 <span className="mono text-foreground">{r.charged_tokens.toLocaleString()}</span> tokens（缓存命中按折扣）</span>
-                                {r.stream && <Badge variant="muted" className="text-[10px]">stream</Badge>}
-                              </div>
-                            </div>
-                          </TableCell>
-                        </TableRow>
-                      )}
-                    </React.Fragment>
-                  );
-                })}
-              </TableBody>
-            </Table>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
           )}
           <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={setPage} onPageSizeChange={(s) => { setPage(1); setPageSize(s); }} />
         </CardContent>
       </Card>
+
+      {/* 右侧详情抽屉:手风琴分区展示完整链路 */}
+      <Sheet open={detail != null} onOpenChange={(o) => { if (!o) setDetail(null); }}>
+        {detail && <RequestLogDetail row={detail} userName={nameOf(detail.user_id)} />}
+      </Sheet>
     </div>
   );
 }
 
+// ---- 右侧详情抽屉内容:手风琴分区 ----
+function RequestLogDetail({ row, userName }: { row: RequestLogRow; userName: string }) {
+  const [open, setOpen] = useState<Record<string, boolean>>({ info: true, latency: true, candidates: false, attempts: true, bodies: true });
+  const toggleSec = (k: string) => setOpen((p) => ({ ...p, [k]: !p[k] }));
+  const hitProvider = row.attempts.find((a) => a.status === 200)?.provider || row.final_kind || "";
+  const isFail = row.final_status !== 200;
+
+  const Sec = ({ id, title, extra, children }: { id: string; title: string; extra?: React.ReactNode; children: React.ReactNode }) => (
+    <div className="overflow-hidden rounded-lg border">
+      <button
+        className="flex w-full items-center justify-between gap-2 bg-muted/40 px-3 py-2 text-left text-xs font-semibold transition-colors hover:bg-muted/70"
+        onClick={() => toggleSec(id)}
+      >
+        <span className="flex items-center gap-2">{title}</span>
+        <span className="flex items-center gap-2 text-muted-foreground">
+          {extra}
+          <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", open[id] && "rotate-90")} />
+        </span>
+      </button>
+      {open[id] && <div className="space-y-3 px-3 py-3">{children}</div>}
+    </div>
+  );
+
+  return (
+    <SheetContent className="w-full overflow-y-auto p-0 sm:max-w-xl">
+      <SheetHeader className="border-b px-4 py-3">
+        <SheetTitle className="flex flex-wrap items-center gap-2 text-sm">
+          <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(row.final_status))}>
+            {attemptStatusLabel(row.final_status)}
+          </span>
+          <span>{row.requested_model}</span>
+          {isFail && <span className="text-xs font-normal text-destructive">本次调用失败,可按尝试链定位</span>}
+        </SheetTitle>
+        <SheetDescription className="mono text-[11px]">
+          {fmtTimeLocal(row.ts)} · {userName} · {row.stream ? "流式" : "非流式"}
+        </SheetDescription>
+      </SheetHeader>
+      <div className="space-y-3 px-4 py-4">
+        {/* 基本信息 */}
+        <Sec id="info" title="基本信息" extra={
+          <button
+            className="rounded p-1 transition-colors hover:bg-accent hover:text-foreground"
+            title="复制请求 ID"
+            onClick={(e) => { e.stopPropagation(); void copyText(row.request_id); }}
+          >
+            <Copy className="h-3 w-3" />
+          </button>
+        }>
+          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs">
+            <span className="text-muted-foreground">请求 ID</span>
+            <code className="mono break-all rounded bg-muted px-1.5 py-0.5">{row.request_id}</code>
+            <span className="text-muted-foreground">用户</span>
+            <span className="font-medium" title={row.user_id}>{userName}<span className="ml-1 mono text-[10px] text-muted-foreground">{row.user_id.slice(0, 8)}…</span></span>
+            <span className="text-muted-foreground">请求路径</span>
+            <span>{row.path}</span>
+            <span className="text-muted-foreground">最终上游</span>
+            <span>{row.final_upstream_model ? <span className="inline-flex items-center gap-1"><span className="text-muted-foreground">{hitProvider}</span><span className="font-medium">{row.final_upstream_model}</span></span> : "—"}</span>
+            <span className="text-muted-foreground">Tokens</span>
+            <span className="mono">↑ {row.input_tokens.toLocaleString()} · ↓ {row.output_tokens.toLocaleString()} · 计费 {row.charged_tokens.toLocaleString()}</span>
+          </div>
+        </Sec>
+        {/* 耗时分解 */}
+        <Sec id="latency" title="耗时分解">
+          <LatencyBreakdown row={row} />
+        </Sec>
+        {/* 候选顺序 */}
+        <Sec id="candidates" title={`候选顺序（${row.candidates.length}）`}>
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b text-left text-muted-foreground">
+                <th className="pb-1 font-normal">#</th>
+                <th className="pb-1 font-normal">供应商</th>
+                <th className="pb-1 font-normal">模型</th>
+                <th className="pb-1 font-normal">权重</th>
+                <th className="pb-1 font-normal">状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              {row.candidates.map((c, i) => (
+                <tr key={i} className="border-b border-dashed last:border-0">
+                  <td className="py-1 text-muted-foreground">{i + 1}</td>
+                  <td className="py-1 font-medium">{c.provider || "—"}</td>
+                  <td className="py-1" title={c.base_url}>{c.upstream_model}</td>
+                  <td className="py-1 mono">{c.weight}</td>
+                  <td className="py-1">
+                    {(() => {
+                      const att = row.attempts.find((a) => (a.kind === c.kind || a.kind === "skipped") && a.upstream_model === c.upstream_model);
+                      return att
+                        ? <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(att.status))}>{attemptStatusLabel(att.status)}</span>
+                        : <span className="text-muted-foreground">未尝试</span>;
+                    })()}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Sec>
+        {/* 实际尝试链 */}
+        {row.attempts.length > 0 && (
+          <Sec id="attempts" title={`实际尝试（failover 时间线 · ${row.attempts.length}）`}>
+            <div className="relative ml-2 space-y-3 border-l border-border pl-4">
+              {row.attempts.map((a, i) => {
+                const dot = a.status === 200 ? "bg-success" : a.status === -1 || a.status === 503 ? "bg-warning" : "bg-destructive";
+                return (
+                  <div key={i} className="relative">
+                    <span className={cn("absolute -left-[21px] top-1 h-[9px] w-[9px] rounded-full ring-2 ring-background", dot)} />
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+                      <span className="font-medium">{a.provider || a.kind}</span>
+                      <span className="text-muted-foreground">{a.provider ? `${a.kind} · ` : ""}{a.upstream_model}</span>
+                      <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(a.status))}>
+                        {attemptStatusLabel(a.status)}
+                      </span>
+                      <span className="mono text-muted-foreground">{a.latency_ms > 0 ? `${a.latency_ms}ms` : ""}</span>
+                      {a.status === 200 && <span className="text-[10px] font-semibold text-success">✓ 命中</span>}
+                    </div>
+                    {a.error && <p className="mt-0.5 break-all text-[11px] text-muted-foreground">{a.error}</p>}
+                  </div>
+                );
+              })}
+            </div>
+          </Sec>
+        )}
+        {/* 请求/响应体 */}
+        {(row.req_body || row.resp_body) && (
+          <Sec id="bodies" title="请求 / 响应体">
+            <div className="space-y-3">
+              {([["请求体", row.req_body], ["响应体", row.resp_body]] as const).map(([label, body]) => body ? (
+                <div key={label}>
+                  <p className="mb-1 text-xs font-medium text-muted-foreground">{label}预览</p>
+                  <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-background p-2 text-[11px] leading-relaxed text-muted-foreground">{body}</pre>
+                </div>
+              ) : null)}
+            </div>
+          </Sec>
+        )}
+      </div>
+    </SheetContent>
+  );
+}
+
+function fmtTimeLocal(ts: number) {
+  const d = new Date(ts * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${d.toLocaleTimeString("zh-CN", { hour12: false })}`;
+}

@@ -387,6 +387,13 @@ pub struct Defaults {
     /// failover 最多尝试的候选数(含首个;0 = 不限)。
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    /// 费用显示币种:"usd"(默认) | "cny"(人民币)。仅影响前端展示单位,
+    /// 计价与落库的 cost_usd 不变;切换为 cny 时按 cny_rate 换算显示。
+    #[serde(default = "default_currency")]
+    pub currency: String,
+    /// 币种切换为 cny 时使用的美元→人民币汇率(展示换算用,默认 7.2)。
+    #[serde(default = "default_cny_rate")]
+    pub cny_rate: f64,
 }
 
 impl Defaults {
@@ -406,6 +413,8 @@ impl Defaults {
 fn default_upstream_concurrency() -> u32 { 32 }
 fn default_fallback_enabled() -> bool { true }
 fn default_max_retries() -> u32 { 5 }
+fn default_currency() -> String { "usd".to_string() }
+fn default_cny_rate() -> f64 { 7.2 }
 
 impl Default for Defaults {
     fn default() -> Self {
@@ -419,6 +428,8 @@ impl Default for Defaults {
             upstream_concurrency: default_upstream_concurrency(),
             fallback_enabled: default_fallback_enabled(),
             max_retries: default_max_retries(),
+            currency: default_currency(),
+            cny_rate: default_cny_rate(),
         }
     }
 }

@@ -6,7 +6,7 @@ import {
   Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen,
   Gauge, Zap, Timer, CalendarDays, KeySquare, Eye, EyeOff, ShieldCheck, Sparkles, Square, Trash2,
 } from "lucide-react";
-import { api, getToken, clearToken, healthz, SITE_PREFIX, KeyInfo, ModelCard, QuotaInfo, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType } from "./api";
+import { api, getToken, clearToken, healthz, SITE_PREFIX, KeyInfo, ModelCard, QuotaInfo, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType, makeCostFormatter } from "./api";
 import { copyText } from "./clipboard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -332,9 +332,9 @@ function PlanHero({ quota, summary }: { quota: QuotaInfo | null; summary: { gran
   );
 }
 
-/** 限额格:图标 + 名称 + 已用/上限 + 进度条(limit=null 视为不限,不画进度)。 */
-function QuotaCell({ icon: Icon, label, limit, used, fmt }: {
-  icon: any; label: string; limit: number | null; used: number; fmt?: (n: number) => string;
+/** 限额格:图标 + 名称 + 已用/上限 + 进度条(limit=null 视为不限,不画进度)。hint = 限额来源标注。 */
+function QuotaCell({ icon: Icon, label, limit, used, fmt, hint }: {
+  icon: any; label: string; limit: number | null; used: number; fmt?: (n: number) => string; hint?: string;
 }) {
   const unlimited = limit == null;
   const pct = !unlimited && limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
@@ -350,6 +350,7 @@ function QuotaCell({ icon: Icon, label, limit, used, fmt }: {
         <div className={cn("h-full rounded-full transition-all", danger ? "bg-destructive" : "bg-primary")}
           style={{ width: `${unlimited ? 0 : pct}%` }} />
       </div>
+      {hint && <div className="mt-1.5 text-[10px] text-muted-foreground/70" title="该限额的配置来源:用户显式设置 > 用户组 > 全局默认">来源:{hint}</div>}
     </div>
   );
 }
@@ -433,7 +434,7 @@ export default function App() {
   if (!authed) return null;
   return (
     <BrowserRouter basename={APP_BASE}>
-      <Dashboard onLogout={() => { clearToken(); setAuthed(false); }} />
+      <Dashboard onLogout={() => { clearToken(); localStorage.removeItem("relay_admin_token"); setAuthed(false); }} />
     </BrowserRouter>
   );
 }
@@ -467,6 +468,12 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [rewardsEnabled, setRewardsEnabled] = useState(false);
   const [version, setVersion] = useState("");
   const [pwOpen, setPwOpen] = useState(false);
+  // 管理员身份(SSO 进入的账号):侧边栏显示「返回管理端」。
+  const [isAdmin, setIsAdmin] = useState(false);
+  // 费用展示币种(全局配置):usd(默认)| cny。
+  const [currency, setCurrency] = useState<"usd" | "cny">("usd");
+  const [cnyRate, setCnyRate] = useState<number>(7.2);
+  const fmtCost = makeCostFormatter(currency, cnyRate);
   useEffect(() => { healthz().then((h) => setVersion(h.version)).catch(() => {}); }, []);
   const nav = NAV_ALL.filter((n) => n.path !== "/rewards" || rewardsEnabled);
   const section: Section = loc.pathname.startsWith("/chat") ? "chat"
@@ -495,7 +502,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     const all = [me, k, m, s, q];
     // 任一请求因鉴权失败 → 统一登出。
     if (all.some((r) => r.status === "rejected" && String((r as PromiseRejectedResult).reason?.message || "").includes("auth"))) { onLogout(); return; }
-    if (me.status === "fulfilled") setPhone(me.value.phone || "—");
+    if (me.status === "fulfilled") { setPhone(me.value.phone || "—"); setIsAdmin(!!(me.value as any).is_admin); }
     if (k.status === "fulfilled") setKeys(k.value.data);
     if (m.status === "fulfilled") setModels(m.value.data);
     if (s.status === "fulfilled") setSummary(s.value);
@@ -514,7 +521,11 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   // 配置未就绪前不重定向,避免深链 /rewards 在配置返回前被误判为「奖励已关闭」而跳回首页。
   const [configLoaded, setConfigLoaded] = useState(false);
   useEffect(() => {
-    api.config().then((c) => setRewardsEnabled(c.rewards_enabled)).catch(() => {}).finally(() => setConfigLoaded(true));
+    api.config().then((c) => {
+      setRewardsEnabled(c.rewards_enabled);
+      if (c.currency === "cny" || c.currency === "usd") setCurrency(c.currency);
+      if (c.cny_rate && c.cny_rate > 0) setCnyRate(c.cny_rate);
+    }).catch(() => {}).finally(() => setConfigLoaded(true));
   }, []);
   // 奖励关闭时直接访问 /rewards:把地址栏也纠正回首页,与导航/标题/内容保持一致。
   useEffect(() => {
@@ -554,6 +565,12 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       </nav>
       <div className="px-2 py-3">
         <div className="px-3 pb-2 text-xs text-muted-foreground">{phone}</div>
+        {isAdmin && (
+          <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground"
+            onClick={() => { window.location.href = SITE_PREFIX + "/?back=admin"; }}>
+            <ExternalLink className="h-4 w-4" />返回管理端
+          </Button>
+        )}
         <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground" onClick={() => setPwOpen(true)}>
           <ShieldCheck className="h-4 w-4" />修改密码
         </Button>
@@ -609,17 +626,19 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               {effectiveSection === "overview" ? (
                 <div className="space-y-5">
                   <PlanHero quota={quota} summary={summary} />
+                  {summary && summary.balance <= 0 && (
+                    <div className="flex items-center gap-2 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-2.5 text-sm text-destructive">
+                      余额已用完{summary.balance < 0 ? "(已欠费)" : ""},调用接口会被拒绝;请联系管理员充值或前往「奖励」页领取 token。
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
-                    <QuotaCell icon={Gauge} label="并发" limit={quota?.concurrency.limit ?? null} used={quota?.concurrency.used ?? 0} />
-                    <QuotaCell icon={Zap} label="RPM · 次/分" limit={quota?.rpm.limit ?? null} used={quota?.rpm.used ?? 0} />
-                    <QuotaCell icon={Timer} label="TPM · tokens/分" limit={quota?.tpm.limit ?? null} used={quota?.tpm.used ?? 0} />
-                    <QuotaCell icon={CalendarDays} label="日预算" limit={quota?.budget.daily.limit ?? null} used={quota?.budget.daily.used ?? 0} fmt={compactTokens} />
-                    <QuotaCell icon={KeySquare} label="月预算" limit={quota?.budget.monthly.limit ?? null} used={quota?.budget.monthly.used ?? 0} fmt={compactTokens} />
+                    <QuotaCell icon={Gauge} label="并发" limit={quota?.concurrency.limit ?? null} used={quota?.concurrency.used ?? 0} hint={quota?.concurrency.source} />
+                    <QuotaCell icon={Zap} label="RPM · 次/分" limit={quota?.rpm.limit ?? null} used={quota?.rpm.used ?? 0} hint={quota?.rpm.source} />
+                    <QuotaCell icon={Timer} label="TPM · tokens/分" limit={quota?.tpm.limit ?? null} used={quota?.tpm.used ?? 0} hint={quota?.tpm.source} />
+                    <QuotaCell icon={CalendarDays} label="日预算" limit={quota?.budget.daily.limit ?? null} used={quota?.budget.daily.used ?? 0} fmt={compactTokens} hint={quota?.budget.daily.source} />
+                    <QuotaCell icon={KeySquare} label="月预算" limit={quota?.budget.monthly.limit ?? null} used={quota?.budget.monthly.used ?? 0} fmt={compactTokens} hint={quota?.budget.monthly.source} />
                   </div>
-                  <div className="grid gap-5 md:grid-cols-2">
-                    <InterfaceCard kind="openai" label="OpenAI 接口" baseUrl={`${window.location.origin}${SITE_PREFIX}/v1`} keys={keys} onReveal={setReveal} onChanged={refresh} />
-                    <InterfaceCard kind="anthropic" label="Anthropic 接口" baseUrl={`${window.location.origin}${SITE_PREFIX}/v1`} keys={keys} onReveal={setReveal} onChanged={refresh} />
-                  </div>
+                  <InterfaceCard baseUrl={`${window.location.origin}${SITE_PREFIX}/v1`} keys={keys} onReveal={setReveal} onChanged={refresh} />
                   <Card>
                     <CardHeader>
                       <div className="flex items-center justify-between gap-3">
@@ -680,7 +699,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                               : "—";
                             const ms = r.latency_ms;
                             const latency = ms != null ? (ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`) : "—";
-                            const cost = r.cost_usd != null ? `$${r.cost_usd.toFixed(4)}` : "—";
+                            const cost = fmtCost(r.cost_usd);
                             const bm = r.bill_multiplier;
                             const mult = bm != null ? `×${Number.isInteger(bm) ? bm : bm.toFixed(2)}` : "—";
                             const ok = r.status != null && r.status >= 200 && r.status < 400;
@@ -1094,29 +1113,39 @@ function RewardTaskCard({ task, claim, busy, onSubmit }: {
   );
 }
 
-function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
-  kind: string; label: string; baseUrl: string; keys: KeyInfo[];
+/** API 接入卡:一把 Key 通吃 OpenAI / Anthropic 协议,仅端点与请求方式不同。 */
+function InterfaceCard({ baseUrl, keys, onReveal, onChanged }: {
+  baseUrl: string; keys: KeyInfo[];
   onReveal: (r: { kind: string; key: string; pending_approval?: boolean }) => void; onChanged: () => void;
 }) {
-  const active = keys.find((k) => k.interface_kind === kind && !k.revoked);
+  // 一把 Key 即可调用全部协议端点(Key 不绑定接口类型);已有 Key 时优先展示,避免重复创建。
+  const active = keys.find((k) => !k.revoked && k.interface_kind === "openai")
+    ?? keys.find((k) => !k.revoked);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false);
   const create = async () => {
     setBusy(true); setErr("");
-    try { const r = await api.createKey(kind); onReveal({ kind, key: r.key, pending_approval: r.pending_approval }); onChanged(); }
+    try { const r = await api.createKey("openai"); onReveal({ kind: "openai", key: r.key, pending_approval: r.pending_approval }); onChanged(); }
     catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
   const doRotate = async () => {
     setBusy(true); setErr("");
-    try { const r = await api.rotateKey(kind); setConfirmOpen(false); onReveal({ kind, key: r.key, pending_approval: r.pending_approval }); onChanged(); }
+    try { const r = await api.rotateKey(active?.interface_kind || "openai"); setConfirmOpen(false); onReveal({ kind: active?.interface_kind || "openai", key: r.key, pending_approval: r.pending_approval }); onChanged(); }
     catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
+  const endpoints: [string, string][] = [
+    ["/v1/chat/completions", "OpenAI 对话补全(流式/非流式)"],
+    ["/v1/responses", "OpenAI Responses"],
+    ["/v1/messages", "Anthropic 对话(流式/非流式)"],
+    ["/v1/embeddings", "向量 Embeddings"],
+    ["/v1/models", "模型列表"],
+  ];
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-base">
-          <KeyRound className="h-4 w-4 text-muted-foreground" /> {label}
+          <KeyRound className="h-4 w-4 text-muted-foreground" /> API 接入(OpenAI / Anthropic 兼容)
           {active
             ? (active.pending_approval
               ? <Badge variant="muted" className="border-amber-500/30 bg-amber-500/10 text-amber-600">待审批</Badge>
@@ -1133,12 +1162,9 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
           </div>
         </div>
         <div>
-          <div className="mb-1 text-xs text-muted-foreground">可用端点(同一把 Key 通用)</div>
+          <div className="mb-1 text-xs text-muted-foreground">可用端点(同一把 Key 通用,仅端点不同)</div>
           <div className="space-y-1">
-            {(kind === "openai"
-              ? [["/v1/chat/completions", "对话补全(流式/非流式)"], ["/v1/responses", "OpenAI Responses"], ["/v1/embeddings", "向量 Embeddings"], ["/v1/models", "模型列表"]]
-              : [["/v1/messages", "Anthropic 对话(流式/非流式)"], ["/v1/models", "模型列表"]]
-            ).map(([p, d]) => (
+            {endpoints.map(([p, d]) => (
               <div key={p} className="flex items-center justify-between gap-2 rounded-md bg-muted/40 px-2 py-1 text-xs">
                 <span className="mono">{p}</span>
                 <span className="text-muted-foreground">{d}</span>
@@ -1177,7 +1203,7 @@ function InterfaceCard({ kind, label, baseUrl, keys, onReveal, onChanged }: {
       <Dialog open={confirmOpen} onOpenChange={(o) => !busy && setConfirmOpen(o)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>刷新 {label} 的 Key?</DialogTitle>
+            <DialogTitle>刷新 API Key?</DialogTitle>
             <DialogDescription className="text-destructive">
               ⚠️ 刷新会立即吊销当前 Key,正在使用旧 Key 的应用将中断。此操作不可撤销。
             </DialogDescription>
@@ -1218,7 +1244,7 @@ function RevealContent({ kind, apiKey, pendingApproval }: { kind: string; apiKey
     <DialogContent>
       <DialogHeader>
         <DialogTitle>你的新 {kind === "openai" ? "OpenAI" : "Anthropic"} Key</DialogTitle>
-        <DialogDescription>请立即复制保存;关闭后将无法再次查看完整 Key(库里只存掩码与哈希),如丢失请「刷新 Key」重新生成。{pendingApproval ? "(该 Key 需管理员批准后生效)" : ""}</DialogDescription>
+        <DialogDescription>请立即复制保存,关闭后无法再查看完整 Key;丢失可「刷新 Key」重新生成。{pendingApproval ? "(该 Key 需管理员批准后生效)" : ""}</DialogDescription>
       </DialogHeader>
       <div ref={keyRef} className="mono select-all rounded-lg border bg-muted/50 px-3 py-3 text-sm break-all" title="点击可全选">{apiKey}</div>
       <Button onClick={copy} variant={state === "ok" ? "secondary" : "default"}>
@@ -1226,7 +1252,7 @@ function RevealContent({ kind, apiKey, pendingApproval }: { kind: string; apiKey
         {state === "sel" && <><Check className="h-4 w-4" />已全选,请按 Ctrl+C 复制</>}
         {state === "idle" && <><Copy className="h-4 w-4" />复制</>}
       </Button>
-      {state === "sel" && <p className="text-xs text-muted-foreground">若 Ctrl+C 无效,请长按(手机)或双击 Key 文本手动选中复制;关闭后只能「刷新 Key」重新生成。</p>}
+      {state === "sel" && <p className="text-xs text-muted-foreground">若复制无效,可长按或双击 Key 文本手动选中;关闭后可「刷新 Key」重新生成。</p>}
     </DialogContent>
   );
 }
