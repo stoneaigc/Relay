@@ -412,6 +412,10 @@ pub struct Defaults {
     /// 单个上游连接(一个 key)的默认最大在途并发。0 表示不限。
     #[serde(default = "default_upstream_concurrency")]
     pub upstream_concurrency: u32,
+    /// 用户并发满员时的排队等待时长(毫秒):排队期内有空位即放行,超时报 429。
+    /// 0 = 关闭排队(满员立即拒绝,旧行为)。
+    #[serde(default = "default_user_queue_wait")]
+    pub user_queue_wait_ms: u64,
     /// failover 总开关:关闭后仅尝试首个候选,不可用直接报错。
     #[serde(default = "default_fallback_enabled")]
     pub fallback_enabled: bool,
@@ -442,6 +446,7 @@ impl Defaults {
 }
 
 fn default_upstream_concurrency() -> u32 { 32 }
+fn default_user_queue_wait() -> u64 { 3000 }
 fn default_fallback_enabled() -> bool { true }
 fn default_max_retries() -> u32 { 5 }
 fn default_currency() -> String { "usd".to_string() }
@@ -457,6 +462,7 @@ impl Default for Defaults {
             rpm_limit: default_rpm(),
             tpm_limit: default_tpm(),
             upstream_concurrency: default_upstream_concurrency(),
+            user_queue_wait_ms: default_user_queue_wait(),
             fallback_enabled: default_fallback_enabled(),
             max_retries: default_max_retries(),
             currency: default_currency(),

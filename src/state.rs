@@ -53,10 +53,14 @@ pub struct PlanBucket {
 #[derive(Debug)]
 pub struct UserState {
     pub id: Uuid,
+    /// 用户名(监控页并发用户列表展示用;构造时从存储层带入)。
+    pub username: String,
     pub token_balance: AtomicI64,
     /// 累计消耗 charged tokens(仅计费请求;缓存命中不计),随 flush 与余额同批落库。
     pub token_used_total: AtomicI64,
     pub in_flight: AtomicU32,
+    /// 当前正在排队等并发名额的请求数(实时监控「队列情况」)。
+    pub waiting: AtomicU32,
     pub concurrency_limit: AtomicU32,
     pub status: AtomicU8,
     /// 用户级计费倍率 ×1000(如 3000 = ×3.0),与模型倍率相乘。
@@ -104,6 +108,7 @@ const RATE_WINDOW_SECS: i64 = 60;
 impl UserState {
     pub fn new(
         id: Uuid,
+        username: &str,
         balance: i64,
         used_total: i64,
         concurrency_limit: u32,
@@ -114,9 +119,11 @@ impl UserState {
     ) -> Self {
         Self {
             id,
+            username: username.to_string(),
             token_balance: AtomicI64::new(balance),
             token_used_total: AtomicI64::new(used_total),
             in_flight: AtomicU32::new(0),
+            waiting: AtomicU32::new(0),
             concurrency_limit: AtomicU32::new(concurrency_limit),
             status: AtomicU8::new(status),
             bill_multiplier_milli: AtomicU32::new((bill_multiplier * 1000.0).round() as u32),
@@ -365,6 +372,30 @@ impl UserState {
                 user: Arc::clone(self),
             })
         }
+    }
+
+    /// 占用并发名额:名额满时进入排队等待(`wait` 内每 25ms 重试一次),
+    /// 超时返回 None(调用方报 429)。wait 为 0 等价 try_acquire(立即拒绝)。
+    /// 排队期间计入 `waiting`,供实时监控的「队列情况」展示。
+    pub async fn acquire_with_wait(self: &Arc<Self>, wait: Duration) -> Option<ConcurrencyGuard> {
+        if let Some(g) = self.try_acquire() {
+            return Some(g);
+        }
+        if wait.is_zero() {
+            return None;
+        }
+        self.waiting.fetch_add(1, Ordering::AcqRel);
+        let deadline = tokio::time::Instant::now() + wait;
+        let mut result = None;
+        while tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            if let Some(g) = self.try_acquire() {
+                result = Some(g);
+                break;
+            }
+        }
+        self.waiting.fetch_sub(1, Ordering::AcqRel);
+        result
     }
 }
 
@@ -1507,7 +1538,7 @@ mod tests {
     // --- 周期预算:累计 / 耗尽 / 滚动重置 ---
     #[test]
     fn budget_daily_exhausted() {
-        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 0, 1.0, 0, 0);
+        let u = UserState::new(Uuid::new_v4(), "", 1_000_000, 0, 0, 0, 1.0, 0, 0);
         u.set_budgets(1000, 0);
         assert_eq!(u.budget_status(8), BudgetStatus::Ok);
         u.record_budget(600, 8);
@@ -1518,7 +1549,7 @@ mod tests {
 
     #[test]
     fn budget_monthly_exhausted() {
-        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 0, 1.0, 0, 0);
+        let u = UserState::new(Uuid::new_v4(), "", 1_000_000, 0, 0, 0, 1.0, 0, 0);
         u.set_budgets(0, 1500);
         u.record_budget(1500, 8);
         assert_eq!(u.budget_status(8), BudgetStatus::MonthlyExhausted);
@@ -1526,7 +1557,7 @@ mod tests {
 
     #[test]
     fn budget_window_rollover_resets_counters() {
-        let u = UserState::new(Uuid::new_v4(), 1_000_000, 0, 0, 0, 1.0, 0, 0);
+        let u = UserState::new(Uuid::new_v4(), "", 1_000_000, 0, 0, 0, 1.0, 0, 0);
         u.set_budgets(1000, 2000);
         u.record_budget(1000, 8);
         assert_eq!(u.budget_status(8), BudgetStatus::DailyExhausted);

@@ -677,7 +677,8 @@ pub async fn load_into_memory(
         let limit = if cl_resolved == 0 { u32::MAX } else { cl_resolved };
         let rpm = cl_free_resolve(r.try_get::<Option<i64>, _>("rpm_limit").ok().flatten(), ug_rpm, cfg.defaults.rpm_limit);
         let tpm = cl_free_resolve(r.try_get::<Option<i64>, _>("tpm_limit").ok().flatten(), ug_tpm, cfg.defaults.tpm_limit);
-        let us = Arc::new(UserState::new(id, balance, used_total, limit, status as u8, mult, group_id, user_group_id));
+        let username: String = r.try_get("username").unwrap_or_else(|_| id.to_string());
+        let us = Arc::new(UserState::new(id, &username, balance, used_total, limit, status as u8, mult, group_id, user_group_id));
         us.set_limits(rpm, tpm);
         let ug_bd = r.try_get::<Option<i64>, _>("ug_budget_daily").ok().flatten();
         let ug_bm = r.try_get::<Option<i64>, _>("ug_budget_monthly").ok().flatten();

@@ -255,6 +255,7 @@ pub async fn portal_sso(
             let limit = if cfg.defaults.concurrency_limit == 0 { u32::MAX } else { cfg.defaults.concurrency_limit };
             let us = Arc::new(crate::state::UserState::new(
                 id,
+                "admin",
                 cfg.defaults.signup_grant_tokens,
                 0,
                 limit,
@@ -542,7 +543,7 @@ pub async fn create_user(
         .or(ug.as_ref().and_then(|g| g.tpm_limit))
         .map(|v| v.max(0) as u32)
         .unwrap_or(default_tpm);
-    let us = Arc::new(UserState::new(id, grant, 0, limit, 0, 1.0, gid.unwrap_or(0), ugid.unwrap_or(0)));
+    let us = Arc::new(UserState::new(id, &body.username, grant, 0, limit, 0, 1.0, gid.unwrap_or(0), ugid.unwrap_or(0)));
     us.set_limits(rpm, tpm);
     us.set_budgets(
         body.budget_daily_tokens
@@ -4539,11 +4540,29 @@ pub async fn metrics_realtime(State(state): State<Arc<AppState>>, headers: Heade
     let num = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
     let int = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
     // 在途并发 = 所有用户 in_flight 之和(含流式进行中的请求)。
-    let active: u64 = state
-        .users
-        .iter()
-        .map(|u| u.value().in_flight.load(Ordering::Relaxed) as u64)
-        .sum();
+    let mut active: u64 = 0;
+    let mut waiting: u64 = 0;
+    let mut active_users: Vec<Value> = Vec::new();
+    for u in state.users.iter() {
+        let inflight = u.value().in_flight.load(Ordering::Relaxed) as u64;
+        let w = u.value().waiting.load(Ordering::Relaxed) as u64;
+        active += inflight;
+        waiting += w;
+        if inflight > 0 || w > 0 {
+            let limit = u.value().concurrency_limit.load(Ordering::Relaxed);
+            active_users.push(json!({
+                "id": u.value().id,
+                "username": u.value().username,
+                "in_flight": inflight,
+                "limit": if limit == u32::MAX { 0 } else { limit },
+                "waiting": w,
+            }));
+        }
+    }
+    active_users.sort_by(|a, b| {
+        b["in_flight"].as_u64().unwrap_or(0).cmp(&a["in_flight"].as_u64().unwrap_or(0))
+            .then(b["waiting"].as_u64().unwrap_or(0).cmp(&a["waiting"].as_u64().unwrap_or(0)))
+    });
     let tps = num(&s, "tpm") / 60.0;
     Ok(Json(json!({
         "ts": crate::storage::now_secs(),
@@ -4555,6 +4574,8 @@ pub async fn metrics_realtime(State(state): State<Arc<AppState>>, headers: Heade
         "tpm": num(&s, "tpm"),
         "avg_ms": num(&s, "avg_ms"),
         "p95_ms": num(&s, "p95_ms"),
+        "queue": { "waiting": waiting },
+        "users": active_users,
     })))
 }
 

@@ -6501,11 +6501,16 @@ function TpmChart({ points }: { points: MetricsSeriesPoint[] }) {
   return <EChart option={option} height={240} />;
 }
 
-// ---- 实时状态条:5s 轮询在途并发/QPS/成功率/token 吞吐,可暂停 ----
+// ---- 实时监控 Tab:5s 轮询在途并发/排队/QPS/成功率/token 吞吐 + 并发用户列表 ----
 /** 实时采样单条记录(来自 /metrics/realtime,5s 一拍) */
+interface RtUser {
+  id: string; username: string; in_flight: number; limit: number; waiting: number;
+}
 interface RtSample {
   ts: number; active: number; requests_5m: number; success_rate: number;
   qps: number; tokens_per_sec: number; tpm: number; avg_ms: number; p95_ms: number;
+  queue?: { waiting: number };
+  users?: RtUser[];
 }
 
 /** 采样历史长度:60 点 × 5s = 近 5 分钟迷你趋势 */
@@ -6566,14 +6571,14 @@ function RealtimeCards() {
   }, [live]);
 
   const srColor = !d ? "#64748b" : d.success_rate >= 0.99 ? "#10b981" : d.success_rate >= 0.9 ? "#f59e0b" : "#f43f5e";
-  const p95Color = !d ? "#64748b" : d.p95_ms < 2000 ? "#10b981" : d.p95_ms < 8000 ? "#f59e0b" : "#f43f5e";
+  const waiting = d?.queue?.waiting ?? 0;
   const cards: { label: string; value: string; sub: string; color: string; spark: number[]; title: string }[] = d ? [
     { label: "在途并发", value: String(d.active), sub: "此刻处理中", color: "#6366f1", spark: hist.map((h) => h.active), title: "此刻正在处理中的请求数(含流式)" },
+    { label: "排队中", value: String(waiting), sub: waiting > 0 ? "并发满员排队等待" : "无排队", color: waiting > 0 ? "#f59e0b" : "#94a3b8", spark: hist.map((h) => h.queue?.waiting ?? 0), title: "因用户并发满员而排队等待的请求数(排队上限 defaults.user_queue_wait_ms)" },
     { label: "QPS", value: d.qps.toFixed(2), sub: "近 5 分钟均值", color: "#0ea5e9", spark: hist.map((h) => h.qps), title: "近 5 分钟平均每秒请求数" },
     { label: "成功率", value: `${(d.success_rate * 100).toFixed(1)}%`, sub: d.success_rate < 0.9 ? "低于 90% 阈值" : "近 5 分钟", color: srColor, spark: hist.map((h) => h.success_rate * 100), title: "近 5 分钟成功请求占比" },
     { label: "Token/s", value: Math.round(d.tokens_per_sec).toLocaleString(), sub: `TPM ${Math.round(d.tpm).toLocaleString()}`, color: "#8b5cf6", spark: hist.map((h) => h.tokens_per_sec), title: "近 5 分钟平均每秒 token 吞吐" },
     { label: "请求数", value: d.requests_5m.toLocaleString(), sub: "近 5 分钟累计", color: "#64748b", spark: hist.map((h) => h.requests_5m), title: "近 5 分钟总请求数" },
-    { label: "P95 延迟", value: `${Math.round(d.p95_ms)} ms`, sub: `均值 ${Math.round(d.avg_ms)} ms`, color: p95Color, spark: hist.map((h) => h.p95_ms), title: "近 5 分钟 P95 延迟" },
   ] : [];
 
   return (
@@ -6621,6 +6626,54 @@ function RealtimeCards() {
           ))
         ) : null}
       </div>
+      {/* 并发用户列表:哪些用户正在并发使用(在途/排队,随 5s 采样同步刷新) */}
+      <div className="rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2.5 dark:border-slate-800">
+          <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">并发用户</p>
+          <span className="text-[11px] text-slate-400">{d?.users?.length ?? 0} 个用户在途/排队</span>
+        </div>
+        {d && (d.users?.length ?? 0) > 0 ? (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-slate-100 text-left text-[11px] uppercase tracking-wide text-slate-400 dark:border-slate-800">
+                <th className="px-4 py-2 font-medium">用户</th>
+                <th className="px-4 py-2 font-medium">在途</th>
+                <th className="px-4 py-2 font-medium">并发上限</th>
+                <th className="px-4 py-2 font-medium">排队</th>
+                <th className="px-4 py-2 font-medium">占用</th>
+              </tr>
+            </thead>
+            <tbody>
+              {d.users!.map((u) => {
+                const pct = u.limit > 0 ? Math.min(100, Math.round((u.in_flight / u.limit) * 100)) : 0;
+                return (
+                  <tr key={u.id} className="border-b border-slate-50 last:border-0 dark:border-slate-800/60">
+                    <td className="px-4 py-2 font-medium text-slate-800 dark:text-slate-100">{u.username || u.id.slice(0, 8)}</td>
+                    <td className="mono px-4 py-2">{u.in_flight}</td>
+                    <td className="mono px-4 py-2 text-slate-500">{u.limit > 0 ? u.limit : "不限"}</td>
+                    <td className="mono px-4 py-2">
+                      {u.waiting > 0 ? <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[11px] font-medium text-amber-600">{u.waiting} 排队中</span> : <span className="text-slate-300">—</span>}
+                    </td>
+                    <td className="px-4 py-2">
+                      <div className="h-1.5 w-28 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                        <div
+                          className={cn("h-full rounded-full", u.limit > 0 && pct >= 90 ? "bg-rose-500" : u.limit > 0 && pct >= 70 ? "bg-amber-500" : "bg-indigo-500")}
+                          style={{ width: `${u.limit > 0 ? Math.max(pct, 4) : 100}%` }}
+                        />
+                      </div>
+                      <span className="ml-2 text-[11px] text-slate-400">{u.limit > 0 ? `${pct}%` : ""}</span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        ) : (
+          <p className="px-4 py-6 text-center text-sm text-slate-400">
+            {d ? "当前没有用户正在并发使用" : "等待采样…"}
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -6631,6 +6684,8 @@ function MetricsPanel() {
   const [data, setData] = useState<MetricsDashboardResp | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  // 页面两 Tab:「实时监控」5s 采样看当下;「趋势统计」看窗口聚合。
+  const [tab, setTab] = useState<"live" | "trend">("live");
 
   useEffect(() => {
     let cancelled = false;
@@ -6744,39 +6799,53 @@ function MetricsPanel() {
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div>
+        <div className="flex items-center gap-3">
           <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100">实时监控</h2>
-          <p className="mt-0.5 text-xs text-slate-500">
-            实时区 5s 采样(近 5 分钟窗口);下方趋势区为窗口聚合(秒桶 120s / 分钟桶 48h),15s 刷新,范围可切换。
-          </p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex flex-wrap gap-1 rounded-lg border border-slate-200 bg-white p-1 text-xs shadow-sm dark:border-slate-800 dark:bg-slate-900">
-            {RANGE_PRESETS.map((p) => (
+          <div className="flex w-fit items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            {([["live", "实时监控"], ["trend", "趋势统计"]] as const).map(([key, label]) => (
               <button
-                key={p.secs}
-                onClick={() => setRange(p.secs)}
+                key={key}
+                onClick={() => setTab(key)}
                 className={cn(
-                  "rounded-md px-2.5 py-1 transition",
-                  range === p.secs
-                    ? "bg-indigo-600 text-white shadow"
-                    : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+                  "rounded-lg px-3.5 py-1.5 text-sm font-medium transition",
+                  tab === key ? "bg-indigo-600 text-white shadow" : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
                 )}
               >
-                {p.label}
+                {label}
               </button>
             ))}
           </div>
-          <Button variant="ghost" size="sm" onClick={() => setTick((x) => x + 1)} disabled={busy} className="gap-1">
-            <RefreshCw className={cn("h-4 w-4", busy && "animate-spin")} />
-            刷新
-          </Button>
         </div>
+        {tab === "trend" && (
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap gap-1 rounded-lg border border-slate-200 bg-white p-1 text-xs shadow-sm dark:border-slate-800 dark:bg-slate-900">
+              {RANGE_PRESETS.map((p) => (
+                <button
+                  key={p.secs}
+                  onClick={() => setRange(p.secs)}
+                  className={cn(
+                    "rounded-md px-2.5 py-1 transition",
+                    range === p.secs
+                      ? "bg-indigo-600 text-white shadow"
+                      : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+                  )}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            <Button variant="ghost" size="sm" onClick={() => setTick((x) => x + 1)} disabled={busy} className="gap-1">
+              <RefreshCw className={cn("h-4 w-4", busy && "animate-spin")} />
+              刷新
+            </Button>
+          </div>
+        )}
       </div>
 
-      {/* 实时区:6 张指标卡(带 5 分钟迷你趋势) */}
-      <RealtimeCards />
-
+      {tab === "live" ? (
+        <RealtimeCards />
+      ) : (
+        <>
       {/* 窗口趋势分析区 */}
       <p className="pt-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
         窗口趋势分析({RANGE_PRESETS.find((p) => p.secs === range)?.label ?? "自定义"})
@@ -6983,6 +7052,8 @@ function MetricsPanel() {
           </div>
         </CardContent>
       </Card>
+        </>
+      )}
     </div>
   );
 }
@@ -7425,6 +7496,36 @@ function RequestLogPanel() {
 }
 
 // ---- 右侧详情抽屉内容:手风琴分区 ----
+
+/** 带反馈的复制按钮:成功变绿勾「已复制」,失败显示「复制失败」,2 秒后复原。 */
+function CopyBtn({ text, title, className }: { text: string; title: string; className?: string }) {
+  const [state, setState] = useState<"idle" | "ok" | "fail">("idle");
+  useEffect(() => {
+    if (state === "idle") return;
+    const t = setTimeout(() => setState("idle"), 2000);
+    return () => clearTimeout(t);
+  }, [state]);
+  return (
+    <button
+      className={cn(
+        "flex shrink-0 items-center gap-1 rounded p-1 text-[10px] transition-colors hover:bg-accent hover:text-foreground",
+        state === "ok" && "text-emerald-600",
+        state === "fail" && "text-rose-600",
+        className
+      )}
+      title={state === "ok" ? "已复制" : state === "fail" ? "复制失败" : title}
+      onClick={async () => {
+        const ok = await copyText(text);
+        setState(ok ? "ok" : "fail");
+      }}
+    >
+      {state === "ok" ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+      {state === "ok" && <span>已复制</span>}
+      {state === "fail" && <span>复制失败</span>}
+    </button>
+  );
+}
+
 function RequestLogDetail({ row, userName }: { row: RequestLogRow; userName: string }) {
   const [open, setOpen] = useState<Record<string, boolean>>({ info: true, latency: true, chain: true, bodies: true });
   const toggleSec = (k: string) => setOpen((p) => ({ ...p, [k]: !p[k] }));
@@ -7471,13 +7572,7 @@ function RequestLogDetail({ row, userName }: { row: RequestLogRow; userName: str
             <span className="flex items-center gap-1.5">
               {/* 抽屉加宽后 40 字符 mono 可单行完整展示;break-all 兜底保证任何宽度下全量可见(不裁切、复制完整)。 */}
               <code className="mono block break-all rounded bg-muted px-1.5 py-0.5 text-[11px]" title={row.request_id}>{row.request_id}</code>
-              <button
-                className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                title="复制请求 ID"
-                onClick={() => void copyText(row.request_id)}
-              >
-                <Copy className="h-3 w-3" />
-              </button>
+              <CopyBtn text={row.request_id} title="复制请求 ID" />
             </span>
             <span className="text-muted-foreground">用户</span>
             <span className="font-medium">{userName}</span>
@@ -7567,9 +7662,7 @@ function RequestLogDetail({ row, userName }: { row: RequestLogRow; userName: str
                 <div>
                   <p className="mb-1 flex items-center justify-between text-xs font-medium text-muted-foreground">
                     <span>请求体</span>
-                    <button className="rounded p-1 transition-colors hover:bg-accent hover:text-foreground" title="复制请求体" onClick={() => void copyText(row.req_body || "")}>
-                      <Copy className="h-3 w-3" />
-                    </button>
+                    <CopyBtn text={row.req_body || ""} title="复制请求体" />
                   </p>
                   <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/30 p-2 text-[11px] leading-relaxed">{prettyMaybeJson(row.req_body)}</pre>
                 </div>
@@ -7578,9 +7671,7 @@ function RequestLogDetail({ row, userName }: { row: RequestLogRow; userName: str
                 <div>
                   <p className="mb-1 flex items-center justify-between text-xs font-medium text-muted-foreground">
                     <span>响应体{row.stream ? "(SSE 事件流)" : ""}</span>
-                    <button className="rounded p-1 transition-colors hover:bg-accent hover:text-foreground" title="复制响应体" onClick={() => void copyText(row.resp_body || "")}>
-                      <Copy className="h-3 w-3" />
-                    </button>
+                    <CopyBtn text={row.resp_body || ""} title="复制响应体" />
                   </p>
                   {row.stream ? <SseEventList body={row.resp_body} /> : (
                     <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/30 p-2 text-[11px] leading-relaxed">{prettyMaybeJson(row.resp_body)}</pre>

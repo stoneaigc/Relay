@@ -269,7 +269,7 @@ pub async fn register(
             (id, email)
         }
     };
-    let us = Arc::new(UserState::new(id, grant, 0, effective_cl, 0, 1.0, active_group.unwrap_or(0), default_ug.unwrap_or(0)));
+    let us = Arc::new(UserState::new(id, &display, grant, 0, effective_cl, 0, 1.0, active_group.unwrap_or(0), default_ug.unwrap_or(0)));
     us.set_limits(effective_rpm, effective_tpm);
     us.set_budgets(
         default_group.as_ref().and_then(|g| g.budget_daily).unwrap_or(0).max(0),

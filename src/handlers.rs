@@ -442,8 +442,10 @@ pub async fn run_chat(
     // 前端看起来像"末尾多了个斜杠"——已修复,旧日志中的截断 ID 保持原样。
     let request_id = format!("req_{}", uuid::Uuid::new_v4());
 
-    // 占用并发名额(RAII,流结束/出错自动释放)。
-    let guard = match user.try_acquire() {
+    // 占用并发名额(RAII,流结束/出错自动释放);满员时排队等待
+    // (默认 3s,可配 defaults.user_queue_wait_ms;0 = 立即拒绝旧行为)。
+    let queue_wait = std::time::Duration::from_millis(state.config.load().defaults.user_queue_wait_ms);
+    let guard = match user.acquire_with_wait(queue_wait).await {
         Some(g) => g,
         None => {
             fail_global!();
@@ -1206,7 +1208,9 @@ pub async fn run_messages(
         .ok_or_else(|| ApiError::BadRequest("missing `model`".into()))?
         .to_string();
     let stream = req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
-    let guard = match user.try_acquire() {
+    // 同 chat 入口:满员排队等待(默认 3s),超时报 429。
+    let queue_wait = std::time::Duration::from_millis(state.config.load().defaults.user_queue_wait_ms);
+    let guard = match user.acquire_with_wait(queue_wait).await {
         Some(g) => g,
         None => { fail_global!(); return Err(ApiError::TooManyRequests); }
     };

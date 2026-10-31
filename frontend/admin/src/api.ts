@@ -546,8 +546,13 @@ export const api = {
     return req(`/admin/api/request-logs${s ? "?" + s : ""}`);
   },
 
-  // ---- 实时状态条(5s 轮询):在途并发/近5min QPS/成功率/token 吞吐 ----
-  metricsRealtime: (): Promise<{ ts: number; active: number; requests_5m: number; success_rate: number; qps: number; tokens_per_sec: number; tpm: number; avg_ms: number; p95_ms: number }> =>
+  // ---- 实时状态(5s 轮询):在途并发/排队/QPS/成功率/token 吞吐 + 并发用户列表 ----
+  metricsRealtime: (): Promise<{
+    ts: number; active: number; requests_5m: number; success_rate: number;
+    qps: number; tokens_per_sec: number; tpm: number; avg_ms: number; p95_ms: number;
+    queue: { waiting: number };
+    users: { id: string; username: string; in_flight: number; limit: number; waiting: number }[];
+  }> =>
     req("/admin/api/metrics/realtime"),
 
   // ---- 调用趋势聚合(数据源 = 请求日志全量历史;≤48h 按小时分桶,>48h 按天分桶) ----
