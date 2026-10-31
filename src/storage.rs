@@ -464,6 +464,53 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE request_logs ADD COLUMN first_byte_ms INTEGER")
             .execute(pool)
             .await;
+        // ---------- 套餐机制 ----------
+        // 套餐定义:一次发放含 N token、有效期 M 天;售价字段为付费功能预留。
+        let _ = q!(
+            "CREATE TABLE IF NOT EXISTS plans (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                token_quota INTEGER NOT NULL,
+                validity_days INTEGER NOT NULL DEFAULT 30,
+                price_cents INTEGER NOT NULL DEFAULT 0,
+                description TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            )"
+        )
+        .execute(pool)
+        .await;
+        // 用户组绑定默认套餐(注册/入组自动发放的套餐)。
+        let _ = q!("ALTER TABLE user_groups ADD COLUMN default_plan_id TEXT")
+            .execute(pool)
+            .await;
+        // 用户组可追加绑定的套餐集合(该组用户可充值的范围)。
+        let _ = q!(
+            "CREATE TABLE IF NOT EXISTS user_group_plans (
+                group_id INTEGER NOT NULL,
+                plan_id TEXT NOT NULL,
+                PRIMARY KEY (group_id, plan_id)
+            )"
+        )
+        .execute(pool)
+        .await;
+        // 用户在某个套餐下的余量桶:扣费时按到期时间升序消费,耗尽后回落主余额。
+        let _ = q!(
+            "CREATE TABLE IF NOT EXISTS user_plan_quota (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL,
+                remaining_tokens INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                source TEXT NOT NULL DEFAULT 'recharge',
+                created_at INTEGER NOT NULL
+            )"
+        )
+        .execute(pool)
+        .await;
+        let _ = q!("CREATE INDEX IF NOT EXISTS idx_user_plan_quota_user ON user_plan_quota(user_id)")
+            .execute(pool)
+            .await;
         // 语义缓存徽标:usage_logs 按 request_id 关联 request_logs 取 final_kind,两侧补索引防大表全扫。
         let _ = q!("CREATE INDEX IF NOT EXISTS idx_request_logs_request_id ON request_logs(request_id)")
             .execute(pool)
@@ -681,6 +728,33 @@ pub async fn load_into_memory(
             let uid = u.id.to_string();
             u.used_daily.fetch_max(day_map.get(&uid).copied().unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
             u.used_monthly.fetch_max(month_map.get(&uid).copied().unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    // 套餐余量桶:按用户归拢进内存(扣费临期优先消费,随余额 flush 同批落库)。
+    let bucket_rows = q!(
+        "SELECT q.id, q.user_id, q.plan_id, COALESCE(p.name, '') AS plan_name, q.remaining_tokens, q.expires_at
+         FROM user_plan_quota q LEFT JOIN plans p ON p.id = q.plan_id
+         ORDER BY q.user_id, q.expires_at ASC"
+    )
+    .fetch_all(pool)
+    .await?;
+    {
+        let mut by_user: std::collections::HashMap<Uuid, Vec<crate::state::PlanBucket>> = std::collections::HashMap::new();
+        for r in bucket_rows {
+            let Ok(uid) = Uuid::parse_str(r.get::<String, _>("user_id").as_str()) else { continue };
+            by_user.entry(uid).or_default().push(crate::state::PlanBucket {
+                id: r.get("id"),
+                plan_id: r.get("plan_id"),
+                plan_name: r.get("plan_name"),
+                remaining_tokens: r.get("remaining_tokens"),
+                expires_at: r.get("expires_at"),
+                dirty: false,
+            });
+        }
+        for (uid, buckets) in by_user {
+            if let Some(u) = users.get(&uid) {
+                *u.buckets() = buckets;
+            }
         }
     }
     Ok(())
@@ -1846,7 +1920,7 @@ pub async fn admin_reset_password(
 
 pub async fn list_user_groups(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = q!(
-        "SELECT g.id, g.name, g.max_concurrency, g.rpm_limit, g.tpm_limit, g.budget_daily_tokens, g.budget_monthly_tokens, g.created_at, \
+        "SELECT g.id, g.name, g.max_concurrency, g.rpm_limit, g.tpm_limit, g.budget_daily_tokens, g.budget_monthly_tokens, g.default_plan_id, g.created_at, \
                 (SELECT COUNT(*) FROM users u WHERE u.user_group_id = g.id) AS member_count
          FROM user_groups g ORDER BY g.id"
     )
@@ -1863,6 +1937,17 @@ pub async fn list_user_groups(pool: &Db) -> anyhow::Result<Vec<serde_json::Value
             .or_default()
             .push(b.get::<i64, _>("group_id"));
     }
+    // 绑定的套餐集合。
+    let pbinds = q!("SELECT group_id, plan_id FROM user_group_plans ORDER BY group_id")
+        .fetch_all(pool)
+        .await?;
+    let mut pbind_map: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+    for b in pbinds {
+        pbind_map
+            .entry(b.get::<i64, _>("group_id"))
+            .or_default()
+            .push(b.get::<String, _>("plan_id"));
+    }
     Ok(rows
         .iter()
         .map(|r| {
@@ -1875,6 +1960,8 @@ pub async fn list_user_groups(pool: &Db) -> anyhow::Result<Vec<serde_json::Value
                 "tpm_limit": r.try_get::<Option<i64>, _>("tpm_limit").unwrap_or(None),
                 "budget_daily_tokens": r.try_get::<Option<i64>, _>("budget_daily_tokens").unwrap_or(None),
                 "budget_monthly_tokens": r.try_get::<Option<i64>, _>("budget_monthly_tokens").unwrap_or(None),
+                "default_plan_id": r.try_get::<Option<String>, _>("default_plan_id").unwrap_or(None),
+                "plan_ids": pbind_map.get(&id).cloned().unwrap_or_default(),
                 "member_count": r.try_get::<i64, _>("member_count").unwrap_or(0),
                 "model_group_ids": bind_map.get(&id).cloned().unwrap_or_default(),
                 "created_at": r.get::<String, _>("created_at"),
@@ -1909,6 +1996,199 @@ pub async fn user_group_exists(pool: &Db, id: i64) -> anyhow::Result<bool> {
     Ok(row.is_some())
 }
 
+// ---------- 套餐(plans) ----------
+pub async fn plan_exists(pool: &Db, id: &str) -> anyhow::Result<bool> {
+    let row = q!("SELECT 1 AS ok FROM plans WHERE id = ?").bind(id).fetch_optional(pool).await?;
+    Ok(row.is_some())
+}
+
+/// 覆盖式设置用户组绑定的套餐集合(可充值的套餐范围)。
+pub async fn set_user_group_plans(pool: &Db, user_group_id: i64, plan_ids: &[String]) -> anyhow::Result<()> {
+    q!("DELETE FROM user_group_plans WHERE group_id = ?")
+        .bind(user_group_id)
+        .execute(pool)
+        .await?;
+    for pid in plan_ids {
+        q!("INSERT OR IGNORE INTO user_group_plans (group_id, plan_id) VALUES (?, ?)")
+            .bind(user_group_id)
+            .bind(pid)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+/// 设置用户组默认套餐(注册/入组自动发放);None = 清除。
+pub async fn set_group_default_plan(pool: &Db, user_group_id: i64, plan_id: Option<&str>) -> anyhow::Result<()> {
+    q!("UPDATE user_groups SET default_plan_id = ? WHERE id = ?")
+        .bind(plan_id)
+        .bind(user_group_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 套餐列表(含每档已发放人数,便于管理端展示)。
+pub async fn list_plans(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
+    let rows = q!(
+        "SELECT p.id, p.name, p.token_quota, p.validity_days, p.price_cents, p.description, p.enabled, p.created_at, \
+                (SELECT COUNT(*) FROM user_group_plans gp WHERE gp.plan_id = p.id) AS group_count, \
+                (SELECT COUNT(*) FROM user_plan_quota q WHERE q.plan_id = p.id) AS issued_count
+         FROM plans p ORDER BY p.created_at DESC"
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.get::<String, _>("id"),
+                "name": r.get::<String, _>("name"),
+                "token_quota": r.get::<i64, _>("token_quota"),
+                "validity_days": r.get::<i64, _>("validity_days"),
+                "price_cents": r.get::<i64, _>("price_cents"),
+                "description": r.get::<String, _>("description"),
+                "enabled": r.get::<i64, _>("enabled") != 0,
+                "group_count": r.get::<i64, _>("group_count"),
+                "issued_count": r.get::<i64, _>("issued_count"),
+                "created_at": r.get::<String, _>("created_at"),
+            })
+        })
+        .collect())
+}
+
+/// 新建套餐,返回完整行。
+pub async fn create_plan(
+    pool: &Db,
+    name: &str,
+    token_quota: i64,
+    validity_days: i64,
+    price_cents: i64,
+    description: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let id = uuid::Uuid::new_v4().to_string();
+    q!("INSERT INTO plans (id, name, token_quota, validity_days, price_cents, description, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)")
+        .bind(&id)
+        .bind(name)
+        .bind(token_quota)
+        .bind(validity_days)
+        .bind(price_cents)
+        .bind(description)
+        .bind(now_iso())
+        .execute(pool)
+        .await?;
+    Ok(serde_json::json!({
+        "id": id, "name": name, "token_quota": token_quota,
+        "validity_days": validity_days, "price_cents": price_cents,
+        "description": description, "enabled": true,
+    }))
+}
+
+/// 更新套餐(全量字段);返回是否存在。
+pub async fn update_plan(
+    pool: &Db,
+    id: &str,
+    name: &str,
+    token_quota: i64,
+    validity_days: i64,
+    price_cents: i64,
+    description: &str,
+    enabled: bool,
+) -> anyhow::Result<bool> {
+    let r = q!("UPDATE plans SET name = ?, token_quota = ?, validity_days = ?, price_cents = ?, description = ?, enabled = ? WHERE id = ?")
+        .bind(name)
+        .bind(token_quota)
+        .bind(validity_days)
+        .bind(price_cents)
+        .bind(description)
+        .bind(enabled as i64)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(r.rows_affected() > 0)
+}
+
+/// 删除套餐并清理组绑定与默认引用;已发放的余量桶保留(存量用户不受影响)。
+pub async fn delete_plan(pool: &Db, id: &str) -> anyhow::Result<()> {
+    q!("DELETE FROM user_group_plans WHERE plan_id = ?").bind(id).execute(pool).await?;
+    q!("UPDATE user_groups SET default_plan_id = NULL WHERE default_plan_id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    q!("DELETE FROM plans WHERE id = ?").bind(id).execute(pool).await?;
+    Ok(())
+}
+
+/// 给用户发放一个套餐余量桶(充值/系统发放)。
+pub async fn grant_plan_quota(pool: &Db, user_id: Uuid, plan_id: &str, source: &str) -> anyhow::Result<serde_json::Value> {
+    let row = q!("SELECT name, token_quota, validity_days, enabled FROM plans WHERE id = ?")
+        .bind(plan_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("plan not found"))?;
+    let enabled: i64 = row.get("enabled");
+    if enabled == 0 {
+        anyhow::bail!("套餐已停用");
+    }
+    let quota: i64 = row.get("token_quota");
+    let days: i64 = row.get("validity_days");
+    let bucket_id = uuid::Uuid::new_v4().to_string();
+    let expires_at = now_secs() + days.max(1) * 86400;
+    q!("INSERT INTO user_plan_quota (id, user_id, plan_id, remaining_tokens, expires_at, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .bind(&bucket_id)
+        .bind(user_id.to_string())
+        .bind(plan_id)
+        .bind(quota)
+        .bind(expires_at)
+        .bind(source)
+        .bind(now_secs())
+        .execute(pool)
+        .await?;
+    Ok(serde_json::json!({
+        "id": bucket_id, "user_id": user_id, "plan_id": plan_id,
+        "plan_name": row.get::<String, _>("name"),
+        "remaining_tokens": quota, "expires_at": expires_at, "source": source,
+    }))
+}
+
+/// 用户当前持有的套餐余量桶(含套餐名;过期桶也返回,前端标灰)。
+pub async fn list_user_plan_quota(pool: &Db, user_id: Uuid) -> anyhow::Result<Vec<serde_json::Value>> {
+    let rows = q!(
+        "SELECT q.id, q.plan_id, p.name AS plan_name, q.remaining_tokens, q.expires_at, q.source, q.created_at
+         FROM user_plan_quota q LEFT JOIN plans p ON p.id = q.plan_id
+         WHERE q.user_id = ? ORDER BY q.expires_at ASC"
+    )
+    .bind(user_id.to_string())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.get::<String, _>("id"),
+                "plan_id": r.get::<String, _>("plan_id"),
+                "plan_name": r.try_get::<Option<String>, _>("plan_name").ok().flatten().unwrap_or_else(|| "已删除套餐".into()),
+                "remaining_tokens": r.get::<i64, _>("remaining_tokens"),
+                "expires_at": r.get::<i64, _>("expires_at"),
+                "source": r.get::<String, _>("source"),
+                "created_at": r.get::<i64, _>("created_at"),
+            })
+        })
+        .collect())
+}
+
+/// 把内存中变动的套餐余量桶批量落库(随余额 flush 同批执行)。
+pub async fn flush_plan_buckets(pool: &Db, buckets: &[crate::state::PlanBucket]) -> anyhow::Result<()> {
+    for b in buckets {
+        q!("UPDATE user_plan_quota SET remaining_tokens = ? WHERE id = ?")
+            .bind(b.remaining_tokens)
+            .bind(&b.id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
 /// 用户组行(内存限额同步用)。
 pub struct UserGroupRow {
     pub id: i64,
@@ -1918,11 +2198,13 @@ pub struct UserGroupRow {
     pub tpm_limit: Option<i64>,
     pub budget_daily: Option<i64>,
     pub budget_monthly: Option<i64>,
+    /// 默认套餐 id(注册/入组自动发放)。
+    pub default_plan_id: Option<String>,
 }
 
 pub async fn get_user_group(pool: &Db, id: i64) -> anyhow::Result<Option<UserGroupRow>> {
     let row = q!(
-        "SELECT id, name, max_concurrency, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens FROM user_groups WHERE id = ?",
+        "SELECT id, name, max_concurrency, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens, default_plan_id FROM user_groups WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -1935,6 +2217,7 @@ pub async fn get_user_group(pool: &Db, id: i64) -> anyhow::Result<Option<UserGro
         tpm_limit: r.try_get("tpm_limit").unwrap_or(None),
         budget_daily: r.try_get("budget_daily_tokens").unwrap_or(None),
         budget_monthly: r.try_get("budget_monthly_tokens").unwrap_or(None),
+        default_plan_id: r.try_get("default_plan_id").unwrap_or(None),
     }))
 }
 

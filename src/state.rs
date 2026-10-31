@@ -36,6 +36,19 @@ pub struct KeyEntry {
     pub allowed_models: Option<Vec<String>>,
 }
 
+/// 套餐余量桶(内存镜像,随余额 flush 同批落库)。
+#[derive(Debug, Clone)]
+pub struct PlanBucket {
+    pub id: String,
+    pub plan_id: String,
+    pub plan_name: String,
+    pub remaining_tokens: i64,
+    /// 过期时间(unix 秒)。
+    pub expires_at: i64,
+    /// 自上次落盘以来是否被扣减。
+    pub dirty: bool,
+}
+
 /// 单用户运行态。token 余额/并发都是原子量,落库异步进行。
 #[derive(Debug)]
 pub struct UserState {
@@ -54,6 +67,8 @@ pub struct UserState {
     pub user_group_id: AtomicI64,
     /// 余额自上次落盘以来是否变更。
     pub dirty: AtomicBool,
+    /// 套餐余量桶(临期优先扣减;启动时加载,发放时同步)。
+    pub plan_buckets: Mutex<Vec<PlanBucket>>,
     /// 每分钟请求数上限(0 = 不限)。
     pub rpm_limit: AtomicU32,
     /// 每分钟 token 消耗上限(0 = 不限)。
@@ -108,6 +123,7 @@ impl UserState {
             group_id: AtomicI64::new(group_id),
             user_group_id: AtomicI64::new(user_group_id),
             dirty: AtomicBool::new(false),
+            plan_buckets: Mutex::new(Vec::new()),
             rpm_limit: AtomicU32::new(0),
             tpm_limit: AtomicU32::new(0),
             budget_daily: AtomicI64::new(0),
@@ -295,14 +311,43 @@ impl UserState {
         self.status.load(Ordering::Relaxed) == STATUS_ACTIVE
     }
 
+    /// 取套餐余量桶锁(毒锁恢复:panic 后继续用当前值,避免整进程不可用)。
+    pub fn buckets(&self) -> std::sync::MutexGuard<'_, Vec<PlanBucket>> {
+        self.plan_buckets.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn balance(&self) -> i64 {
         self.token_balance.load(Ordering::Relaxed)
     }
 
-    /// 扣减 token,并标记需落盘。允许扣到负数(让本次请求完成,下次再拒)。
-    /// 同时累计消耗量,与余额共享 dirty 标记、同批落库。
+    /// 可用总额 = 主余额 + 未过期套餐余量桶之和(欠费预检与门户展示用)。
+    pub fn available(&self) -> i64 {
+        let now = crate::storage::now_secs();
+        let buckets = self.buckets();
+        self.token_balance.load(Ordering::Relaxed)
+            + buckets.iter().filter(|b| b.remaining_tokens > 0 && b.expires_at > now).map(|b| b.remaining_tokens).sum::<i64>()
+    }
+
+    /// 扣减 token:先按到期时间升序消费套餐余量桶(临期优先),耗尽后扣主余额。
+    /// 允许扣到负数(让本次请求完成,下次再拒)。同时累计消耗量,与余额共享 dirty 标记、同批落库。
     pub fn deduct(&self, amount: i64) {
-        self.token_balance.fetch_sub(amount, Ordering::Relaxed);
+        let mut remaining = amount;
+        {
+            let mut buckets = self.buckets();
+            let now = crate::storage::now_secs();
+            for b in buckets.iter_mut() {
+                if remaining <= 0 {
+                    break;
+                }
+                if b.remaining_tokens > 0 && b.expires_at > now {
+                    let take = b.remaining_tokens.min(remaining);
+                    b.remaining_tokens -= take;
+                    remaining -= take;
+                    b.dirty = true;
+                }
+            }
+        }
+        self.token_balance.fetch_sub(remaining, Ordering::Relaxed);
         self.token_used_total
             .fetch_add(amount.max(0), Ordering::Relaxed);
         self.dirty.store(true, Ordering::Relaxed);

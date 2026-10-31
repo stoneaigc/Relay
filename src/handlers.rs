@@ -242,7 +242,7 @@ async fn embeddings_inner(
 ) -> Result<Response, ApiError> {
     let auth = authenticate(state, headers)?;
     let user = auth.user;
-    if user.balance() <= 0 {
+    if user.available() <= 0 {
         return Err(ApiError::InsufficientBalance);
     }
     if !user.try_rpm() {
@@ -409,7 +409,7 @@ pub async fn run_chat(
         };
     }
 
-    if user.balance() <= 0 {
+    if user.available() <= 0 {
         fail_global!();
         return Err(ApiError::InsufficientBalance);
     }
@@ -1176,7 +1176,7 @@ pub async fn run_messages(
         };
     }
 
-    if user.balance() <= 0 {
+    if user.available() <= 0 {
         fail_global!();
         return Err(ApiError::InsufficientBalance);
     }

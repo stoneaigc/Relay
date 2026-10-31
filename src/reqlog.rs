@@ -88,22 +88,14 @@ pub trait RequestLogStore: Send + Sync {
     /// - `hours`:只看最近 N 小时,None=不过滤。
     fn recent(
         &self,
-        q: &str,
-        user: &str,
-        model: &str,
-        failed: Option<bool>,
-        hours: Option<u64>,
+        filter: &LogFilter,
         limit: u32,
         offset: u32,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<RequestLog>>> + Send + '_>>;
 
     fn count(
         &self,
-        q: &str,
-        user: &str,
-        model: &str,
-        failed: Option<bool>,
-        hours: Option<u64>,
+        filter: &LogFilter,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<i64>> + Send + '_>>;
 
     /// 清理超过 days 天前的日志,返回删除条数。默认空实现(0 条);调用方仅在 days>0 时调用。
@@ -166,41 +158,87 @@ const INSERT_SQL: &str = "INSERT INTO request_logs
 const COUNT_CAP: i64 = 20000;
 
 /// 根据筛选条件拼接动态 WHERE(q 关键字 / user 用户 / model 模型 / failed 状态 / hours 时间窗)。
-fn sqlite_where(q: &str, user: &str, model: &str, failed: Option<bool>, hours: Option<u64>) -> (String, Option<String>, Option<String>, Option<String>) {
-    let qt = q.trim();
-    let has_q = !qt.is_empty();
-    let ut = user.trim();
-    let has_user = !ut.is_empty();
-    let mt = model.trim();
-    let has_model = !mt.is_empty();
-    let cutoff = hours
-        .map(|h| format!("@{}", now_secs().saturating_sub(h as i64 * 3600)));
+/// 请求日志查询条件(各存储后端共用)。
+#[derive(Debug, Default, Clone)]
+pub struct LogFilter {
+    /// 关键字:匹配 request_id 或 requested_model。
+    pub q: String,
+    /// 按用户 ID 精确过滤。
+    pub user: String,
+    /// 按对外模型名精确过滤。
+    pub model: String,
+    /// 兼容旧参数:Some(true)=只看失败,Some(false)=只看成功,None=不过滤。
+    pub failed: Option<bool>,
+    /// 精确状态码过滤(如 [200,405,503]);空 = 不过滤。
+    pub statuses: Vec<i64>,
+    /// 只看最近 N 小时。
+    pub hours: Option<u64>,
+    /// 自定义时间窗(unix 秒,含边界)。
+    pub from_ts: Option<i64>,
+    pub to_ts: Option<i64>,
+}
 
-    let mut conds: Vec<&str> = Vec::new();
+impl LogFilter {
+    pub fn has_statuses(&self) -> bool {
+        !self.statuses.is_empty()
+    }
+}
+
+/// 根据筛选条件拼接动态 WHERE 与按序绑定值(SQLite/PG 共用)。
+fn sqlite_where(f: &LogFilter) -> (String, Vec<String>) {
+    let qt = f.q.trim();
+    let has_q = !qt.is_empty();
+    let ut = f.user.trim();
+    let has_user = !ut.is_empty();
+    let mt = f.model.trim();
+    let has_model = !mt.is_empty();
+    let mut binds: Vec<String> = Vec::new();
+    let mut conds: Vec<String> = Vec::new();
     if has_q {
-        conds.push("(request_id LIKE ? OR requested_model LIKE ?)");
+        conds.push("(request_id LIKE ? OR requested_model LIKE ?)".into());
+        let pat = format!("%{qt}%");
+        binds.push(pat.clone());
+        binds.push(pat);
     }
     if has_user {
-        conds.push("user_id = ?");
+        conds.push("user_id = ?".into());
+        binds.push(ut.to_string());
     }
     if has_model {
-        conds.push("requested_model = ?");
+        conds.push("requested_model = ?".into());
+        binds.push(mt.to_string());
     }
-    match failed {
-        Some(true) => conds.push("final_status != 200"),
-        Some(false) => conds.push("final_status = 200"),
+    match f.failed {
+        Some(true) => conds.push("final_status != 200".into()),
+        Some(false) => conds.push("final_status = 200".into()),
         None => {}
     }
-    if cutoff.is_some() {
+    if f.has_statuses() {
+        let marks = vec!["?"; f.statuses.len()].join(", ");
+        conds.push(format!("final_status IN ({marks})"));
+        for s in &f.statuses {
+            binds.push(s.to_string());
+        }
+    }
+    if let Some(h) = f.hours {
         // created_at 以 "@unix秒" 存储,定长字符串,字典序=数值序。
-        conds.push("created_at >= ?");
+        conds.push("created_at >= ?".into());
+        binds.push(format!("@{}", now_secs().saturating_sub(h as i64 * 3600)));
+    }
+    if let Some(from) = f.from_ts {
+        conds.push("created_at >= ?".into());
+        binds.push(format!("@{from}"));
+    }
+    if let Some(to) = f.to_ts {
+        conds.push("created_at <= ?".into());
+        binds.push(format!("@{to}"));
     }
     let where_sql = if conds.is_empty() {
         String::new()
     } else {
         format!(" WHERE {}", conds.join(" AND "))
     };
-    (where_sql, if has_user { Some(ut.to_string()) } else { None }, if has_model { Some(mt.to_string()) } else { None }, cutoff)
+    (where_sql, binds)
 }
 
 impl RequestLogStore for SqliteRequestLogStore {
@@ -322,20 +360,14 @@ impl RequestLogStore for SqliteRequestLogStore {
 
     fn recent(
         &self,
-        q: &str,
-        user: &str,
-        model: &str,
-        failed: Option<bool>,
-        hours: Option<u64>,
+        filter: &LogFilter,
         limit: u32,
         offset: u32,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<RequestLog>>> + Send + '_>> {
-        let (where_sql, userf, modelf, cutoff) = sqlite_where(q, user, model, failed, hours);
+        let (where_sql, binds) = sqlite_where(filter);
         let limit = limit.clamp(1, 200);
         let offset = offset as i64;
         let db = self.db.clone();
-        let has_q = !q.trim().is_empty();
-        let pat = format!("%{}%", q.trim());
         let sql = format!(
             "SELECT request_id, user_id, path, requested_model, stream, candidates, attempts,
                     final_kind, final_upstream_model, final_status, latency_ms,
@@ -347,17 +379,8 @@ impl RequestLogStore for SqliteRequestLogStore {
         Box::pin(async move {
             let sql = pq(&sql);
             let mut query = sqlx::query(&sql);
-            if has_q {
-                query = query.bind(&pat).bind(&pat);
-            }
-            if let Some(u) = &userf {
-                query = query.bind(u);
-            }
-            if let Some(m) = &modelf {
-                query = query.bind(m);
-            }
-            if let Some(c) = &cutoff {
-                query = query.bind(c);
+            for b in &binds {
+                query = query.bind(b);
             }
             query = query.bind(limit as i64).bind(offset);
             let rows = query.fetch_all(&db).await?;
@@ -399,33 +422,18 @@ impl RequestLogStore for SqliteRequestLogStore {
 
     fn count(
         &self,
-        q: &str,
-        user: &str,
-        model: &str,
-        failed: Option<bool>,
-        hours: Option<u64>,
+        filter: &LogFilter,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<i64>> + Send + '_>> {
-        let (where_sql, userf, modelf, cutoff) = sqlite_where(q, user, model, failed, hours);
+        let (where_sql, binds) = sqlite_where(filter);
         let db = self.db.clone();
-        let has_q = !q.trim().is_empty();
-        let pat = format!("%{}%", q.trim());
         // 大表保护:COUNT 在子查询 LIMIT 处截断(封顶 COUNT_CAP),分页无需精确总数。
         let sql = format!("SELECT COUNT(*) AS c FROM (SELECT 1 FROM request_logs{where_sql} LIMIT ?)");
         Box::pin(async move {
             use sqlx::Row;
             let sql = pq(&sql);
             let mut query = sqlx::query(&sql);
-            if has_q {
-                query = query.bind(&pat).bind(&pat);
-            }
-            if let Some(u) = &userf {
-                query = query.bind(u);
-            }
-            if let Some(m) = &modelf {
-                query = query.bind(m);
-            }
-            if let Some(c) = &cutoff {
-                query = query.bind(c);
+            for b in &binds {
+                query = query.bind(b);
             }
             query = query.bind(COUNT_CAP + 1);
             let row = query.fetch_one(&db).await?;
@@ -539,12 +547,12 @@ fn es_timestamp(ts: i64) -> String {
 }
 
 /// 构造 ES query 子句(bool 组合):关键字 / 用户 / 模型 / 失败筛选 / 时间窗。
-fn es_query(q: &str, user: &str, model: &str, failed: Option<bool>, hours: Option<u64>) -> serde_json::Value {
+fn es_query(f: &LogFilter) -> serde_json::Value {
     let mut must: Vec<serde_json::Value> = Vec::new();
     let mut filter: Vec<serde_json::Value> = Vec::new();
     let mut must_not: Vec<serde_json::Value> = Vec::new();
 
-    let qt = q.trim();
+    let qt = f.q.trim();
     if !qt.is_empty() {
         must.push(serde_json::json!({
             "bool": {
@@ -556,22 +564,31 @@ fn es_query(q: &str, user: &str, model: &str, failed: Option<bool>, hours: Optio
             }
         }));
     }
-    let ut = user.trim();
+    let ut = f.user.trim();
     if !ut.is_empty() {
         filter.push(serde_json::json!({ "term": { "user_id.keyword": ut } }));
     }
-    let mt = model.trim();
+    let mt = f.model.trim();
     if !mt.is_empty() {
         filter.push(serde_json::json!({ "term": { "requested_model.keyword": mt } }));
     }
-    match failed {
+    match f.failed {
         Some(true) => must_not.push(serde_json::json!({ "term": { "final_status": 200 } })),
         Some(false) => filter.push(serde_json::json!({ "term": { "final_status": 200 } })),
         None => {}
     }
-    if let Some(h) = hours {
+    if f.has_statuses() {
+        filter.push(serde_json::json!({ "terms": { "final_status": f.statuses } }));
+    }
+    if let Some(h) = f.hours {
         let cutoff = now_secs().saturating_sub(h as i64 * 3600);
         filter.push(serde_json::json!({ "range": { "ts": { "gte": cutoff } } }));
+    }
+    if let Some(from) = f.from_ts {
+        filter.push(serde_json::json!({ "range": { "ts": { "gte": from } } }));
+    }
+    if let Some(to) = f.to_ts {
+        filter.push(serde_json::json!({ "range": { "ts": { "lte": to } } }));
     }
 
     let mut boolq = serde_json::Map::new();
@@ -679,11 +696,7 @@ impl RequestLogStore for EsRequestLogStore {
 
     fn recent(
         &self,
-        q: &str,
-        user: &str,
-        model: &str,
-        failed: Option<bool>,
-        hours: Option<u64>,
+        filter: &LogFilter,
         limit: u32,
         offset: u32,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<RequestLog>>> + Send + '_>> {
@@ -693,7 +706,7 @@ impl RequestLogStore for EsRequestLogStore {
             "from": offset,
             "size": limit,
             "sort": [{ "ts": { "order": "desc", "unmapped_type": "long" } }],
-            "query": es_query(q, user, model, failed, hours),
+            "query": es_query(filter),
         });
         let authed = self.authed(self.client.post(&url).json(&body));
         Box::pin(async move {
@@ -724,14 +737,10 @@ impl RequestLogStore for EsRequestLogStore {
 
     fn count(
         &self,
-        q: &str,
-        user: &str,
-        model: &str,
-        failed: Option<bool>,
-        hours: Option<u64>,
+        filter: &LogFilter,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<i64>> + Send + '_>> {
         let url = format!("{}/{}-*/_count", self.base_url, self.index_prefix);
-        let body = serde_json::json!({ "query": es_query(q, user, model, failed, hours) });
+        let body = serde_json::json!({ "query": es_query(filter) });
         let authed = self.authed(self.client.post(&url).json(&body));
         Box::pin(async move {
             let resp = authed
@@ -926,10 +935,10 @@ mod tests {
 
     #[test]
     fn es_query_filters() {
-        let q = es_query("", "", "", None, None);
+        let q = es_query(&LogFilter::default());
         assert_eq!(q["bool"].as_object().map(|m| m.len()), Some(0));
 
-        let q = es_query("req_1", "", "", Some(true), Some(24));
+        let q = es_query(&LogFilter { q: "req_1".into(), failed: Some(true), hours: Some(24), ..Default::default() });
         let must_not = q["bool"]["must_not"].as_array().unwrap();
         assert_eq!(must_not[0]["term"]["final_status"], 200);
         assert!(q["bool"]["filter"].as_array().unwrap()[0]["range"]["ts"]["gte"].is_i64());
@@ -939,7 +948,7 @@ mod tests {
             .unwrap()
             .contains("req_1"));
 
-        let q = es_query("m1", "", "", Some(false), None);
+        let q = es_query(&LogFilter { q: "m1".into(), failed: Some(false), ..Default::default() });
         assert_eq!(q["bool"]["filter"][0]["term"]["final_status"], 200);
         assert!(q["bool"]["must_not"].is_null());
     }
@@ -993,7 +1002,7 @@ mod tests {
             .write(&body_log("req_w1", Some("req-payload"), Some("resp-payload")))
             .await
             .unwrap();
-        let got = store.recent("", "", "", None, None, 10, 0).await.unwrap();
+        let got = store.recent(&LogFilter::default(), 10, 0).await.unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].request_id, "req_w1");
         assert_eq!(got[0].req_body.as_deref(), Some("req-payload"));
@@ -1011,7 +1020,7 @@ mod tests {
             .await
             .unwrap();
         // recent 按 id DESC:后写入的 b2 在前。
-        let got = store.recent("", "", "", None, None, 10, 0).await.unwrap();
+        let got = store.recent(&LogFilter::default(), 10, 0).await.unwrap();
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].request_id, "req_b2");
         assert_eq!(got[0].req_body, None);
@@ -1031,7 +1040,7 @@ mod tests {
         recent.ts = now - 29 * 86400;
         store.write_batch(vec![old, recent]).await.unwrap();
         assert_eq!(store.prune(30).await.unwrap(), 1);
-        let got = store.recent("", "", "", None, None, 10, 0).await.unwrap();
+        let got = store.recent(&LogFilter::default(), 10, 0).await.unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].request_id, "req_recent");
     }

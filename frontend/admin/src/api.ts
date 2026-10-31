@@ -80,6 +80,10 @@ export interface UserGroupRow {
   member_count: number;
   /** 绑定的有序模型组 id(下标即优先级,0=最高);空 = 沿用用户直属模型组 */
   model_group_ids: number[];
+  /** 默认套餐 id(注册/入组自动发放);null = 未配置 */
+  default_plan_id: string | null;
+  /** 绑定的套餐 id 集合(该组用户可充值范围) */
+  plan_ids: string[];
   created_at: string;
 }
 
@@ -92,6 +96,10 @@ export interface UserGroupPayload {
   budget_monthly_tokens?: number | null;
   /** 绑定的有序模型组 id 列表(覆盖式);不传 = 不改动 */
   model_group_ids?: number[];
+  /** 默认套餐 id(覆盖式,null=清除);不传 = 不改动 */
+  default_plan_id?: string | null;
+  /** 绑定的套餐 id 集合(覆盖式);不传 = 不改动 */
+  plan_ids?: string[];
 }
 
 export interface ModelRow {
@@ -522,7 +530,7 @@ export const api = {
   },
 
   // ---- 请求链路追踪 ----
-  requestLogs: (q?: string, page?: number, pageSize?: number, failed?: boolean | null, hours?: number | null, user?: string | null, model?: string | null): Promise<{ data: RequestLogRow[]; total: number; page: number; page_size: number; total_pages: number }> => {
+  requestLogs: (q?: string, page?: number, pageSize?: number, failed?: boolean | null, hours?: number | null, user?: string | null, model?: string | null, statuses?: number[] | null, fromTs?: number | null, toTs?: number | null): Promise<{ data: RequestLogRow[]; total: number; page: number; page_size: number; total_pages: number }> => {
     const qs = new URLSearchParams();
     if (q) qs.set("q", q);
     if (typeof page === "number") qs.set("page", String(page));
@@ -531,9 +539,29 @@ export const api = {
     if (typeof hours === "number") qs.set("hours", String(hours));
     if (user && user.trim()) qs.set("user", user.trim());
     if (model && model.trim()) qs.set("model", model.trim());
+    if (statuses && statuses.length) qs.set("status", statuses.join(","));
+    if (typeof fromTs === "number") qs.set("from_ts", String(fromTs));
+    if (typeof toTs === "number") qs.set("to_ts", String(toTs));
     const s = qs.toString();
     return req(`/admin/api/request-logs${s ? "?" + s : ""}`);
   },
+
+  // ---- 实时状态条(5s 轮询):在途并发/近5min QPS/成功率/token 吞吐 ----
+  metricsRealtime: (): Promise<{ ts: number; active: number; requests_5m: number; success_rate: number; qps: number; tokens_per_sec: number; tpm: number; avg_ms: number; p95_ms: number }> =>
+    req("/admin/api/metrics/realtime"),
+
+  // ---- 套餐管理 ----
+  plans: (): Promise<{ data: PlanRow[] }> => req("/admin/api/plans"),
+  createPlan: (body: { name: string; token_quota: number; validity_days: number; price_cents?: number; description?: string }): Promise<PlanRow> =>
+    req("/admin/api/plans", { method: "POST", body: JSON.stringify(body) }),
+  updatePlan: (id: string, body: { name: string; token_quota: number; validity_days: number; price_cents?: number; description?: string; enabled?: boolean }): Promise<{ ok: boolean }> =>
+    req(`/admin/api/plans/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deletePlan: (id: string): Promise<{ ok: boolean }> => req(`/admin/api/plans/${id}`, { method: "DELETE" }),
+  userPlanQuota: (userId: string): Promise<{ data: PlanQuotaRow[] }> => req(`/admin/api/users/${userId}/plan-quota`),
+  grantUserPlan: (userId: string, planId: string): Promise<PlanQuotaRow> =>
+    req(`/admin/api/users/${userId}/plan-quota`, { method: "POST", body: JSON.stringify({ plan_id: planId }) }),
+  revokeUserPlanBucket: (userId: string, bucketId: string): Promise<{ ok: boolean }> =>
+    req(`/admin/api/users/${userId}/plan-quota/${bucketId}`, { method: "DELETE" }),
 
   // ---- 管理操作审计 ----
   auditLogs: (page?: number, pageSize?: number): Promise<{ data: AuditLogRow[]; total: number; page: number; page_size: number; total_pages: number }> => {
@@ -893,6 +921,30 @@ export interface RequestAttempt {
   status: number;
   latency_ms: number;
   error: string;
+}
+
+
+export interface PlanRow {
+  id: string;
+  name: string;
+  token_quota: number;
+  validity_days: number;
+  price_cents: number;
+  description: string;
+  enabled: boolean;
+  group_count?: number;
+  issued_count?: number;
+  created_at?: string;
+}
+
+export interface PlanQuotaRow {
+  id: string;
+  plan_id: string;
+  plan_name: string;
+  remaining_tokens: number;
+  expires_at: number;
+  source: string;
+  created_at?: number;
 }
 
 export interface RequestLogRow {

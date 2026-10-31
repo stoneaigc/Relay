@@ -440,6 +440,16 @@ async fn main() -> anyhow::Result<()> {
             "/user-groups/:id",
             axum::routing::patch(admin::update_user_group).delete(admin::delete_user_group),
         )
+        .route("/plans", get(admin::list_plans).post(admin::create_plan))
+        .route(
+            "/plans/:id",
+            axum::routing::patch(admin::update_plan).delete(admin::delete_plan),
+        )
+        .route(
+            "/users/:id/plan-quota",
+            get(admin::list_user_plan_quota).post(admin::grant_user_plan),
+        )
+        .route("/users/:id/plan-quota/:bucket", axum::routing::delete(admin::revoke_user_plan_bucket))
         .route("/users/:id/usage", get(admin::user_usage))
         .route("/users/:id/series", get(admin::user_series))
         .route("/usage", get(admin::global_usage))
@@ -510,6 +520,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/audit/failures", get(admin::list_failure_audit))
         // 接口指标仪表盘
         .route("/metrics", get(admin::metrics_dashboard))
+        .route("/metrics/realtime", get(admin::metrics_realtime))
         .route("/metrics/overview", get(admin::metrics_overview))
         // 请求链路追踪
         .route("/request-logs", get(admin::list_request_logs))
@@ -763,6 +774,28 @@ async fn flush_dirty(state: &AppState) {
             if let Some(u) = state.users.get(&id) {
                 u.dirty.store(true, Ordering::Relaxed); // 回写失败,保留 dirty 下次重试
             }
+        }
+    }
+    // 套餐余量桶:与余额同批落库(仅落变动的桶)。
+    for entry in state.users.iter() {
+        let u = entry.value();
+        let dirty: Vec<crate::state::PlanBucket> = {
+            let buckets = u.buckets();
+            buckets.iter().filter(|b| b.dirty).cloned().collect()
+        };
+        if dirty.is_empty() {
+            continue;
+        }
+        match storage::flush_plan_buckets(&state.db, &dirty).await {
+            Ok(()) => {
+                let mut buckets = u.buckets();
+                for b in dirty {
+                    if let Some(t) = buckets.iter_mut().find(|x| x.id == b.id) {
+                        t.dirty = false;
+                    }
+                }
+            }
+            Err(e) => tracing::error!("flush plan buckets failed for {}: {e}", u.id),
         }
     }
 }

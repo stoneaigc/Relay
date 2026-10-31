@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
-import { Users as UsersIcon, UsersRound, KeyRound, Copy, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen, SlidersHorizontal, Undo2, Ban, ChevronRight, ArrowUp, ArrowDown } from "lucide-react";
+import { Users as UsersIcon, UsersRound, KeyRound, Copy, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen, SlidersHorizontal, Undo2, Ban, ChevronRight, ArrowUp, ArrowDown, Inbox } from "lucide-react";
 import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, UserGroupRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint, AdminKeyRow, AdminApiKeyRow } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
@@ -96,8 +96,8 @@ const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: a
   {
     title: "监控",
     items: [
-      { path: "/metrics", label: "接口指标", icon: Activity },
-      { path: "/upstreams", label: "上游治理", icon: Zap },
+      { path: "/metrics", label: "实时监控", icon: Activity },
+      { path: "/upstreams", label: "上游监控", icon: Zap },
       { path: "/usage", label: "调用日志", icon: BarChart3 },
     ],
   },
@@ -3878,12 +3878,34 @@ function BreakdownBars({ title, rows, metric }: { title: string; rows: UsageBrea
 function UsagePanel() {
   // 调用趋势:复用实时监控的聚合序列(近 24 小时,成功/失败堆叠柱)。
   const [series, setSeries] = useState<MetricsSeriesPoint[]>([]);
+  const [tab, setTab] = useState<"trend" | "detail">("trend");
   useEffect(() => { api.metricsDashboard(86400, 5).then((d) => setSeries(d.series ?? [])).catch(() => { /* 静默 */ }); }, []);
+  const tabBtn = (key: "trend" | "detail", label: string) => (
+    <button
+      key={key}
+      onClick={() => setTab(key)}
+      className={cn(
+        "rounded-lg px-3.5 py-1.5 text-sm font-medium transition",
+        tab === key ? "bg-indigo-600 text-white shadow" : "text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+      )}
+    >
+      {label}
+    </button>
+  );
   return (
     <div className="space-y-5">
-      <UsageTrendCard series={series} />
-      <UsageChartsBody />
-      <RequestLogPanel />
+      <div className="flex w-fit items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        {tabBtn("trend", "调用趋势")}
+        {tabBtn("detail", "调用明细")}
+      </div>
+      {tab === "trend" ? (
+        <div className="space-y-5">
+          <UsageTrendCard series={series} />
+          <UsageChartsBody />
+        </div>
+      ) : (
+        <RequestLogPanel />
+      )}
     </div>
   );
 }
@@ -6121,6 +6143,62 @@ function TpmChart({ points }: { points: MetricsSeriesPoint[] }) {
   return <EChart option={option} height={240} />;
 }
 
+// ---- 实时状态条:5s 轮询在途并发/QPS/成功率/token 吞吐,可暂停 ----
+function RealtimeStrip() {
+  const [d, setD] = useState<{ active: number; requests_5m: number; success_rate: number; qps: number; tokens_per_sec: number; p95_ms: number } | null>(null);
+  const [live, setLive] = useState(true);
+  const [err, setErr] = useState(false);
+
+  useEffect(() => {
+    if (!live) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const r = await api.metricsRealtime();
+        if (!cancelled) { setD(r); setErr(false); }
+      } catch { if (!cancelled) setErr(true); }
+    };
+    load();
+    const t = setInterval(load, 5000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [live, d?.requests_5m === undefined ? 0 : 0]);
+
+  const items: { label: string; value: string; tone?: string; title?: string }[] = d ? [
+    { label: "在途并发", value: String(d.active), title: "此刻正在处理中的请求数(含流式)" },
+    { label: "QPS(5min)", value: d.qps.toFixed(2), title: "近 5 分钟平均每秒请求数" },
+    { label: "成功率(5min)", value: `${(d.success_rate * 100).toFixed(1)}%`, tone: d.success_rate >= 0.99 ? "text-emerald-600" : d.success_rate >= 0.9 ? "text-amber-600" : "text-rose-600", title: "近 5 分钟成功请求占比" },
+    { label: "Token/s(5min)", value: Math.round(d.tokens_per_sec).toLocaleString(), title: "近 5 分钟平均每秒 token 吞吐" },
+    { label: "请求数(5min)", value: d.requests_5m.toLocaleString(), title: "近 5 分钟总请求数" },
+    { label: "P95 延迟(5min)", value: `${Math.round(d.p95_ms)} ms`, title: "近 5 分钟 P95 延迟" },
+  ] : [];
+
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-gradient-to-r from-indigo-50/60 via-white to-white px-4 py-3 shadow-sm dark:border-slate-800 dark:from-indigo-950/30 dark:via-slate-900 dark:to-slate-900">
+      <span className="flex items-center gap-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200">
+        <span className={cn("relative flex h-2 w-2")}>
+          {live && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />}
+          <span className={cn("relative inline-flex h-2 w-2 rounded-full", live ? "bg-emerald-500" : "bg-slate-400")} />
+        </span>
+        实时
+      </span>
+      {err && <span className="text-xs text-rose-600">获取失败,重试中…</span>}
+      {items.map((it) => (
+        <div key={it.label} className="flex min-w-24 flex-col" title={it.title}>
+          <span className="text-[10px] uppercase tracking-wide text-slate-400">{it.label}</span>
+          <span className={cn("mono text-lg font-semibold leading-tight text-slate-900 dark:text-slate-50", it.tone)}>{it.value}</span>
+        </div>
+      ))}
+      {!d && !err && <span className="text-xs text-slate-400">加载中…</span>}
+      <button
+        className="ml-auto rounded-md border border-slate-200 px-2 py-1 text-[11px] text-slate-500 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-800"
+        onClick={() => setLive((v) => !v)}
+      >
+        {live ? "暂停刷新" : "恢复刷新(5s)"}
+      </button>
+    </div>
+  );
+}
+
 function MetricsPanel() {
   const [range, setRange] = useState<number>(3600);
   const [busy, setBusy] = useState(false);
@@ -6239,9 +6317,10 @@ function MetricsPanel() {
 
   return (
     <div className="space-y-4">
+      <RealtimeStrip />
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
-          <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100">接口指标仪表盘</h2>
+          <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100">实时监控</h2>
           <p className="mt-0.5 text-xs text-slate-500">
             实时滚动窗口(秒桶 120s / 分钟桶 48h),15s 自动刷新。
           </p>
@@ -6642,8 +6721,13 @@ function RequestLogPanel() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
-  const [failed, setFailed] = useState<"all" | "ok" | "fail">("all");
+  // 状态筛选:all=全部 ok=仅成功 fail=仅失败 其余=精确状态码
+  const [statusSel, setStatusSel] = useState<string>("all");
   const [hours, setHours] = useState<number | null>(null);
+  // 时间筛选:preset=快捷项 custom=自定义起止(datetime-local)
+  const [timeMode, setTimeMode] = useState<"preset" | "custom">("preset");
+  const [fromLocal, setFromLocal] = useState("");
+  const [toLocal, setToLocal] = useState("");
   // 筛选:用户(下拉选用户名,按 user_id 精确过滤) + 模型(下拉选对外模型名)
   const [fUser, setFUser] = useState("");
   const [fModel, setFModel] = useState("");
@@ -6656,15 +6740,26 @@ function RequestLogPanel() {
   const userTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modelTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // 自定义时间:datetime-local → unix 秒;起止齐备才生效
+  const fromTs = timeMode === "custom" && fromLocal ? Math.floor(new Date(fromLocal).getTime() / 1000) : null;
+  const toTs = timeMode === "custom" && toLocal ? Math.floor(new Date(toLocal).getTime() / 1000) : null;
+  const statusFilter = statusSel === "ok" ? false : statusSel === "fail" ? true : null;
+  const statuses = ["400", "401", "403", "405", "429", "500", "502", "503"].includes(statusSel) ? [Number(statusSel)] : null;
+  // 筛选签名:依赖变化即重查(自定义时间以字符串比较触发)
+  const filterKey = `${statusSel}|${hours}|${fromLocal}|${toLocal}`;
+
   const load = async () => {
     setLoading(true); setErr("");
     try {
       const r = await api.requestLogs(
         qRef.current || undefined, page, pageSize,
-        failed === "all" ? null : failed === "fail",
+        statusFilter,
         hours,
         userRef.current || undefined,
         modelRef.current || undefined,
+        statuses,
+        fromTs,
+        toTs,
       );
       setRows(r.data); setTotal(r.total);
     } catch (e: any) {
@@ -6672,7 +6767,7 @@ function RequestLogPanel() {
     } finally { setLoading(false); }
   };
 
-  useEffect(() => { load(); }, [page, pageSize, failed, hours]);
+  useEffect(() => { load(); }, [page, pageSize, filterKey]);
   // 用户名/模型名下拉数据:一次性拉取
   useEffect(() => {
     api.users(1, 500).then((r) => setUserRows(r.data)).catch(() => {});
@@ -6689,8 +6784,7 @@ function RequestLogPanel() {
     timer.current = setTimeout(() => { if (page !== 1) setPage(1); else load(); }, 400);
   };
 
-  const onFailed = (v: "all" | "ok" | "fail") => { setFailed(v); setPage(1); };
-  const onHours = (v: string) => { setHours(v ? Number(v) : null); setPage(1); };
+  const onStatusSel = (v: string) => { setStatusSel(v); setPage(1); };
   const onUserPick = (v: string) => { debounced(userRef, v, setFUser, userTimerRef); setPage(1); };
   const onModelPick = (v: string) => { debounced(modelRef, v, setFModel, modelTimerRef); setPage(1); };
 
@@ -6704,6 +6798,17 @@ function RequestLogPanel() {
     const u = userRows.find((x) => x.id === uid);
     return u?.username || u?.email || u?.phone || `${uid.slice(0, 8)}…`;
   };
+  // 每秒输出 token:流式 = 输出 ÷ 生成耗时(总耗时-首块);非流式 = 输出 ÷ 总耗时;旧数据无首块为 null
+  const tokensPerSec = (r: RequestLogRow): number | null => {
+    if (r.output_tokens <= 0 || r.latency_ms <= 0) return null;
+    if (r.stream) {
+      if (r.first_byte_ms == null || r.latency_ms <= r.first_byte_ms) return null;
+      return r.output_tokens / ((r.latency_ms - r.first_byte_ms) / 1000);
+    }
+    return r.output_tokens / (r.latency_ms / 1000);
+  };
+
+  const selectCls = "h-8 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring";
 
   return (
     <div className="space-y-5">
@@ -6711,8 +6816,8 @@ function RequestLogPanel() {
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <CardTitle className="text-base">调用日志({loading ? "…" : total.toLocaleString()})</CardTitle>
-              <p className="mt-1 text-xs text-muted-foreground">每次 API 调用的链路追踪;点击行在右侧展开完整详情,支持按请求 ID / 模型 / 用户检索。</p>
+              <CardTitle className="text-base">调用明细({loading ? "…" : total.toLocaleString()})</CardTitle>
+              <p className="mt-1 text-xs text-muted-foreground">每次 API 调用的链路追踪;点击行在右侧展开完整详情,支持按请求 ID / 模型 / 用户 / 状态码 / 时间检索。</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <div className="relative">
@@ -6725,30 +6830,55 @@ function RequestLogPanel() {
                 />
               </div>
               <select value={fModel} onChange={(e) => onModelPick(e.target.value)}
-                className="h-8 max-w-44 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring" title="按模型过滤">
+                className={cn(selectCls, "max-w-44")} title="按模型过滤">
                 <option value="">全部模型</option>
                 {modelNames.map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
               <select value={fUser} onChange={(e) => onUserPick(e.target.value)}
-                className="h-8 max-w-40 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring" title="按用户过滤">
+                className={cn(selectCls, "max-w-40")} title="按用户过滤">
                 <option value="">全部用户</option>
                 {userRows.map((u) => (
                   <option key={u.id} value={u.id}>{u.username || u.email || u.phone || u.id.slice(0, 8)}</option>
                 ))}
               </select>
-              <select value={failed} onChange={(e) => onFailed(e.target.value as "all" | "ok" | "fail")}
-                className="h-8 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring">
+              <select value={statusSel} onChange={(e) => onStatusSel(e.target.value)}
+                className={selectCls} title="按状态码过滤,便于定位 4xx/5xx 问题">
                 <option value="all">全部状态</option>
-                <option value="fail">仅失败</option>
-                <option value="ok">仅成功</option>
+                <option value="ok">仅成功(200)</option>
+                <option value="fail">仅失败(非 200)</option>
+                <option disabled>──── 精确状态码 ────</option>
+                <option value="400">400 Bad Request</option>
+                <option value="401">401 未认证</option>
+                <option value="403">403 无权限</option>
+                <option value="405">405 模型不可用</option>
+                <option value="429">429 限流</option>
+                <option value="500">500 上游错误</option>
+                <option value="502">502 网关错误</option>
+                <option value="503">503 不可用/熔断</option>
               </select>
-              <select value={hours ?? ""} onChange={(e) => onHours(e.target.value)}
-                className="h-8 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring">
-                <option value="">全部时间</option>
-                <option value="24">最近 24 小时</option>
-                <option value="72">最近 3 天</option>
-                <option value="168">最近 7 天</option>
-              </select>
+              {timeMode === "preset" ? (
+                <select
+                  value={hours ?? ""} onChange={(e) => { if (e.target.value === "custom") { setTimeMode("custom"); } else { setHours(e.target.value ? Number(e.target.value) : null); setPage(1); } }}
+                  className={selectCls} title="按时间过滤">
+                  <option value="">全部时间</option>
+                  <option value="1">最近 1 小时</option>
+                  <option value="24">最近 24 小时</option>
+                  <option value="72">最近 3 天</option>
+                  <option value="168">最近 7 天</option>
+                  <option value="custom">自定义…</option>
+                </select>
+              ) : (
+                <div className="flex items-center gap-1">
+                  <Input type="datetime-local" value={fromLocal} onChange={(e) => { setFromLocal(e.target.value); setPage(1); }}
+                    className="h-8 w-40 text-xs" title="起始时间" />
+                  <span className="text-xs text-muted-foreground">至</span>
+                  <Input type="datetime-local" value={toLocal} onChange={(e) => { setToLocal(e.target.value); setPage(1); }}
+                    className="h-8 w-40 text-xs" title="结束时间" />
+                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => { setTimeMode("preset"); setHours(null); setFromLocal(""); setToLocal(""); setPage(1); }}>
+                    取消
+                  </Button>
+                </div>
+              )}
               <Button size="sm" variant="outline" className="h-8" onClick={() => load()}>
                 <RefreshCw className="h-3.5 w-3.5" />
               </Button>
@@ -6756,83 +6886,99 @@ function RequestLogPanel() {
           </div>
         </CardHeader>
         <CardContent>
-          {err ? (
-            <div className="flex flex-col items-center gap-2 py-8">
-              <p className="text-sm text-destructive">{err}</p>
-              <Button size="sm" variant="outline" onClick={() => load()}>重试</Button>
-            </div>
-          ) : loading ? (
-            <p className="text-sm text-muted-foreground">加载中…</p>
-          ) : rows.length === 0 ? (
-            <p className="text-sm text-muted-foreground">暂无请求记录</p>
-          ) : (
-            <div className="overflow-x-auto rounded-lg border">
-              <Table>
-                <TableHeader>
-                  <TableRow className="bg-muted/50 hover:bg-muted/50">
-                    <TableHead>时间</TableHead>
-                    <TableHead>用户</TableHead>
-                    <TableHead>模型</TableHead>
-                    <TableHead>状态</TableHead>
-                    <TableHead className="text-right" title="↑ 输入 tokens · ↓ 输出 tokens;悬停看计费值">Tokens（↑入 ↓出）</TableHead>
-                    <TableHead className="text-right" title="上游建连并返回首个响应的耗时(成功尝试)">上游耗时</TableHead>
-                    <TableHead className="text-right" title="流式:上游首块到达后持续生成 tokens 的耗时;下游回传与之同步;非流式/旧数据为 —">token 消耗</TableHead>
-                    <TableHead className="text-right" title="网关侧处理:鉴权 / 路由 / 改写 / 计费等">网关耗时</TableHead>
-                    <TableHead className="text-right">总耗时</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {rows.map((r) => {
-                    const isFail = r.final_status !== 200;
-                    const { upstream, generate, gateway } = splitLatency(r);
-                    return (
-                      <TableRow
-                        key={r.request_id}
-                        className={cn("cursor-pointer transition-colors", isFail ? "bg-rose-500/[0.04] hover:bg-rose-500/[0.08]" : "hover:bg-muted/40")}
-                        onClick={() => setDetail(r)}
-                      >
-                        <TableCell className="mono whitespace-nowrap text-xs" title={`请求 ID: ${r.request_id}\\n点击右侧查看完整详情`}>{fmtTime(r.ts)}</TableCell>
-                        <TableCell className="whitespace-nowrap text-xs">
-                          <span className="font-medium" title={r.user_id}>{nameOf(r.user_id)}</span>
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          <span className="inline-flex items-center gap-1.5">
-                            <span className="font-medium">{r.requested_model}</span>
-                            {r.path !== "chat" && <Badge variant="muted" className="text-[10px]">{r.path}</Badge>}
-                            {r.stream && <span className="text-[10px] text-muted-foreground" title="流式请求">SSE</span>}
-                          </span>
-                        </TableCell>
-                        <TableCell>
-                          <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(r.final_status))}>
-                            {attemptStatusLabel(r.final_status)}
-                          </span>
-                        </TableCell>
-                        <TableCell className="mono whitespace-nowrap text-right text-xs">
-                          {r.input_tokens > 0 || r.output_tokens > 0 ? (
-                            <span title={`输入 ${r.input_tokens.toLocaleString()} · 输出 ${r.output_tokens.toLocaleString()} · 计费 ${r.charged_tokens.toLocaleString()} tokens`}>
-                              ↑{r.input_tokens.toLocaleString()} <span className="text-muted-foreground">↓</span>{r.output_tokens.toLocaleString()}
+          {/* 固定最小高度:筛选无结果/加载时布局不跳动 */}
+          <div className="min-h-[320px]">
+            {err ? (
+              <div className="flex h-[280px] flex-col items-center justify-center gap-2">
+                <p className="text-sm text-destructive">{err}</p>
+                <Button size="sm" variant="outline" onClick={() => load()}>重试</Button>
+              </div>
+            ) : loading ? (
+              <div className="space-y-2 pt-1">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="h-9 animate-pulse rounded-md bg-muted/60" style={{ opacity: 1 - i * 0.12 }} />
+                ))}
+              </div>
+            ) : rows.length === 0 ? (
+              <div className="flex h-[280px] flex-col items-center justify-center gap-2 text-center">
+                <Inbox className="h-8 w-8 text-muted-foreground/40" />
+                <p className="text-sm text-muted-foreground">没有匹配的调用记录</p>
+                <p className="text-xs text-muted-foreground/70">当前筛选条件下暂无数据;可放宽状态码或时间范围重试</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto rounded-lg border">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/50 hover:bg-muted/50">
+                      <TableHead>时间</TableHead>
+                      <TableHead>用户</TableHead>
+                      <TableHead>模型</TableHead>
+                      <TableHead>状态</TableHead>
+                      <TableHead className="text-right" title="↑ 输入 tokens · ↓ 输出 tokens;悬停看计费值">Tokens（↑入 ↓出）</TableHead>
+                      <TableHead className="text-right" title="上游建连并返回首个响应的耗时(成功尝试)">上游耗时</TableHead>
+                      <TableHead className="text-right" title="流式:上游首块到达后持续生成 tokens 的耗时;下游回传与之同步;非流式/旧数据为 —">token 消耗</TableHead>
+                      <TableHead className="text-right" title="每秒输出 tokens:流式 = 输出 ÷ 生成耗时;非流式 = 输出 ÷ 总耗时">Token/s</TableHead>
+                      <TableHead className="text-right" title="网关侧处理:鉴权 / 路由 / 改写 / 计费等">网关耗时</TableHead>
+                      <TableHead className="text-right">总耗时</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {rows.map((r) => {
+                      const isFail = r.final_status !== 200;
+                      const { upstream, generate, gateway } = splitLatency(r);
+                      const tps = tokensPerSec(r);
+                      return (
+                        <TableRow
+                          key={r.request_id}
+                          className={cn("cursor-pointer transition-colors", isFail ? "bg-rose-500/[0.04] hover:bg-rose-500/[0.08]" : "hover:bg-muted/40")}
+                          onClick={() => setDetail(r)}
+                        >
+                          <TableCell className="mono whitespace-nowrap text-xs" title={`请求 ID: ${r.request_id} · 点击查看完整详情`}>{fmtTime(r.ts)}</TableCell>
+                          <TableCell className="whitespace-nowrap text-xs">
+                            <span className="font-medium" title={r.user_id}>{nameOf(r.user_id)}</span>
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            <span className="inline-flex items-center gap-1.5">
+                              <span className="font-medium">{r.requested_model}</span>
+                              {r.path !== "chat" && <Badge variant="muted" className="text-[10px]">{r.path}</Badge>}
+                              {r.stream && <span className="text-[10px] text-muted-foreground" title="流式请求">SSE</span>}
                             </span>
-                          ) : <span className="text-muted-foreground">—</span>}
-                        </TableCell>
-                        <TableCell className={cn("mono whitespace-nowrap text-right text-xs", latencyTone(upstream || null))} title={`命中 ${r.attempts.find((a) => a.status === 200)?.provider || r.final_kind || "—"} · ${r.final_upstream_model || "—"}`}>
-                          {upstream > 0 ? fmtMs(upstream) : <span className="text-muted-foreground">—</span>}
-                        </TableCell>
-                        <TableCell className={cn("mono whitespace-nowrap text-right text-xs", latencyTone(generate))}>
-                          {generate != null ? fmtMs(generate) : <span className="text-muted-foreground">—</span>}
-                        </TableCell>
-                        <TableCell className={cn("mono whitespace-nowrap text-right text-xs", latencyTone(gateway || null))}>
-                          {r.latency_ms > 0 ? fmtMs(gateway) : <span className="text-muted-foreground">—</span>}
-                        </TableCell>
-                        <TableCell className={cn("mono whitespace-nowrap text-right text-xs font-medium", latencyTone(r.latency_ms || null))}>
-                          {r.latency_ms > 0 ? fmtMs(r.latency_ms) : <span className="text-muted-foreground">—</span>}
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
-            </div>
-          )}
+                          </TableCell>
+                          <TableCell>
+                            <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(r.final_status))}>
+                              {attemptStatusLabel(r.final_status)}
+                            </span>
+                          </TableCell>
+                          <TableCell className="mono whitespace-nowrap text-right text-xs">
+                            {r.input_tokens > 0 || r.output_tokens > 0 ? (
+                              <span title={`输入 ${r.input_tokens.toLocaleString()} · 输出 ${r.output_tokens.toLocaleString()} · 计费 ${r.charged_tokens.toLocaleString()} tokens`}>
+                                ↑{r.input_tokens.toLocaleString()} <span className="text-muted-foreground">↓</span>{r.output_tokens.toLocaleString()}
+                              </span>
+                            ) : <span className="text-muted-foreground">—</span>}
+                          </TableCell>
+                          <TableCell className={cn("mono whitespace-nowrap text-right text-xs", latencyTone(upstream || null))} title={`命中 ${r.attempts.find((a) => a.status === 200)?.provider || r.final_kind || "—"} · ${r.final_upstream_model || "—"}`}>
+                            {upstream > 0 ? fmtMs(upstream) : <span className="text-muted-foreground">—</span>}
+                          </TableCell>
+                          <TableCell className={cn("mono whitespace-nowrap text-right text-xs", latencyTone(generate))}>
+                            {generate != null ? fmtMs(generate) : <span className="text-muted-foreground">—</span>}
+                          </TableCell>
+                          <TableCell className={cn("mono whitespace-nowrap text-right text-xs", tps != null && tps < 1 ? "text-rose-600" : tps != null && tps < 5 ? "text-amber-600" : "")} title={tps != null ? `每秒输出约 ${tps.toFixed(1)} tokens` : "旧数据或耗时不足,无法估算"}>
+                            {tps != null ? tps.toFixed(1) : <span className="text-muted-foreground">—</span>}
+                          </TableCell>
+                          <TableCell className={cn("mono whitespace-nowrap text-right text-xs", latencyTone(gateway || null))}>
+                            {r.latency_ms > 0 ? fmtMs(gateway) : <span className="text-muted-foreground">—</span>}
+                          </TableCell>
+                          <TableCell className={cn("mono whitespace-nowrap text-right text-xs font-medium", latencyTone(r.latency_ms || null))}>
+                            {r.latency_ms > 0 ? fmtMs(r.latency_ms) : <span className="text-muted-foreground">—</span>}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </div>
           <PaginationBar page={page} pageSize={pageSize} total={total} onPageChange={setPage} onPageSizeChange={(s) => { setPage(1); setPageSize(s); }} />
         </CardContent>
       </Card>
@@ -6847,10 +6993,11 @@ function RequestLogPanel() {
 
 // ---- 右侧详情抽屉内容:手风琴分区 ----
 function RequestLogDetail({ row, userName }: { row: RequestLogRow; userName: string }) {
-  const [open, setOpen] = useState<Record<string, boolean>>({ info: true, latency: true, candidates: false, attempts: true, bodies: true });
+  const [open, setOpen] = useState<Record<string, boolean>>({ info: true, latency: true, chain: true, bodies: true });
   const toggleSec = (k: string) => setOpen((p) => ({ ...p, [k]: !p[k] }));
   const hitProvider = row.attempts.find((a) => a.status === 200)?.provider || row.final_kind || "";
   const isFail = row.final_status !== 200;
+  const seen = new Set<RequestAttempt>();
 
   const Sec = ({ id, title, extra, children }: { id: string; title: string; extra?: React.ReactNode; children: React.ReactNode }) => (
     <div className="overflow-hidden rounded-lg border">
@@ -6884,22 +7031,34 @@ function RequestLogDetail({ row, userName }: { row: RequestLogRow; userName: str
       </SheetHeader>
       <div className="space-y-3 px-4 py-4">
         {/* 基本信息 */}
-        <Sec id="info" title="基本信息" extra={
-          <button
-            className="rounded p-1 transition-colors hover:bg-accent hover:text-foreground"
-            title="复制请求 ID"
-            onClick={(e) => { e.stopPropagation(); void copyText(row.request_id); }}
-          >
-            <Copy className="h-3 w-3" />
-          </button>
-        }>
-          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-xs">
+        <Sec id="info" title="基本信息">
+          <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1.5 text-xs">
             <span className="text-muted-foreground">请求 ID</span>
-            <code className="mono break-all rounded bg-muted px-1.5 py-0.5">{row.request_id}</code>
+            <span className="flex items-center gap-1.5">
+              <code className="mono rounded bg-muted px-1.5 py-0.5">{row.request_id}</code>
+              <button
+                className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                title="复制请求 ID"
+                onClick={() => void copyText(row.request_id)}
+              >
+                <Copy className="h-3 w-3" />
+              </button>
+            </span>
             <span className="text-muted-foreground">用户</span>
-            <span className="font-medium" title={row.user_id}>{userName}<span className="ml-1 mono text-[10px] text-muted-foreground">{row.user_id.slice(0, 8)}…</span></span>
-            <span className="text-muted-foreground">请求路径</span>
-            <span>{row.path}</span>
+            <span className="font-medium">{userName}</span>
+            <span className="text-muted-foreground">请求方式</span>
+            <span className="mono">POST</span>
+            <span className="text-muted-foreground">接入方式</span>
+            <span>
+              <span className="font-medium">{PATH_LABELS[row.path]?.name || row.path}</span>
+              {PATH_LABELS[row.path]?.endpoint && <span className="mono ml-1.5 text-[10px] text-muted-foreground">{PATH_LABELS[row.path].endpoint}</span>}
+            </span>
+            <span className="text-muted-foreground">响应形态</span>
+            <span>
+              {row.stream
+                ? <Badge className="bg-indigo-500/10 text-indigo-700 ring-1 ring-inset ring-indigo-500/20">流式 SSE</Badge>
+                : <Badge variant="muted">非流式 JSON</Badge>}
+            </span>
             <span className="text-muted-foreground">最终上游</span>
             <span>{row.final_upstream_model ? <span className="inline-flex items-center gap-1"><span className="text-muted-foreground">{hitProvider}</span><span className="font-medium">{row.final_upstream_model}</span></span> : "—"}</span>
             <span className="text-muted-foreground">Tokens</span>
@@ -6910,78 +7069,169 @@ function RequestLogDetail({ row, userName }: { row: RequestLogRow; userName: str
         <Sec id="latency" title="耗时分解">
           <LatencyBreakdown row={row} />
         </Sec>
-        {/* 候选顺序 */}
-        <Sec id="candidates" title={`候选顺序（${row.candidates.length}）`}>
-          <table className="w-full text-xs">
-            <thead>
-              <tr className="border-b text-left text-muted-foreground">
-                <th className="pb-1 font-normal">#</th>
-                <th className="pb-1 font-normal">供应商</th>
-                <th className="pb-1 font-normal">模型</th>
-                <th className="pb-1 font-normal">权重</th>
-                <th className="pb-1 font-normal">状态</th>
-              </tr>
-            </thead>
-            <tbody>
-              {row.candidates.map((c, i) => (
-                <tr key={i} className="border-b border-dashed last:border-0">
-                  <td className="py-1 text-muted-foreground">{i + 1}</td>
-                  <td className="py-1 font-medium">{c.provider || "—"}</td>
-                  <td className="py-1" title={c.base_url}>{c.upstream_model}</td>
-                  <td className="py-1 mono">{c.weight}</td>
-                  <td className="py-1">
-                    {(() => {
-                      const att = row.attempts.find((a) => (a.kind === c.kind || a.kind === "skipped") && a.upstream_model === c.upstream_model);
-                      return att
-                        ? <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(att.status))}>{attemptStatusLabel(att.status)}</span>
-                        : <span className="text-muted-foreground">未尝试</span>;
-                    })()}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </Sec>
-        {/* 实际尝试链 */}
-        {row.attempts.length > 0 && (
-          <Sec id="attempts" title={`实际尝试（failover 时间线 · ${row.attempts.length}）`}>
-            <div className="relative ml-2 space-y-3 border-l border-border pl-4">
-              {row.attempts.map((a, i) => {
-                const dot = a.status === 200 ? "bg-success" : a.status === -1 || a.status === 503 ? "bg-warning" : "bg-destructive";
+        {/* 调用链路:候选顺序与实际尝试合并展示 */}
+        {(row.candidates.length > 0 || row.attempts.length > 0) && (
+          <Sec id="chain" title={`调用链路(${row.candidates.length} 候选 / ${row.attempts.length} 次尝试)`}>
+            <div className="relative ml-2 space-y-2.5 border-l border-border pl-4">
+              {row.candidates.map((c, i) => {
+                // 候选与其对应尝试:按 kind+模型匹配;skipped = 熔断跳过
+                const att = row.attempts.find((a) => (a.kind === c.kind || a.kind === "skipped") && a.upstream_model === c.upstream_model && !seen.has(a));
+                if (att) seen.add(att);
+                const hit = att?.status === 200;
+                const skip = att?.kind === "skipped" || att?.status === -1;
+                const dot = hit ? "bg-emerald-500" : skip ? "bg-amber-500" : att ? "bg-rose-500" : "bg-slate-300 dark:bg-slate-600";
                 return (
                   <div key={i} className="relative">
-                    <span className={cn("absolute -left-[21px] top-1 h-[9px] w-[9px] rounded-full ring-2 ring-background", dot)} />
+                    <span className={cn("absolute -left-[21px] top-1.5 h-[9px] w-[9px] rounded-full ring-2 ring-background", dot)} />
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
-                      <span className="font-medium">{a.provider || a.kind}</span>
-                      <span className="text-muted-foreground">{a.provider ? `${a.kind} · ` : ""}{a.upstream_model}</span>
-                      <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(a.status))}>
-                        {attemptStatusLabel(a.status)}
-                      </span>
-                      <span className="mono text-muted-foreground">{a.latency_ms > 0 ? `${a.latency_ms}ms` : ""}</span>
-                      {a.status === 200 && <span className="text-[10px] font-semibold text-success">✓ 命中</span>}
+                      <span className="mono text-[10px] text-muted-foreground">#{i + 1}</span>
+                      <span className="font-medium">{c.provider || "—"}</span>
+                      <span className="text-muted-foreground">{c.upstream_model}</span>
+                      <span className="mono text-[10px] text-muted-foreground" title="负载权重">w{c.weight}</span>
+                      {att ? (
+                        <>
+                          <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(att.status))}>
+                            {attemptStatusLabel(att.status)}
+                          </span>
+                          {att.latency_ms > 0 && <span className="mono text-muted-foreground">{att.latency_ms}ms</span>}
+                          {hit && <span className="text-[10px] font-semibold text-emerald-600">✓ 命中</span>}
+                          {skip && <span className="text-[10px] text-amber-600">熔断跳过</span>}
+                        </>
+                      ) : (
+                        <span className="text-[10px] text-muted-foreground/70">未尝试(前面候选已命中或请求失败)</span>
+                      )}
                     </div>
-                    {a.error && <p className="mt-0.5 break-all text-[11px] text-muted-foreground">{a.error}</p>}
+                    {att?.error && <p className="mt-0.5 break-all rounded bg-rose-500/5 px-1.5 py-0.5 text-[11px] text-rose-700 dark:text-rose-400">{att.error}</p>}
                   </div>
                 );
               })}
+              {/* 未匹配到候选的额外尝试(如重试) */}
+              {row.attempts.filter((a) => !seen.has(a)).map((a, i) => (
+                <div key={`extra-${i}`} className="relative">
+                  <span className={cn("absolute -left-[21px] top-1.5 h-[9px] w-[9px] rounded-full ring-2 ring-background", a.status === 200 ? "bg-emerald-500" : "bg-rose-500")} />
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
+                    <span className="mono text-[10px] text-muted-foreground">重试</span>
+                    <span className="font-medium">{a.provider || a.kind}</span>
+                    <span className="text-muted-foreground">{a.upstream_model}</span>
+                    <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(a.status))}>
+                      {attemptStatusLabel(a.status)}
+                    </span>
+                    {a.latency_ms > 0 && <span className="mono text-muted-foreground">{a.latency_ms}ms</span>}
+                  </div>
+                  {a.error && <p className="mt-0.5 break-all text-[11px] text-muted-foreground">{a.error}</p>}
+                </div>
+              ))}
             </div>
           </Sec>
         )}
-        {/* 请求/响应体 */}
+        {/* 请求 / 响应体:滚动查看;响应按 流式SSE / JSON 双模式展示 */}
         {(row.req_body || row.resp_body) && (
           <Sec id="bodies" title="请求 / 响应体">
             <div className="space-y-3">
-              {([["请求体", row.req_body], ["响应体", row.resp_body]] as const).map(([label, body]) => body ? (
-                <div key={label}>
-                  <p className="mb-1 text-xs font-medium text-muted-foreground">{label}预览</p>
-                  <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-background p-2 text-[11px] leading-relaxed text-muted-foreground">{body}</pre>
+              {row.req_body && (
+                <div>
+                  <p className="mb-1 flex items-center justify-between text-xs font-medium text-muted-foreground">
+                    <span>请求体</span>
+                    <button className="rounded p-1 transition-colors hover:bg-accent hover:text-foreground" title="复制请求体" onClick={() => void copyText(row.req_body || "")}>
+                      <Copy className="h-3 w-3" />
+                    </button>
+                  </p>
+                  <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/30 p-2 text-[11px] leading-relaxed">{prettyMaybeJson(row.req_body)}</pre>
                 </div>
-              ) : null)}
+              )}
+              {row.resp_body && (
+                <div>
+                  <p className="mb-1 flex items-center justify-between text-xs font-medium text-muted-foreground">
+                    <span>响应体{row.stream ? "(SSE 事件流)" : ""}</span>
+                    <button className="rounded p-1 transition-colors hover:bg-accent hover:text-foreground" title="复制响应体" onClick={() => void copyText(row.resp_body || "")}>
+                      <Copy className="h-3 w-3" />
+                    </button>
+                  </p>
+                  {row.stream ? <SseEventList body={row.resp_body} /> : (
+                    <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/30 p-2 text-[11px] leading-relaxed">{prettyMaybeJson(row.resp_body)}</pre>
+                  )}
+                </div>
+              )}
             </div>
           </Sec>
         )}
       </div>
     </SheetContent>
+  );
+}
+
+// 接入方式:path → 协议名 + 端点。
+const PATH_LABELS: Record<string, { name: string; endpoint?: string }> = {
+  chat: { name: "OpenAI 对话", endpoint: "/v1/chat/completions" },
+  messages: { name: "Anthropic 消息", endpoint: "/v1/messages" },
+  embeddings: { name: "Embeddings 向量", endpoint: "/v1/embeddings" },
+};
+
+/// 尽力 JSON 美化:解析失败原样返回。
+function prettyMaybeJson(body: string): string {
+  const t = body.trim();
+  if (!t.startsWith("{") && !t.startsWith("[")) return body;
+  try {
+    return JSON.stringify(JSON.parse(t), null, 2);
+  } catch {
+    return body;
+  }
+}
+
+/// 流式响应体 → SSE 事件序列(data: 行),解析 JSON 摘要;预览截断的事件原样展示。
+function parseSseEvents(body: string): { raw: string; summary: string }[] {
+  return body
+    .split("\\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("data:"))
+    .map((l) => l.slice(5).trim())
+    .filter((l) => l.length > 0)
+    .map((raw) => {
+      let summary = raw;
+      try {
+        const j = JSON.parse(raw);
+        if (j?.type) summary = `[${j.type}]`;
+        else if (j?.choices?.[0]?.delta?.content) summary = `内容片段: ${j.choices[0].delta.content}`;
+        else if (j?.usage) summary = `用量: 输入 ${j.usage.prompt_tokens ?? "?"} · 输出 ${j.usage.completion_tokens ?? "?"}`;
+        else if (j?.error) summary = `错误: ${j.error.message ?? JSON.stringify(j.error)}`;
+        else if (j?.id) summary = `响应头: id=${j.id} model=${j.model ?? "?"}`;
+      } catch {
+        if (raw === "[DONE]") summary = "[DONE] 结束";
+      }
+      return { raw, summary };
+    });
+}
+
+/// SSE 事件列表:默认显示摘要,展开看原始 data;限高滚动。
+function SseEventList({ body }: { body: string }) {
+  const events = parseSseEvents(body);
+  const [showRaw, setShowRaw] = useState(false);
+  if (events.length === 0) {
+    return <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/30 p-2 text-[11px] leading-relaxed">{body}</pre>;
+  }
+  return (
+    <div className="space-y-1.5">
+      <button
+        className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground transition hover:bg-accent"
+        onClick={() => setShowRaw((v) => !v)}
+      >
+        {showRaw ? "显示摘要" : `显示原始 data(${events.length} 个事件)`}
+      </button>
+      <div className="max-h-64 space-y-1 overflow-y-auto rounded-lg border bg-muted/30 p-2">
+        {events.map((e, i) => (
+          <div key={i} className="text-[11px] leading-relaxed">
+            {showRaw ? (
+              <pre className="whitespace-pre-wrap break-all text-muted-foreground">{e.raw}</pre>
+            ) : (
+              <span className="flex gap-1.5">
+                <span className="mono shrink-0 text-muted-foreground/60">{String(i + 1).padStart(2, "0")}</span>
+                <span className="break-all">{e.summary}</span>
+              </span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

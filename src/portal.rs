@@ -275,6 +275,22 @@ pub async fn register(
         default_group.as_ref().and_then(|g| g.budget_daily).unwrap_or(0).max(0),
         default_group.as_ref().and_then(|g| g.budget_monthly).unwrap_or(0).max(0),
     );
+    // 默认套餐发放:所属用户组配置了 default_plan_id 时,注册即写入余量桶并同步内存。
+    if let Some(plan_id) = default_group.as_ref().and_then(|g| g.default_plan_id.clone()) {
+        match storage::grant_plan_quota(&state.db, id, &plan_id, "grant").await {
+            Ok(bucket) => {
+                us.buckets().push(crate::state::PlanBucket {
+                    id: bucket["id"].as_str().unwrap_or_default().to_string(),
+                    plan_id,
+                    plan_name: bucket["plan_name"].as_str().unwrap_or_default().to_string(),
+                    remaining_tokens: bucket["remaining_tokens"].as_i64().unwrap_or(0),
+                    expires_at: bucket["expires_at"].as_i64().unwrap_or(0),
+                    dirty: false,
+                });
+            }
+            Err(e) => tracing::warn!("register default plan grant failed for {id}: {e}"),
+        }
+    }
     state.users.insert(id, us);
     let token = jwt::issue(&secret, &id.to_string(), "portal", ttl)?;
     Ok(Json(json!({ "token": token, "user": { "id": id, "account": display } })))
@@ -499,17 +515,20 @@ pub async fn balance(
     Ok(Json(json!({ "balance": bal })))
 }
 
-/// GET /portal/summary —— 总量 / 已用 / 余额。
+/// GET /portal/summary —— 总量 / 已用 / 余额(余额含未过期套餐余量,与扣费口径一致)。
 pub async fn summary(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let uid = portal_user(&state, &headers)?;
-    let balance = state.user(&uid).map(|u| u.balance()).unwrap_or(0);
+    let (balance, plan_balance) = state
+        .user(&uid)
+        .map(|u| (u.balance(), u.available() - u.balance()))
+        .unwrap_or((0, 0));
     let used = storage::user_used(&state.db, uid)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(json!({ "granted": used + balance, "used": used, "balance": balance })))
+    Ok(Json(json!({ "granted": used + balance + plan_balance, "used": used, "balance": balance + plan_balance, "plan_balance": plan_balance })))
 }
 
 /// GET /portal/quota —— 我的套餐与实时用量(并发/RPM/TPM/日·月预算)。
@@ -547,9 +566,26 @@ pub async fn quota(
         }
     };
     let g = group.as_ref();
+    // 套餐余量桶:扣费顺序=临期优先消费套餐→耗尽后主余额,展示让用户理解扣减去向。
+    let now = crate::storage::now_secs();
+    let buckets: Vec<Value> = {
+        let bs = u.buckets();
+        bs.iter()
+            .map(|b| {
+                json!({
+                    "id": b.id,
+                    "plan_name": b.plan_name,
+                    "remaining_tokens": b.remaining_tokens,
+                    "expires_at": b.expires_at,
+                    "expired": b.expires_at <= now,
+                })
+            })
+            .collect()
+    };
     Ok(Json(json!({
         "plan": g.map(|g| json!({ "id": g.id, "name": g.name })),
         "balance": u.balance(),
+        "plan_buckets": buckets,
         "concurrency": {
             "limit": conc_limit,
             "used": u.in_flight,

@@ -785,6 +785,10 @@ pub struct UserGroupBody {
     /// 绑定的有序模型组 id 列表(下标即优先级,0=最高);None=不改动绑定。
     /// 非空绑定后,组内用户请求按两级寻址:先按此优先级选组,再在组内按该组负载策略分流。
     pub model_group_ids: Option<Vec<i64>>,
+    /// 默认套餐 id(注册/入组自动发放);None=不改动。
+    pub default_plan_id: Option<Option<String>>,
+    /// 绑定的套餐 id 集合(该组用户可充值范围);None=不改动。
+    pub plan_ids: Option<Vec<String>>,
 }
 
 /// 校验绑定的模型组 id 全部存在;通过则写库并重建内存路由图。
@@ -798,6 +802,135 @@ async fn apply_model_group_bindings(state: &AppState, user_group_id: i64, ids: &
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(state).await
+}
+
+/// 校验套餐存在;否则 400。
+async fn plan_exists_or_err(state: &AppState, plan_id: &str) -> Result<(), ApiError> {
+    let ok = storage::plan_exists(&state.db, plan_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if !ok {
+        return Err(ApiError::BadRequest(format!("套餐不存在: {plan_id}")));
+    }
+    Ok(())
+}
+
+// ---------- 套餐管理 ----------
+#[derive(Deserialize)]
+pub struct PlanBody {
+    pub name: String,
+    /// 套餐含 token 量。
+    pub token_quota: i64,
+    /// 有效期(天)。
+    pub validity_days: i64,
+    /// 售价(分),付费功能预留。
+    #[serde(default)]
+    pub price_cents: i64,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+/// GET /admin/api/plans
+pub async fn list_plans(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let plans = storage::list_plans(&state.db).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "data": plans })))
+}
+
+/// POST /admin/api/plans
+pub async fn create_plan(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(body): Json<PlanBody>) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("套餐名称不能为空".into()));
+    }
+    if body.token_quota <= 0 || body.validity_days <= 0 {
+        return Err(ApiError::BadRequest("token 额度与有效期必须大于 0".into()));
+    }
+    let plan = storage::create_plan(&state.db, name, body.token_quota, body.validity_days, body.price_cents, body.description.trim())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(plan))
+}
+
+/// PATCH /admin/api/plans/:id
+pub async fn update_plan(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<PlanBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest("套餐名称不能为空".into()));
+    }
+    let ok = storage::update_plan(&state.db, &id, name, body.token_quota, body.validity_days, body.price_cents, body.description.trim(), body.enabled.unwrap_or(true))
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if !ok {
+        return Err(ApiError::NotFound(format!("套餐不存在: {id}")));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// DELETE /admin/api/plans/:id —— 已发放的余量桶保留,存量用户不受影响。
+pub async fn delete_plan(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    storage::delete_plan(&state.db, &id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// GET /admin/api/users/:id/plan-quota —— 用户当前套餐余量桶。
+pub async fn list_user_plan_quota(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(id): Path<Uuid>) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let quotas = storage::list_user_plan_quota(&state.db, id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(json!({ "data": quotas })))
+}
+
+#[derive(Deserialize)]
+pub struct GrantPlanBody {
+    pub plan_id: String,
+}
+
+/// POST /admin/api/users/:id/plan-quota —— 给用户充值指定套餐(写入余量桶并同步内存)。
+pub async fn grant_user_plan(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(id): Path<Uuid>, Json(body): Json<GrantPlanBody>) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    plan_exists_or_err(&state, &body.plan_id).await?;
+    let bucket = storage::grant_plan_quota(&state.db, id, &body.plan_id, "recharge")
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    // 同步内存:新桶追加(保持到期升序)。
+    if let Some(u) = state.users.get(&id) {
+        let mut buckets = u.buckets();
+        buckets.push(crate::state::PlanBucket {
+            id: bucket["id"].as_str().unwrap_or_default().to_string(),
+            plan_id: body.plan_id.clone(),
+            plan_name: bucket["plan_name"].as_str().unwrap_or_default().to_string(),
+            remaining_tokens: bucket["remaining_tokens"].as_i64().unwrap_or(0),
+            expires_at: bucket["expires_at"].as_i64().unwrap_or(0),
+            dirty: false,
+        });
+        buckets.sort_by_key(|b| b.expires_at);
+    }
+    Ok(Json(bucket))
+}
+
+/// DELETE /admin/api/users/:id/plan-quota/:bucket —— 回收一个余量桶(库+内存)。
+pub async fn revoke_user_plan_bucket(State(state): State<Arc<AppState>>, headers: HeaderMap, Path((id, bucket)): Path<(Uuid, String)>) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    sqlx::query("DELETE FROM user_plan_quota WHERE id = ? AND user_id = ?")
+        .bind(&bucket)
+        .bind(id.to_string())
+        .execute(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if let Some(u) = state.users.get(&id) {
+        u.buckets().retain(|b| b.id != bucket);
+    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 /// POST /admin/user-groups
@@ -824,6 +957,22 @@ pub async fn create_user_group(
     .map_err(|_| ApiError::BadRequest("用户组名称已存在".into()))?;
     if let Some(ids) = &body.model_group_ids {
         apply_model_group_bindings(&state, id, ids).await?;
+    }
+    if let Some(pid) = &body.default_plan_id {
+        if let Some(p) = pid {
+            plan_exists_or_err(&state, p).await?;
+        }
+        storage::set_group_default_plan(&state.db, id, pid.as_deref())
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
+    if let Some(pids) = &body.plan_ids {
+        for p in pids {
+            plan_exists_or_err(&state, p).await?;
+        }
+        storage::set_user_group_plans(&state.db, id, pids)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
     Ok(Json(json!({ "id": id })))
 }
@@ -854,6 +1003,22 @@ pub async fn update_user_group(
     .map_err(|e| ApiError::Internal(e.to_string()))?;
     if let Some(ids) = &body.model_group_ids {
         apply_model_group_bindings(&state, id, ids).await?;
+    }
+    if let Some(pid) = &body.default_plan_id {
+        if let Some(p) = pid {
+            plan_exists_or_err(&state, p).await?;
+        }
+        storage::set_group_default_plan(&state.db, id, pid.as_deref())
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+    }
+    if let Some(pids) = &body.plan_ids {
+        for p in pids {
+            plan_exists_or_err(&state, p).await?;
+        }
+        storage::set_user_group_plans(&state.db, id, pids)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
     // 组限额变更 → 组内所有用户的内存限额按解析链重算。
     let members = current_group_members(&state, id).await?;
@@ -4059,9 +4224,18 @@ pub struct RequestLogsQuery {
     /// 状态筛选:true=只看失败,false=只看成功,缺省=全部。
     #[serde(default)]
     pub failed: Option<bool>,
+    /// 精确状态码过滤,逗号分隔(如 "200,405,503");空 = 不过滤。
+    #[serde(default)]
+    pub status: Option<String>,
     /// 时间范围(小时):只看最近 N 小时,缺省=全部。
     #[serde(default)]
     pub hours: Option<u64>,
+    /// 自定义时间窗起(unix 秒);与 hours 互斥,同时给时 hours 优先。
+    #[serde(default)]
+    pub from_ts: Option<i64>,
+    /// 自定义时间窗止(unix 秒,含)。
+    #[serde(default)]
+    pub to_ts: Option<i64>,
     #[serde(default)]
     pub page: Option<u32>,
     /// 每页条数,默认 50,最大 200。
@@ -4083,14 +4257,31 @@ pub async fn list_request_logs(
     let page = q.page.unwrap_or(1).max(1);
     let page_size = q.page_size.unwrap_or(50).clamp(1, 200);
     let offset = (page - 1) * page_size;
+    let statuses: Vec<i64> = q
+        .status
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .filter_map(|s| s.trim().parse::<i64>().ok())
+        .collect();
+    let filter = crate::reqlog::LogFilter {
+        q: keyword.to_string(),
+        user: user.to_string(),
+        model: model.to_string(),
+        failed: q.failed,
+        statuses,
+        hours: q.hours,
+        from_ts: q.from_ts,
+        to_ts: q.to_ts,
+    };
     let logs = state
         .request_log
-        .recent(keyword, user, model, q.failed, q.hours, page_size, offset)
+        .recent(&filter, page_size, offset)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     let total = state
         .request_log
-        .count(keyword, user, model, q.failed, q.hours)
+        .count(&filter)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({
@@ -4186,6 +4377,34 @@ pub async fn metrics_overview(
         obj.remove("upstream_series");
     }
     Ok(Json(out))
+}
+
+/// GET /admin/api/metrics/realtime —— 实时状态条(前端 5s 轮询):
+/// 在途并发(内存求和) + 近 5 分钟 QPS/成功率/token 吞吐/延迟分位(内存滚动窗口)。
+pub async fn metrics_realtime(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let m = state.query_metrics(Some(300), None).await;
+    let s = m.get("summary").cloned().unwrap_or(json!({}));
+    let num = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let int = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
+    // 在途并发 = 所有用户 in_flight 之和(含流式进行中的请求)。
+    let active: u64 = state
+        .users
+        .iter()
+        .map(|u| u.value().in_flight.load(Ordering::Relaxed) as u64)
+        .sum();
+    let tps = num(&s, "tpm") / 60.0;
+    Ok(Json(json!({
+        "ts": crate::storage::now_secs(),
+        "active": active,
+        "requests_5m": int(&s, "requests"),
+        "success_rate": num(&s, "success_rate"),
+        "qps": num(&s, "rps"),
+        "tokens_per_sec": tps,
+        "tpm": num(&s, "tpm"),
+        "avg_ms": num(&s, "avg_ms"),
+        "p95_ms": num(&s, "p95_ms"),
+    })))
 }
 
 /// GET /metrics —— Prometheus exposition 文本导出(内存滚动 48h 窗口)。
