@@ -4293,6 +4293,157 @@ pub async fn list_request_logs(
     })))
 }
 
+// ======================== 调用趋势聚合 ========================
+
+#[derive(Deserialize)]
+pub struct UsageTrendQuery {
+    /// 时间范围(小时):24 = 近 24 小时、168 = 近 7 天、720 = 近 30 天。
+    #[serde(default)]
+    pub hours: Option<u64>,
+    /// 自定义时间窗起(unix 秒);与 hours 同时给时 hours 优先。
+    #[serde(default)]
+    pub from_ts: Option<i64>,
+    /// 自定义时间窗止(unix 秒,含);缺省 = 当前时刻。
+    #[serde(default)]
+    pub to_ts: Option<i64>,
+    /// 分桶秒数覆盖;缺省自适应:窗口 ≤48h 按小时分桶,>48h 按天分桶。
+    #[serde(default)]
+    pub bucket_secs: Option<i64>,
+    /// 本地时区偏移秒(如 UTC+8 = 28800),天级分桶按本地零点切。
+    #[serde(default)]
+    pub tz_offset_secs: Option<i64>,
+}
+
+/// GET /admin/api/usage/trend?hours=168 —— 调用趋势聚合(按时间分桶)。
+/// 数据源为请求日志表(全量历史),区别于内存指标接口(仅 48h 滚动窗口)。
+/// 返回连续补零后的完整序列,前端可直接喂给 ECharts。
+pub async fn usage_trend(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<UsageTrendQuery>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let now = crate::storage::now_secs();
+    let (from_ts, to_ts) = if let Some(h) = q.hours {
+        let h = h.max(1).min(366 * 24) as i64;
+        (now - h * 3600, now)
+    } else {
+        let to = q.to_ts.unwrap_or(now).min(now);
+        let from = q.from_ts.unwrap_or(to - 86400).min(to);
+        (from, to)
+    };
+    let span = (to_ts - from_ts).max(60);
+    let bucket_secs = q
+        .bucket_secs
+        .unwrap_or(if span <= 48 * 3600 { 3600 } else { 86400 })
+        .clamp(300, 366 * 86400);
+    let tz = q.tz_offset_secs.unwrap_or(0);
+    let raw = state
+        .request_log
+        .trend(from_ts, to_ts, bucket_secs, tz)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // 补零:从对齐后的起点逐桶铺满到终点,保证图表 x 轴连续。
+    let mut by_ts: std::collections::HashMap<i64, crate::reqlog::TrendPoint> = raw
+        .into_iter()
+        .map(|p| (p.ts, p))
+        .collect();
+    let mut points = Vec::new();
+    let start = crate::reqlog::align_bucket(from_ts, bucket_secs, tz);
+    let mut t = start;
+    while t <= to_ts {
+        match by_ts.remove(&t) {
+            Some(p) => points.push(p),
+            None => points.push(crate::reqlog::TrendPoint {
+                ts: t,
+                requests: 0,
+                success: 0,
+                failed: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+            }),
+        }
+        t += bucket_secs;
+    }
+    Ok(Json(json!({
+        "from_ts": from_ts,
+        "to_ts": to_ts,
+        "bucket_secs": bucket_secs,
+        "tz_offset_secs": tz,
+        "points": points,
+    })))
+}
+
+// ======================== 支付对接(预留扩展点) ========================
+
+#[derive(Deserialize)]
+pub struct PaymentOrderBody {
+    pub user_id: String,
+    /// 充值到套餐时为 Some(plan_id);充主余额时 None。
+    #[serde(default)]
+    pub plan_id: Option<String>,
+    /// 购买的 token 数。
+    #[serde(default)]
+    pub tokens: i64,
+    /// 应付金额(分)。
+    pub amount_cents: i64,
+    #[serde(default)]
+    pub remark: String,
+}
+
+/// POST /admin/api/payments/orders —— 创建充值支付单(预留扩展点)。
+/// 当前未接入真实渠道:统一回 501 语义的明确错误;接入后由 PaymentProvider
+/// 返回订单号与拉起支付凭据,套餐/余额到账逻辑在渠道回调确认后执行。
+pub async fn create_payment_order(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<PaymentOrderBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if body.user_id.trim().is_empty() {
+        return Err(ApiError::BadRequest("user_id 不能为空".into()));
+    }
+    if body.amount_cents <= 0 {
+        return Err(ApiError::BadRequest("amount_cents 必须为正数(单位:分)".into()));
+    }
+    let cfg = state.config.load().payment.clone();
+    let p = crate::payment::provider(&cfg);
+    let order = p
+        .create_order(crate::payment::PaymentOrderRequest {
+            user_id: body.user_id.trim().to_string(),
+            plan_id: body.plan_id,
+            tokens: body.tokens,
+            amount_cents: body.amount_cents,
+            remark: body.remark,
+        })
+        .await
+        .map_err(|e| ApiError::NotImplemented(e.to_string()))?;
+    Ok(Json(serde_json::to_value(order).unwrap_or_else(|_| json!({}))))
+}
+
+/// POST /payments/notify/:provider —— 渠道异步回调入口(预留扩展点,公开路由)。
+/// 渠道未接入或 provider 与配置不符时回 501;接入后先验签再确认订单到账。
+pub async fn payment_notify(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(provider): axum::extract::Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Json<Value>, ApiError> {
+    let cfg = state.config.load().payment.clone();
+    if !cfg.enabled || cfg.provider != provider {
+        return Err(ApiError::NotImplemented(format!(
+            "支付渠道 `{provider}` 未接入或未启用"
+        )));
+    }
+    let p = crate::payment::provider(&cfg);
+    let (order_id, paid) = p
+        .verify_notify(&headers, &body)
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("回调验签失败: {e}")))?;
+    // TODO(支付接入): 验签通过后按 order_id 幂等确认订单,执行套餐发放/余额充值。
+    Ok(Json(json!({ "ok": true, "order_id": order_id, "paid": paid })))
+}
+
 // ======================== 管理操作审计 ========================
 
 #[derive(Deserialize)]

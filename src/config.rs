@@ -32,6 +32,37 @@ pub struct Config {
     /// 数据面代理转发超时([proxy] 段)。
     #[serde(default)]
     pub proxy: ProxyConfig,
+    /// 支付对接([payment] 段,预留扩展点)。未启用时支付端点返回 501 语义错误。
+    #[serde(default)]
+    pub payment: PaymentConfig,
+}
+
+/// 支付对接配置([payment] 段,预留)。
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaymentConfig {
+    /// 是否启用支付;false 时支付端点返回"渠道未接入"的明确错误。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 渠道标识:none = 未接入;后续可扩展 wechatpay / alipay 等。
+    #[serde(default = "default_payment_provider")]
+    pub provider: String,
+    /// 支付回调通知地址(渠道侧需要时填写)。
+    #[serde(default)]
+    pub notify_url: String,
+}
+
+impl Default for PaymentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_payment_provider(),
+            notify_url: String::new(),
+        }
+    }
+}
+
+fn default_payment_provider() -> String {
+    "none".to_string()
 }
 
 /// 数据面代理转发超时配置。

@@ -260,7 +260,9 @@ async fn embeddings_inner(
         return Err(ApiError::BadRequest("missing `model`".into()));
     }
     let texts = embed_inputs(&v)?;
-    let request_id = format!("req_{}", &uuid::Uuid::new_v4().to_string()[..24]);
+    // 请求 ID 用完整 UUID(40 字符)。历史版本截取前 24 字符,恰好以第 4 段尾连字符结尾,
+    // 前端看起来像"末尾多了个斜杠"——已修复,旧日志中的截断 ID 保持原样。
+    let request_id = format!("req_{}", uuid::Uuid::new_v4());
     let req_preview = reqlog::body_preview(body, state.config.load().logging.body_preview_max_bytes);
 
     let mut trace = RunTrace {
@@ -436,7 +438,9 @@ pub async fn run_chat(
         .ok_or_else(|| ApiError::BadRequest("missing `model`".into()))?
         .to_string();
     let stream = req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
-    let request_id = format!("req_{}", &uuid::Uuid::new_v4().to_string()[..24]);
+    // 请求 ID 用完整 UUID(40 字符)。历史版本截取前 24 字符,恰好以第 4 段尾连字符结尾,
+    // 前端看起来像"末尾多了个斜杠"——已修复,旧日志中的截断 ID 保持原样。
+    let request_id = format!("req_{}", uuid::Uuid::new_v4());
 
     // 占用并发名额(RAII,流结束/出错自动释放)。
     let guard = match user.try_acquire() {
@@ -1213,7 +1217,9 @@ pub async fn run_messages(
         Ok(c) => c,
         Err(e) => { fail_global!(); return Err(e); }
     };
-    let request_id = format!("req_{}", &uuid::Uuid::new_v4().to_string()[..24]);
+    // 请求 ID 用完整 UUID(40 字符)。历史版本截取前 24 字符,恰好以第 4 段尾连字符结尾,
+    // 前端看起来像"末尾多了个斜杠"——已修复,旧日志中的截断 ID 保持原样。
+    let request_id = format!("req_{}", uuid::Uuid::new_v4());
     let cand_init = init_candidates(&candidates);
     // failover 策略:fallback 关闭只试首个候选;max_retries 限制尝试候选数(0=不限)。
     let attempt_cap = state.config.load().defaults.attempt_cap(candidates.len());

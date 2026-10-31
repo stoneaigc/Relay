@@ -54,6 +54,9 @@ pub enum ApiError {
     Unavailable(String),
     #[error("internal error: {0}")]
     Internal(String),
+    /// 功能已预留但未启用/未接入(如支付渠道)。501。
+    #[error("{0}")]
+    NotImplemented(String),
     /// 周期预算耗尽(日/月窗口)。429 + insufficient_quota,对齐 OpenAI 语义。
     #[error("{0} token budget exhausted")]
     BudgetExhausted(&'static str),
@@ -72,6 +75,7 @@ impl ApiError {
             ApiError::TooManyRequests | ApiError::ConcurrencyLimit(_) | ApiError::TooManyAttempts(_) | ApiError::BudgetExhausted(_) => StatusCode::TOO_MANY_REQUESTS,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
         }
     }
 
@@ -86,6 +90,7 @@ impl ApiError {
             ApiError::NoTarget(_) | ApiError::AllFailed { .. } | ApiError::Upstream(_) => "upstream_error",
             ApiError::Unavailable(_) => "upstream_error",
             ApiError::Internal(_) => "internal_error",
+            ApiError::NotImplemented(_) => "api_error",
         }
     }
 }
@@ -113,6 +118,7 @@ impl ApiError {
             ApiError::BadRequest(_) => "invalid_request_error",
             ApiError::NoTarget(_) | ApiError::AllFailed { .. } | ApiError::Upstream(_) | ApiError::Unavailable(_) => "api_error",
             ApiError::Internal(_) => "internal_error",
+            ApiError::NotImplemented(_) => "api_error",
         }
     }
 }

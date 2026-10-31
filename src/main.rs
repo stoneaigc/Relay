@@ -9,6 +9,7 @@ mod error;
 mod guard;
 mod handlers;
 mod jwt;
+mod payment;
 mod portal;
 mod pricing;
 mod providers;
@@ -524,6 +525,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/metrics/overview", get(admin::metrics_overview))
         // 请求链路追踪
         .route("/request-logs", get(admin::list_request_logs))
+        // 调用趋势聚合(数据源 = 请求日志全量历史,窗口可跨天)
+        .route("/usage/trend", get(admin::usage_trend))
+        // 支付对接(预留扩展点:未接入渠道时返回 501 语义错误)
+        .route("/payments/orders", post(admin::create_payment_order))
         // 管理操作审计
         .route("/audit-logs", get(admin::list_audit_logs))
         // 审计中间件:包裹全部 admin 路由,仅变更方法落库。
@@ -558,6 +563,8 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/healthz", get(handlers::health))
+        // 支付渠道异步回调(预留扩展点;公开路由,验签由渠道实现负责)
+        .route("/payments/notify/:provider", post(admin::payment_notify))
         // Prometheus 指标导出(管理端 JWT 或 metrics.export_token 鉴权)。
         .route("/metrics", get(admin::metrics_export))
         // ---- 数据面(给 SDK 用)----

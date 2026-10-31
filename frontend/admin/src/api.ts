@@ -550,6 +550,17 @@ export const api = {
   metricsRealtime: (): Promise<{ ts: number; active: number; requests_5m: number; success_rate: number; qps: number; tokens_per_sec: number; tpm: number; avg_ms: number; p95_ms: number }> =>
     req("/admin/api/metrics/realtime"),
 
+  // ---- 调用趋势聚合(数据源 = 请求日志全量历史;≤48h 按小时分桶,>48h 按天分桶) ----
+  usageTrend: (opts: { hours?: number; fromTs?: number; toTs?: number }): Promise<UsageTrendResp> => {
+    const qs = new URLSearchParams();
+    if (typeof opts.hours === "number") qs.set("hours", String(opts.hours));
+    if (typeof opts.fromTs === "number") qs.set("from_ts", String(opts.fromTs));
+    if (typeof opts.toTs === "number") qs.set("to_ts", String(opts.toTs));
+    // 天级分桶按本地零点切,后端需要时区偏移秒(UTC+8 = 28800)
+    qs.set("tz_offset_secs", String(-new Date().getTimezoneOffset() * 60));
+    return req(`/admin/api/usage/trend?${qs.toString()}`);
+  },
+
   // ---- 套餐管理 ----
   plans: (): Promise<{ data: PlanRow[] }> => req("/admin/api/plans"),
   createPlan: (body: { name: string; token_quota: number; validity_days: number; price_cents?: number; description?: string }): Promise<PlanRow> =>
@@ -906,6 +917,29 @@ export interface MetricsDashboardResp {
     upstream_id: string;
     series: MetricsSeriesPoint[];
   }[];
+}
+
+// ================== 调用趋势聚合 ==================
+
+/** 趋势聚合单点(时间分桶,已按本地时区对齐) */
+export interface UsageTrendPoint {
+  /** 桶起点 unix 秒 */
+  ts: number;
+  requests: number;
+  success: number;
+  failed: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+export interface UsageTrendResp {
+  from_ts: number;
+  to_ts: number;
+  /** 分桶粒度(秒):3600 = 小时桶,86400 = 天桶 */
+  bucket_secs: number;
+  tz_offset_secs: number;
+  /** 已补零的连续序列 */
+  points: UsageTrendPoint[];
 }
 
 // ================== 请求链路追踪 ==================

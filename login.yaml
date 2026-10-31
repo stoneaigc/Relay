@@ -1,0 +1,42 @@
+- generic [ref=e2]:
+  - complementary [ref=e3]:
+    - img
+    - generic [ref=e4]:
+      - img [ref=e5]
+      - generic [ref=e11]: Relay
+    - generic [ref=e12]:
+      - heading [level=1] [ref=e13]:
+        - text: 万物皆可
+        - emphasis [ref=e14]: 中转
+      - paragraph [ref=e15]: Relay · 自托管 LLM 中转站 —— 任意模型供应商，收敛为一个入口
+    - generic [ref=e16]:
+      - generic [ref=e17]:
+        - generic [ref=e18]: OpenAI
+        - generic [ref=e19]: Claude
+        - generic [ref=e20]: DeepSeek
+        - generic [ref=e21]: 通义千问
+        - generic [ref=e22]: 私有部署
+      - img [ref=e27]
+      - generic [ref=e34]:
+        - generic [ref=e35]: SDK / 应用
+        - generic [ref=e36]: 团队共享
+        - generic [ref=e37]: 统一账单
+    - generic [ref=e38]: 任意上游 → 一个入口 · 一把 Key
+    - generic [ref=e39]: 自托管 LLM API 网关 · 单二进制
+  - main [ref=e41]:
+    - heading "欢迎回来" [level=2] [ref=e42]
+    - generic [ref=e43]: 登录后按账号身份自动进入对应工作台
+    - tablist [ref=e44]:
+      - button "登录" [ref=e45] [cursor=pointer]
+      - button "注册" [ref=e46] [cursor=pointer]
+    - generic [ref=e48]:
+      - generic [ref=e49]: 账号名
+      - textbox "账号名" [ref=e50]
+      - generic [ref=e51]: 密码
+      - generic [ref=e52]:
+        - textbox "密码" [ref=e53]
+        - button "显示或隐藏密码" [ref=e54] [cursor=pointer]:
+          - img [ref=e55]
+      - button "登 录" [ref=e58] [cursor=pointer]
+      - alert [ref=e59]
+      - button "忘记密码?" [ref=e60] [cursor=pointer]

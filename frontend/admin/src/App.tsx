@@ -1,7 +1,7 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { Users as UsersIcon, UsersRound, KeyRound, Copy, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen, SlidersHorizontal, Undo2, Ban, ChevronRight, ArrowUp, ArrowDown, Inbox } from "lucide-react";
-import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, UserGroupRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint, AdminKeyRow, AdminApiKeyRow, PlanRow, PlanQuotaRow } from "./api";
+import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, UserGroupRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint, AdminKeyRow, AdminApiKeyRow, PlanRow, PlanQuotaRow, UsageTrendPoint } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -4126,10 +4126,7 @@ function BreakdownBars({ title, rows, metric }: { title: string; rows: UsageBrea
 
 /// 「全局用量」页:用量统计与请求链路合并为一个页面的两个 Tab(原先两处入口重复展示调用日志)。
 function UsagePanel() {
-  // 调用趋势:复用实时监控的聚合序列(近 24 小时,成功/失败堆叠柱)。
-  const [series, setSeries] = useState<MetricsSeriesPoint[]>([]);
   const [tab, setTab] = useState<"trend" | "detail">("trend");
-  useEffect(() => { api.metricsDashboard(86400, 5).then((d) => setSeries(d.series ?? [])).catch(() => { /* 静默 */ }); }, []);
   const tabBtn = (key: "trend" | "detail", label: string) => (
     <button
       key={key}
@@ -4150,7 +4147,7 @@ function UsagePanel() {
       </div>
       {tab === "trend" ? (
         <div className="space-y-5">
-          <UsageTrendCard series={series} />
+          <UsageTrendCard />
           <UsageChartsBody />
         </div>
       ) : (
@@ -4160,8 +4157,70 @@ function UsagePanel() {
   );
 }
 
-/** 调用趋势卡:近 24 小时成功/失败堆叠柱(ECharts)。 */
-function UsageTrendCard({ series }: { series: MetricsSeriesPoint[] }) {
+// 趋势时间范围预设:hours 传给后端;自定义时走 from_ts/to_ts。
+const TREND_PRESETS: { key: "24h" | "7d" | "30d"; label: string; hours: number }[] = [
+  { key: "24h", label: "近 24 小时", hours: 24 },
+  { key: "7d", label: "近 7 天", hours: 24 * 7 },
+  { key: "30d", label: "近 30 天", hours: 24 * 30 },
+];
+
+/** datetime-local 值 → unix 秒(本地时区语义)。 */
+function localInputToTs(v: string): number | null {
+  if (!v) return null;
+  const t = new Date(v).getTime();
+  return Number.isFinite(t) ? Math.floor(t / 1000) : null;
+}
+
+/**
+ * 调用趋势卡:成功/失败堆叠柱(ECharts)。
+ * 数据源 = 请求日志表全量历史(区别于内存指标的 48h 窗口),支持任意时间窗:
+ * ≤48h 按小时分桶,>48h 按天分桶(按本地零点切)。
+ */
+function UsageTrendCard() {
+  const [preset, setPreset] = useState<"24h" | "7d" | "30d" | "custom">("24h");
+  // 自定义起止(datetime-local 本地值)
+  const [fromVal, setFromVal] = useState("");
+  const [toVal, setToVal] = useState("");
+  const [points, setPoints] = useState<UsageTrendPoint[] | null>(null);
+  const [bucketSecs, setBucketSecs] = useState(3600);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+
+  // 请求参数:preset 直接给 hours;自定义要求起止都已填。
+  const params = useMemo(() => {
+    if (preset === "custom") {
+      const from = localInputToTs(fromVal);
+      const to = localInputToTs(toVal);
+      if (from == null || to == null || to <= from) return null;
+      return { fromTs: from, toTs: to };
+    }
+    return { hours: TREND_PRESETS.find((p) => p.key === preset)?.hours ?? 24 };
+  }, [preset, fromVal, toVal]);
+
+  useEffect(() => {
+    if (!params) return;
+    let cancelled = false;
+    setLoading(true);
+    setErr("");
+    api
+      .usageTrend(params)
+      .then((r) => {
+        if (cancelled) return;
+        setPoints(r.points ?? []);
+        setBucketSecs(r.bucket_secs);
+      })
+      .catch((e: any) => { if (!cancelled) setErr(e?.message || "加载失败"); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [params]);
+
+  const series = points ?? [];
+  const isDaily = bucketSecs >= 86400;
+  // 天桶标签只显示日期;小时桶显示 月-日 时:00
+  const label = (ts: number) =>
+    new Date(ts * 1000).toLocaleString("zh-CN", isDaily
+      ? { month: "2-digit", day: "2-digit" }
+      : { month: "2-digit", day: "2-digit", hour: "2-digit", hour12: false });
   const has = series.some((p) => p.requests > 0);
   const option: EChartsCoreOption = {
     grid: { left: 2, right: 2, top: 28, bottom: 0, containLabel: true },
@@ -4169,28 +4228,77 @@ function UsageTrendCard({ series }: { series: MetricsSeriesPoint[] }) {
     tooltip: {
       trigger: "axis",
       confine: true,
-      formatter: (params: any) => {
-        const arr = Array.isArray(params) ? params : [params];
-        const p = series[arr[0]?.dataIndex];
-        if (!p) return "";
-        const fail = p.fail_unavailable + p.fail_other;
-        return `${fmtTsShort(p.ts)}<br/>成功 <b>${p.success.toLocaleString()}</b> · 失败 <b>${fail.toLocaleString()}</b>${p.avg_ms > 0 ? ` · 平均 ${p.avg_ms}ms` : ""}`;
+      formatter: (p: any) => {
+        const arr = Array.isArray(p) ? p : [p];
+        const d = series[arr[0]?.dataIndex];
+        if (!d) return "";
+        const tok = d.input_tokens + d.output_tokens;
+        return `${new Date(d.ts * 1000).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: isDaily ? undefined : "2-digit", minute: isDaily ? undefined : "2-digit", hour12: false })}<br/>成功 <b>${d.success.toLocaleString()}</b> · 失败 <b>${d.failed.toLocaleString()}</b><br/>tokens <b>${tok.toLocaleString()}</b>(入 ${d.input_tokens.toLocaleString()} / 出 ${d.output_tokens.toLocaleString()})`;
       },
     },
-    xAxis: { type: "category", data: series.map((p) => fmtTsShort(p.ts)), axisLabel: { fontSize: 10 } },
+    xAxis: { type: "category", data: series.map((p) => label(p.ts)), axisLabel: { fontSize: 10 } },
     yAxis: { type: "value", splitLine: { lineStyle: { type: "dashed" } } },
     series: [
-      { name: "成功", type: "bar", stack: "t", data: series.map((p) => p.success), itemStyle: { color: "#10b981" }, barMaxWidth: 14 },
-      { name: "失败", type: "bar", stack: "t", data: series.map((p) => p.fail_unavailable + p.fail_other), itemStyle: { color: "#f43f5e" }, barMaxWidth: 14 },
+      { name: "成功", type: "bar", stack: "t", data: series.map((p) => p.success), itemStyle: { color: "#10b981" }, barMaxWidth: isDaily ? 22 : 14 },
+      { name: "失败", type: "bar", stack: "t", data: series.map((p) => p.failed), itemStyle: { color: "#f43f5e" }, barMaxWidth: isDaily ? 22 : 14 },
     ],
   };
+  const rangeText = preset === "custom" && fromVal && toVal
+    ? `${fromVal.replace("T", " ")} ~ ${toVal.replace("T", " ")}`
+    : TREND_PRESETS.find((p) => p.key === preset)?.label ?? "";
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">调用趋势(近 24 小时)</CardTitle>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <CardTitle className="text-base">调用趋势</CardTitle>
+            <CardDescription className="mt-0.5">
+              {rangeText}{isDaily ? " · 按天" : " · 按小时"} · 数据源为调用日志全量历史
+            </CardDescription>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="inline-flex rounded-lg border border-input bg-card p-0.5 text-xs">
+              {TREND_PRESETS.map((p) => (
+                <button key={p.key} onClick={() => setPreset(p.key)}
+                  className={cn("rounded-md px-3 py-1 transition-colors",
+                    preset === p.key ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground")}>
+                  {p.label}
+                </button>
+              ))}
+              <button onClick={() => setPreset("custom")}
+                className={cn("rounded-md px-3 py-1 transition-colors",
+                  preset === "custom" ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground hover:text-foreground")}>
+                自定义
+              </button>
+            </div>
+            {preset === "custom" && (
+              <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                <input type="datetime-local" value={fromVal} onChange={(e) => setFromVal(e.target.value)}
+                  className="rounded-md border border-input bg-background px-2 py-1" />
+                <span className="text-muted-foreground">至</span>
+                <input type="datetime-local" value={toVal} onChange={(e) => setToVal(e.target.value)}
+                  className="rounded-md border border-input bg-background px-2 py-1" />
+                {(fromVal || toVal) && (
+                  <button className="text-muted-foreground underline-offset-2 hover:underline"
+                    onClick={() => { setFromVal(""); setToVal(""); }}>
+                    清空
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
       </CardHeader>
       <CardContent>
-        {!has ? <p className="text-sm text-muted-foreground">暂无调用数据</p> : <EChart option={option} height={220} />}
+        {err ? (
+          <p className="text-sm text-destructive">{err}</p>
+        ) : loading && !points ? (
+          <div className="h-[220px] animate-pulse rounded-md bg-muted/50" />
+        ) : !has ? (
+          <p className="text-sm text-muted-foreground">所选时间范围内暂无调用数据</p>
+        ) : (
+          <EChart option={option} height={220} />
+        )}
       </CardContent>
     </Card>
   );
@@ -6394,8 +6502,49 @@ function TpmChart({ points }: { points: MetricsSeriesPoint[] }) {
 }
 
 // ---- 实时状态条:5s 轮询在途并发/QPS/成功率/token 吞吐,可暂停 ----
-function RealtimeStrip() {
-  const [d, setD] = useState<{ active: number; requests_5m: number; success_rate: number; qps: number; tokens_per_sec: number; p95_ms: number } | null>(null);
+/** 实时采样单条记录(来自 /metrics/realtime,5s 一拍) */
+interface RtSample {
+  ts: number; active: number; requests_5m: number; success_rate: number;
+  qps: number; tokens_per_sec: number; tpm: number; avg_ms: number; p95_ms: number;
+}
+
+/** 采样历史长度:60 点 × 5s = 近 5 分钟迷你趋势 */
+const RT_HISTORY = 60;
+
+/** 迷你趋势线(内联 SVG,无图表库开销;单值/空数据时画平线) */
+function Sparkline({ values, color }: { values: number[]; color: string }) {
+  const w = 120, h = 30;
+  const pts = values.length >= 2 ? values : [];
+  if (pts.length < 2) {
+    return (
+      <svg viewBox={`0 0 ${w} ${h}`} className="h-7 w-full" preserveAspectRatio="none">
+        <line x1="0" y1={h - 2} x2={w} y2={h - 2} stroke="currentColor" strokeWidth="1" className="text-slate-200 dark:text-slate-700" />
+      </svg>
+    );
+  }
+  const max = Math.max(...pts);
+  const min = Math.min(...pts);
+  const span = max - min;
+  const coords = pts.map((v, i) => {
+    const x = (i / (pts.length - 1)) * w;
+    const y = span < 1e-9 ? h - 2 : h - 2 - ((v - min) / span) * (h - 6);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  });
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="h-7 w-full" preserveAspectRatio="none">
+      <polyline points={coords.join(" ")} fill="none" stroke={color} strokeWidth="1.6" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/**
+ * 实时监控卡片区(5s 轮询):6 张指标卡,每卡带 5 分钟采样历史的迷你趋势线。
+ * 取代原单行指标条 —— 单行在大屏上拥挤、在窄屏上换行错位,卡片结构信息层级更清晰,
+ * 且成功率/P95 带阈值色与异常横幅,告警一眼可见。
+ */
+function RealtimeCards() {
+  const [d, setD] = useState<RtSample | null>(null);
+  const [hist, setHist] = useState<RtSample[]>([]);
   const [live, setLive] = useState(true);
   const [err, setErr] = useState(false);
 
@@ -6405,46 +6554,73 @@ function RealtimeStrip() {
     const load = async () => {
       try {
         const r = await api.metricsRealtime();
-        if (!cancelled) { setD(r); setErr(false); }
+        if (cancelled) return;
+        setD(r);
+        setErr(false);
+        setHist((p) => [...p.slice(-(RT_HISTORY - 1)), r]);
       } catch { if (!cancelled) setErr(true); }
     };
     load();
     const t = setInterval(load, 5000);
     return () => { cancelled = true; clearInterval(t); };
-  }, [live, d?.requests_5m === undefined ? 0 : 0]);
+  }, [live]);
 
-  const items: { label: string; value: string; tone?: string; title?: string }[] = d ? [
-    { label: "在途并发", value: String(d.active), title: "此刻正在处理中的请求数(含流式)" },
-    { label: "QPS(5min)", value: d.qps.toFixed(2), title: "近 5 分钟平均每秒请求数" },
-    { label: "成功率(5min)", value: `${(d.success_rate * 100).toFixed(1)}%`, tone: d.success_rate >= 0.99 ? "text-emerald-600" : d.success_rate >= 0.9 ? "text-amber-600" : "text-rose-600", title: "近 5 分钟成功请求占比" },
-    { label: "Token/s(5min)", value: Math.round(d.tokens_per_sec).toLocaleString(), title: "近 5 分钟平均每秒 token 吞吐" },
-    { label: "请求数(5min)", value: d.requests_5m.toLocaleString(), title: "近 5 分钟总请求数" },
-    { label: "P95 延迟(5min)", value: `${Math.round(d.p95_ms)} ms`, title: "近 5 分钟 P95 延迟" },
+  const srColor = !d ? "#64748b" : d.success_rate >= 0.99 ? "#10b981" : d.success_rate >= 0.9 ? "#f59e0b" : "#f43f5e";
+  const p95Color = !d ? "#64748b" : d.p95_ms < 2000 ? "#10b981" : d.p95_ms < 8000 ? "#f59e0b" : "#f43f5e";
+  const cards: { label: string; value: string; sub: string; color: string; spark: number[]; title: string }[] = d ? [
+    { label: "在途并发", value: String(d.active), sub: "此刻处理中", color: "#6366f1", spark: hist.map((h) => h.active), title: "此刻正在处理中的请求数(含流式)" },
+    { label: "QPS", value: d.qps.toFixed(2), sub: "近 5 分钟均值", color: "#0ea5e9", spark: hist.map((h) => h.qps), title: "近 5 分钟平均每秒请求数" },
+    { label: "成功率", value: `${(d.success_rate * 100).toFixed(1)}%`, sub: d.success_rate < 0.9 ? "低于 90% 阈值" : "近 5 分钟", color: srColor, spark: hist.map((h) => h.success_rate * 100), title: "近 5 分钟成功请求占比" },
+    { label: "Token/s", value: Math.round(d.tokens_per_sec).toLocaleString(), sub: `TPM ${Math.round(d.tpm).toLocaleString()}`, color: "#8b5cf6", spark: hist.map((h) => h.tokens_per_sec), title: "近 5 分钟平均每秒 token 吞吐" },
+    { label: "请求数", value: d.requests_5m.toLocaleString(), sub: "近 5 分钟累计", color: "#64748b", spark: hist.map((h) => h.requests_5m), title: "近 5 分钟总请求数" },
+    { label: "P95 延迟", value: `${Math.round(d.p95_ms)} ms`, sub: `均值 ${Math.round(d.avg_ms)} ms`, color: p95Color, spark: hist.map((h) => h.p95_ms), title: "近 5 分钟 P95 延迟" },
   ] : [];
 
   return (
-    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-gradient-to-r from-indigo-50/60 via-white to-white px-4 py-3 shadow-sm dark:border-slate-800 dark:from-indigo-950/30 dark:via-slate-900 dark:to-slate-900">
-      <span className="flex items-center gap-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200">
-        <span className={cn("relative flex h-2 w-2")}>
-          {live && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />}
-          <span className={cn("relative inline-flex h-2 w-2 rounded-full", live ? "bg-emerald-500" : "bg-slate-400")} />
+    <div className="space-y-3">
+      {/* 状态行:LIVE 指示 / 采样时间 / 暂停控制 */}
+      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+        <span className="flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-200">
+          <span className="relative flex h-2 w-2">
+            {live && <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />}
+            <span className={cn("relative inline-flex h-2 w-2 rounded-full", live ? "bg-emerald-500" : "bg-slate-400")} />
+          </span>
+          {live ? "实时" : "已暂停"}
         </span>
-        实时
-      </span>
-      {err && <span className="text-xs text-rose-600">获取失败,重试中…</span>}
-      {items.map((it) => (
-        <div key={it.label} className="flex min-w-24 flex-col" title={it.title}>
-          <span className="text-[10px] uppercase tracking-wide text-slate-400">{it.label}</span>
-          <span className={cn("mono text-lg font-semibold leading-tight text-slate-900 dark:text-slate-50", it.tone)}>{it.value}</span>
+        {d && <span>采样于 {fmtTimeLocal(d.ts)}</span>}
+        <span>· 每 5 秒一拍,窗口指标为近 5 分钟</span>
+        {err && <span className="text-rose-600">获取失败,重试中…</span>}
+        <button
+          className="ml-auto rounded-md border border-slate-200 px-2 py-1 text-[11px] text-slate-500 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-800"
+          onClick={() => setLive((v) => !v)}
+        >
+          {live ? "暂停刷新" : "恢复刷新(5s)"}
+        </button>
+      </div>
+      {/* 异常横幅:成功率跌破 90% 时提示 */}
+      {d && d.success_rate < 0.9 && (
+        <div className="flex items-center gap-2 rounded-lg border border-rose-300/50 bg-rose-500/10 px-3 py-2 text-sm text-rose-700 dark:border-rose-500/30 dark:text-rose-400">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          近 5 分钟成功率 {(d.success_rate * 100).toFixed(1)}%,低于 90% 阈值 —— 请到「上游监控」查看熔断 / 失败详情
         </div>
-      ))}
-      {!d && !err && <span className="text-xs text-slate-400">加载中…</span>}
-      <button
-        className="ml-auto rounded-md border border-slate-200 px-2 py-1 text-[11px] text-slate-500 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-800"
-        onClick={() => setLive((v) => !v)}
-      >
-        {live ? "暂停刷新" : "恢复刷新(5s)"}
-      </button>
+      )}
+      {/* 指标卡区 */}
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+        {d ? cards.map((c) => (
+          <div key={c.label} title={c.title} className="rounded-xl border border-slate-200 bg-white px-3.5 py-3 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+            <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{c.label}</div>
+            <div className="mono mt-0.5 text-2xl font-semibold leading-tight" style={{ color: c.color }}>{c.value}</div>
+            <div className="mt-0.5 text-[11px] text-slate-400">{c.sub}</div>
+            <div className="mt-2">
+              <Sparkline values={c.spark} color={c.color} />
+            </div>
+          </div>
+        )) : !err ? (
+          Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="h-[130px] animate-pulse rounded-xl border border-slate-200 bg-muted/40 dark:border-slate-800" />
+          ))
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -6567,12 +6743,11 @@ function MetricsPanel() {
 
   return (
     <div className="space-y-4">
-      <RealtimeStrip />
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
           <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-100">实时监控</h2>
           <p className="mt-0.5 text-xs text-slate-500">
-            实时滚动窗口(秒桶 120s / 分钟桶 48h),15s 自动刷新。
+            实时区 5s 采样(近 5 分钟窗口);下方趋势区为窗口聚合(秒桶 120s / 分钟桶 48h),15s 刷新,范围可切换。
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -6598,6 +6773,14 @@ function MetricsPanel() {
           </Button>
         </div>
       </div>
+
+      {/* 实时区:6 张指标卡(带 5 分钟迷你趋势) */}
+      <RealtimeCards />
+
+      {/* 窗口趋势分析区 */}
+      <p className="pt-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+        窗口趋势分析({RANGE_PRESETS.find((p) => p.secs === range)?.label ?? "自定义"})
+      </p>
 
       {err ? (
         <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">读取失败：{err}</div>
@@ -7266,7 +7449,8 @@ function RequestLogDetail({ row, userName }: { row: RequestLogRow; userName: str
   );
 
   return (
-    <SheetContent className="w-full overflow-y-auto p-0 sm:max-w-xl">
+    // 抽屉加宽:覆盖基类 sm:w-[min(94vw,540px)];768px 下 40 字符请求 ID 可单行完整展示
+    <SheetContent className="w-full overflow-y-auto p-0 sm:w-[min(94vw,768px)] sm:max-w-3xl">
       <SheetHeader className="border-b px-4 py-3">
         <SheetTitle className="flex flex-wrap items-center gap-2 text-sm">
           <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(row.final_status))}>
@@ -7285,7 +7469,8 @@ function RequestLogDetail({ row, userName }: { row: RequestLogRow; userName: str
           <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1.5 text-xs">
             <span className="text-muted-foreground">请求 ID</span>
             <span className="flex items-center gap-1.5">
-              <code className="mono block max-w-full overflow-x-auto whitespace-nowrap rounded bg-muted px-1.5 py-0.5" title={row.request_id}>{row.request_id}</code>
+              {/* 抽屉加宽后 40 字符 mono 可单行完整展示;break-all 兜底保证任何宽度下全量可见(不裁切、复制完整)。 */}
+              <code className="mono block break-all rounded bg-muted px-1.5 py-0.5 text-[11px]" title={row.request_id}>{row.request_id}</code>
               <button
                 className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                 title="复制请求 ID"

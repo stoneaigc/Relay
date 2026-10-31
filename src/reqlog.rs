@@ -73,6 +73,25 @@ fn kind_str(kind: ProviderKind) -> &'static str {
     }
 }
 
+/// 趋势聚合单点:ts = 分桶起始时刻(unix 秒,已按本地时区对齐)。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TrendPoint {
+    pub ts: i64,
+    pub requests: u64,
+    pub success: u64,
+    pub failed: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// 把任意时刻归到其所在分桶的起始时刻。
+/// 按 `(ts + tz) / bucket * bucket - tz` 对齐,支持本地时区偏移(天级分桶按本地零点切)。
+/// 对已对齐的值幂等。
+pub fn align_bucket(ts: i64, bucket_secs: i64, tz_offset_secs: i64) -> i64 {
+    let b = bucket_secs.max(1);
+    ((ts + tz_offset_secs).div_euclid(b) * b) - tz_offset_secs
+}
+
 /// 请求链路日志的存储后端抽象。
 pub trait RequestLogStore: Send + Sync {
     fn write(
@@ -97,6 +116,17 @@ pub trait RequestLogStore: Send + Sync {
         &self,
         filter: &LogFilter,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<i64>> + Send + '_>>;
+
+    /// 趋势聚合:把 [from_ts, to_ts] 内的日志按 bucket_secs 分桶统计请求/成败/tokens。
+    /// tz_offset_secs 为本地时区偏移秒(如 UTC+8 = 28800),用于天级分桶按本地零点切。
+    /// 只返回有数据的桶(乱序不含空桶),调用方按 align_bucket 补零;ts 已经按 tz 对齐。
+    fn trend(
+        &self,
+        from_ts: i64,
+        to_ts: i64,
+        bucket_secs: i64,
+        tz_offset_secs: i64,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<TrendPoint>>> + Send + '_>>;
 
     /// 清理超过 days 天前的日志,返回删除条数。默认空实现(0 条);调用方仅在 days>0 时调用。
     fn prune(&self, _days: u64) -> Pin<Box<dyn Future<Output = anyhow::Result<u64>> + Send + '_>> {
@@ -441,6 +471,57 @@ impl RequestLogStore for SqliteRequestLogStore {
         })
     }
 
+    fn trend(
+        &self,
+        from_ts: i64,
+        to_ts: i64,
+        bucket_secs: i64,
+        tz_offset_secs: i64,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<TrendPoint>>> + Send + '_>> {
+        let bucket_secs = bucket_secs.max(60);
+        let db = self.db.clone();
+        // created_at 以 "@unix秒" 定长文本存储;CAST 取出秒数后按 (ts+tz) 对齐分桶,
+        // 天级分桶即按本地零点切。SUM 仅在空组时为 NULL,分组后必有行,这里仍兜底 0。
+        let sql = format!(
+            "SELECT ((CAST(substr(created_at, 2) AS INTEGER) + ?) / ?) * ? - ? AS b,
+                    COUNT(*) AS requests,
+                    SUM(CASE WHEN final_status = 200 THEN 1 ELSE 0 END) AS success,
+                    SUM(CASE WHEN final_status != 200 THEN 1 ELSE 0 END) AS failed,
+                    SUM(input_tokens) AS input_tokens,
+                    SUM(output_tokens) AS output_tokens
+             FROM request_logs
+             WHERE created_at >= ? AND created_at <= ?
+             GROUP BY b ORDER BY b"
+        );
+        Box::pin(async move {
+            use sqlx::Row;
+            let sql = pq(&sql);
+            let mut query = sqlx::query(&sql);
+            query = query
+                .bind(tz_offset_secs)
+                .bind(bucket_secs)
+                .bind(bucket_secs)
+                .bind(tz_offset_secs);
+            query = query.bind(format!("@{from_ts}")).bind(format!("@{to_ts}"));
+            let rows = query.fetch_all(&db).await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for r in rows {
+                let gi = |col: &str| -> u64 {
+                    r.try_get::<i64, _>(col).unwrap_or(0).max(0) as u64
+                };
+                out.push(TrendPoint {
+                    ts: align_bucket(r.try_get::<i64, _>("b").unwrap_or(0), bucket_secs, tz_offset_secs),
+                    requests: gi("requests"),
+                    success: gi("success"),
+                    failed: gi("failed"),
+                    input_tokens: gi("input_tokens"),
+                    output_tokens: gi("output_tokens"),
+                });
+            }
+            Ok(out)
+        })
+    }
+
     /// 分批删除超期日志:created_at 以 "@unix秒" 定长文本存储,字典序=数值序,字符串比较即时间比较。
     /// 每批 2000 条循环删除,避免单次大 DELETE 长时间持锁;SQLite/PG 通用。
     fn prune(&self, days: u64) -> Pin<Box<dyn Future<Output = anyhow::Result<u64>> + Send + '_>> {
@@ -754,6 +835,84 @@ impl RequestLogStore for EsRequestLogStore {
             }
             let v: serde_json::Value = resp.json().await.unwrap_or_default();
             Ok(v["count"].as_i64().unwrap_or(0))
+        })
+    }
+
+    fn trend(
+        &self,
+        from_ts: i64,
+        to_ts: i64,
+        bucket_secs: i64,
+        tz_offset_secs: i64,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<TrendPoint>>> + Send + '_>> {
+        let bucket_secs = bucket_secs.max(60);
+        let url = format!("{}/{}-*/_search", self.base_url, self.index_prefix);
+        // 直方图打在 @timestamp(ISO8601,毫秒精度)上,避免 ts 秒值被误读为毫秒;
+        // offset 把分桶边界平移 tz 秒,天级分桶即按本地零点切。
+        let mut histogram = serde_json::json!({
+            "field": "@timestamp",
+            "fixed_interval": format!("{bucket_secs}s"),
+            "min_doc_count": 0,
+            "extended_bounds": { "min": from_ts * 1000, "max": to_ts * 1000 }
+        });
+        if tz_offset_secs != 0 {
+            histogram["offset"] = serde_json::Value::String(format!("{tz_offset_secs}s"));
+        }
+        let filter = LogFilter {
+            from_ts: Some(from_ts),
+            to_ts: Some(to_ts),
+            ..Default::default()
+        };
+        let body = serde_json::json!({
+            "size": 0,
+            "query": es_query(&filter),
+            "aggs": {
+                "trend": {
+                    "date_histogram": histogram,
+                    "aggs": {
+                        "success": { "filter": { "term": { "final_status": 200 } } },
+                        "input_tokens": { "sum": { "field": "input_tokens" } },
+                        "output_tokens": { "sum": { "field": "output_tokens" } }
+                    }
+                }
+            }
+        });
+        let authed = self.authed(self.client.post(&url).json(&body));
+        Box::pin(async move {
+            let resp = authed
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("es trend: {e}"))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                anyhow::bail!("es trend: {} {text}", status);
+            }
+            let v: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| anyhow::anyhow!("es trend json: {e}"))?;
+            let buckets = v["aggregations"]["trend"]["buckets"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let mut out = Vec::with_capacity(buckets.len());
+            for b in buckets {
+                // key 为桶起始毫秒;统一用 align_bucket 归一(对已对齐值幂等,兼容有/无 offset 的返回)。
+                let key_ms = b["key"].as_i64().unwrap_or(0);
+                let ts = align_bucket(key_ms.div_euclid(1000), bucket_secs, tz_offset_secs);
+                let requests = b["doc_count"].as_u64().unwrap_or(0);
+                let success = b["success"]["doc_count"].as_u64().unwrap_or(0);
+                out.push(TrendPoint {
+                    ts,
+                    requests,
+                    success: success.min(requests),
+                    failed: requests.saturating_sub(success),
+                    input_tokens: b["input_tokens"]["value"].as_u64().unwrap_or(0),
+                    output_tokens: b["output_tokens"]["value"].as_u64().unwrap_or(0),
+                });
+            }
+            Ok(out)
         })
     }
 
