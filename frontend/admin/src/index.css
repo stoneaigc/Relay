@@ -80,11 +80,18 @@ body,
   height: 100%;
 }
 
+/* 全局字号基准:106.25% = 17px,所有 rem 字号类(text-xs/sm/base)同步放大约 6%,
+   对齐主流管理后台的阅读尺寸(正文≈15px、辅助说明≈13px、最小标签≈12.75px) */
+html {
+  font-size: 106.25%;
+}
+
 body {
   margin: 0;
   color: var(--color-foreground);
   font-family: var(--font-sans);
   font-feature-settings: "cv05" 1, "ss01" 1;
+  line-height: 1.65;
   /* 冷调环境光:左上角一抹品牌色微光,呼应登录页的品牌面板 */
   background-color: var(--color-background);
   background-image: radial-gradient(

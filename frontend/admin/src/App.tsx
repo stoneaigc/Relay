@@ -172,7 +172,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           </svg>
           <div className="flex flex-col leading-none">
             <span className="text-[17px] font-bold tracking-tight text-foreground">Relay</span>
-            <span className="mt-1 text-[10px] font-medium tracking-[0.14em] text-subtle-foreground">ADMIN CONSOLE</span>
+            <span className="mt-1 text-[0.75rem] font-medium tracking-[0.14em] text-subtle-foreground">ADMIN CONSOLE</span>
           </div>
         </div>
         <button className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted md:hidden" onClick={() => setMobileOpen(false)}><X className="h-5 w-5" /></button>
@@ -181,7 +181,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
         {NAV_GROUPS.map((g, gi) => (
           <div key={gi} className={cn(gi > 0 && "mt-4")}>
             {g.title && (
-              <div className="px-3 pb-1.5 pt-1 text-[11px] font-semibold tracking-wide text-subtle-foreground">{g.title}</div>
+              <div className="px-3 pb-1.5 pt-1 text-[0.8rem] font-semibold tracking-wide text-subtle-foreground">{g.title}</div>
             )}
             {g.items.map((n) => (
               <NavLink key={n.path} to={n.path} onClick={() => setMobileOpen(false)}
@@ -218,7 +218,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
         <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground hover:text-destructive" onClick={onLogout}>
           <LogOut className="h-4 w-4" />退出登录
         </Button>
-        {version && <div className="px-3 pt-2 text-[10px] tracking-wide text-subtle-foreground">Relay v{version}</div>}
+        {version && <div className="px-3 pt-2 text-[0.75rem] tracking-wide text-subtle-foreground">Relay v{version}</div>}
       </div>
     </>
   );
@@ -238,7 +238,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           <div className="flex min-w-0 items-center gap-2">
             {groupTitle && (
               <>
-                <span className="shrink-0 text-[13px] text-subtle-foreground">{groupTitle}</span>
+                <span className="shrink-0 text-[0.85rem] text-subtle-foreground">{groupTitle}</span>
                 <ChevronRight className="h-3.5 w-3.5 shrink-0 text-border-strong" />
               </>
             )}
@@ -537,7 +537,7 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
           </SheetHeader>
           <SheetBody>
             {edit && edit.password_changed === false && edit.initial_password && (
-              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-brand-200 bg-brand-50 px-3.5 py-2.5 text-[13px] text-brand-700">
+              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-brand-200 bg-brand-50 px-3.5 py-2.5 text-[0.85rem] text-brand-700">
                 <ShieldAlert className="h-4 w-4 shrink-0" />
                 <span>仍在使用初始密码:</span>
                 <span className="mono font-semibold text-brand-700">{edit.initial_password}</span>
@@ -552,7 +552,7 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
                 <div><label className={lbl}>用户名{edit ? "(不可改)" : " *"}</label>
                   <Input placeholder="仅英文,如 zhangsan" value={username} onChange={(e) => setUsername(e.target.value)} disabled={!!edit} autoFocus={!edit} />
                   {!edit && username.trim() && !/^[A-Za-z][A-Za-z0-9_-]{1,31}$/.test(username.trim()) && (
-                    <p className="mt-1 text-[11px] text-red-500">字母开头,可含数字/下划线/中划线,2-32 位</p>
+                    <p className="mt-1 text-[0.8rem] text-red-500">字母开头,可含数字/下划线/中划线,2-32 位</p>
                   )}</div>
                 <div><label className={lbl}>显示名(中文,可选)</label>
                   <Input placeholder="如:张三 / 市场部-李四" value={displayName} onChange={(e) => setDisplayName(e.target.value)} /></div>
@@ -603,16 +603,16 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
                   <Input placeholder={budgetPlaceholder(selGroup?.budget_monthly_tokens ?? null)} value={budgetMonthly} onChange={(e) => setBudgetMonthly(e.target.value)} /></div>
               </div>
               <div className="rounded-xl border border-brand-200/70 bg-brand-50/50 px-3.5 py-3">
-                <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold text-brand-700">
+                <p className="mb-2 flex items-center gap-1.5 text-[0.8rem] font-semibold text-brand-700">
                   <span className="brand-gradient h-1.5 w-1.5 rounded-full" aria-hidden />
                   生效预览{selGroup ? `(用户组:${selGroup.name})` : "(未挂组,按全局默认)"}
                 </p>
                 <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-xs">
                   <span>并发 <b className="font-semibold tabular-nums text-foreground">{fmtEff(effConc)}</b></span>
-                  <span>RPM <b className="font-semibold tabular-nums text-foreground">{fmtEff(effRpm)}</b><span className="ml-1 text-[10px] text-subtle-foreground">{rpm.trim() ? "显式" : selGroup ? "组" : "全局"}</span></span>
-                  <span>TPM <b className="font-semibold tabular-nums text-foreground">{fmtEff(effTpm)}</b><span className="ml-1 text-[10px] text-subtle-foreground">{tpm.trim() ? "显式" : selGroup ? "组" : "全局"}</span></span>
-                  <span>日预算 <b className="font-semibold tabular-nums text-foreground">{fmtEff(effDaily)}</b>{effDaily !== 0 && selGroup?.budget_daily_tokens != null && budgetDaily.trim() === "" && <span className="ml-1 text-[10px] text-subtle-foreground">组</span>}</span>
-                  <span>月预算 <b className="font-semibold tabular-nums text-foreground">{fmtEff(effMonthly)}</b>{effMonthly !== 0 && selGroup?.budget_monthly_tokens != null && budgetMonthly.trim() === "" && <span className="ml-1 text-[10px] text-subtle-foreground">组</span>}</span>
+                  <span>RPM <b className="font-semibold tabular-nums text-foreground">{fmtEff(effRpm)}</b><span className="ml-1 text-[0.75rem] text-subtle-foreground">{rpm.trim() ? "显式" : selGroup ? "组" : "全局"}</span></span>
+                  <span>TPM <b className="font-semibold tabular-nums text-foreground">{fmtEff(effTpm)}</b><span className="ml-1 text-[0.75rem] text-subtle-foreground">{tpm.trim() ? "显式" : selGroup ? "组" : "全局"}</span></span>
+                  <span>日预算 <b className="font-semibold tabular-nums text-foreground">{fmtEff(effDaily)}</b>{effDaily !== 0 && selGroup?.budget_daily_tokens != null && budgetDaily.trim() === "" && <span className="ml-1 text-[0.75rem] text-subtle-foreground">组</span>}</span>
+                  <span>月预算 <b className="font-semibold tabular-nums text-foreground">{fmtEff(effMonthly)}</b>{effMonthly !== 0 && selGroup?.budget_monthly_tokens != null && budgetMonthly.trim() === "" && <span className="ml-1 text-[0.75rem] text-subtle-foreground">组</span>}</span>
                 </div>
               </div>
             </SheetSection>
@@ -631,7 +631,7 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
                 <Input value={amount} onChange={(e) => setAmount(e.target.value)} /></div>
             </SheetSection>
             {err && (
-              <p className="flex items-start gap-1.5 rounded-lg bg-destructive/8 px-3 py-2 text-[13px] text-destructive">
+              <p className="flex items-start gap-1.5 rounded-lg bg-destructive/8 px-3 py-2 text-[0.85rem] text-destructive">
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />{err}
               </p>
             )}
@@ -825,7 +825,7 @@ function MiniStat({ label, value, sub }: { label: string; value: string; sub?: s
     <div className="min-w-0">
       <div className="text-xs text-muted-foreground">{label}</div>
       <div className="mono mt-0.5 truncate text-lg font-bold tracking-tight">{value}</div>
-      {sub && <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{sub}</div>}
+      {sub && <div className="mt-0.5 truncate text-[0.8rem] text-muted-foreground">{sub}</div>}
     </div>
   );
 }
@@ -900,8 +900,8 @@ function OverviewPanel() {
 function BudgetBar({ label, used, budget }: { label: string; used: number; budget: number | null }) {
   if (!budget || budget <= 0) {
     return (
-      <div className="flex items-center gap-1.5">
-        <span className="w-3 text-[10px] leading-none text-muted-foreground">{label}</span>
+      <div className="flex items-center gap-1.5 whitespace-nowrap">
+        <span className="w-3 text-[0.75rem] leading-none text-muted-foreground">{label}</span>
         <span className="text-xs leading-none text-muted-foreground">不限</span>
       </div>
     );
@@ -911,8 +911,8 @@ function BudgetBar({ label, used, budget }: { label: string; used: number; budge
   const danger = exhausted || pct >= 95;
   const warn = pct >= 80;
   return (
-    <div className="flex items-center gap-1.5">
-      <span className="w-3 text-[10px] leading-none text-muted-foreground">{label}</span>
+    <div className="flex items-center gap-1.5 whitespace-nowrap">
+      <span className="w-3 text-[0.75rem] leading-none text-muted-foreground">{label}</span>
       <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
         <div
           className={`h-full rounded-full transition-all ${danger ? "bg-destructive" : warn ? "bg-amber-500" : "bg-primary"}`}
@@ -920,9 +920,9 @@ function BudgetBar({ label, used, budget }: { label: string; used: number; budge
         />
       </div>
       {exhausted ? (
-        <Badge variant="destructive" className="px-1.5 py-0 text-[10px] leading-tight">已耗尽</Badge>
+        <Badge variant="destructive" className="px-1.5 py-0 text-[0.75rem] leading-tight">已耗尽</Badge>
       ) : (
-        <span className={`text-[10px] leading-none ${danger ? "text-destructive" : warn ? "text-amber-500" : "text-muted-foreground"}`}>{pct}%</span>
+        <span className={`text-[0.75rem] leading-none ${danger ? "text-destructive" : warn ? "text-amber-500" : "text-muted-foreground"}`}>{pct}%</span>
       )}
     </div>
   );
@@ -1122,7 +1122,7 @@ const compactTokens = (v: number) =>
 
 function LimitCell({ v, def, compact }: { v: number | null; def?: number; compact?: boolean }) {
   if (v == null) return <span className="text-xs text-muted-foreground" title={def != null ? `继承全局(默认 ${def.toLocaleString()})` : "继承全局默认"}>继承全局</span>;
-  if (v === 0) return <Badge variant="muted" className="text-[10px]">不限</Badge>;
+  if (v === 0) return <Badge variant="muted" className="text-[0.75rem]">不限</Badge>;
   const shown = v.toLocaleString();
   return <span className="mono" title={compact ? shown : undefined}>{compact ? compactTokens(v) : shown}</span>;
 }
@@ -1184,7 +1184,7 @@ function PlansPanel() {
                 return (
                 <TableRow key={p.id}>
                   <TableCell className="font-medium">{p.name}</TableCell>
-                  <TableCell className="mono text-right" title={p.token_quota.toLocaleString()}>{fmtTokens(p.token_quota)}{p.reset_period && p.reset_period !== "none" && <span className="ml-0.5 text-[10px] text-muted-foreground">/周期</span>}</TableCell>
+                  <TableCell className="mono text-right" title={p.token_quota.toLocaleString()}>{fmtTokens(p.token_quota)}{p.reset_period && p.reset_period !== "none" && <span className="ml-0.5 text-[0.75rem] text-muted-foreground">/周期</span>}</TableCell>
                   <TableCell className="mono text-right">{p.validity_days}</TableCell>
                   <TableCell className="text-right text-xs">{periodLabel[p.reset_period ?? "none"]}</TableCell>
                   <TableCell className="mono text-right">{p.purchase_limit ? `${p.purchase_limit} 次` : "不限"}</TableCell>
@@ -1307,10 +1307,10 @@ function PlanDialog({ dlg, onClose, onSaved }: { dlg: { edit: PlanRow | null } |
                 <option value="weekly">每周重置</option>
                 <option value="monthly">每月重置(按 30 天)</option>
               </select>
-              <p className="mt-1 text-[11px] text-muted-foreground">选了周期后,「含 tokens」= 每个周期的额度;到重置点自动补满,总有效期到即套餐终止。</p></div>
+              <p className="mt-1 text-[0.8rem] text-muted-foreground">选了周期后,「含 tokens」= 每个周期的额度;到重置点自动补满,总有效期到即套餐终止。</p></div>
             <div><label className="mb-1 block text-xs text-muted-foreground">购买上限(0 = 不限)</label>
               <Input placeholder="同一用户最多可获取次数" value={purchaseLimit} onChange={(e) => setPurchaseLimit(e.target.value)} />
-              <p className="mt-1 text-[11px] text-muted-foreground">仅约束门户购买/自助充值;管理端手动发放不受限。统计含已过期的历史发放。</p></div>
+              <p className="mt-1 text-[0.8rem] text-muted-foreground">仅约束门户购买/自助充值;管理端手动发放不受限。统计含已过期的历史发放。</p></div>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div><label className="mb-1 block text-xs text-muted-foreground">购买升级分组(可选)</label>
@@ -1319,14 +1319,14 @@ function PlanDialog({ dlg, onClose, onSaved }: { dlg: { edit: PlanRow | null } |
                 <option value={0}>不变更</option>
                 {userGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
               </select>
-              <p className="mt-1 text-[11px] text-muted-foreground">购买/充值该套餐后,用户自动切换到该用户组(享受其模型组绑定与限额)。</p></div>
+              <p className="mt-1 text-[0.8rem] text-muted-foreground">购买/充值该套餐后,用户自动切换到该用户组(享受其模型组绑定与限额)。</p></div>
             <div><label className="mb-1 block text-xs text-muted-foreground">到期降级分组(可选)</label>
               <select value={downgradeGid} onChange={(e) => setDowngradeGid(Number(e.target.value))} disabled={upgradeGid === 0}
                 className="h-9 w-full rounded-lg border border-input bg-card px-2.5 text-sm shadow-card focus:border-brand-400 focus:outline-none focus:ring-4 focus:ring-brand-500/15 disabled:opacity-50">
                 <option value={0}>不变更</option>
                 {userGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
               </select>
-              <p className="mt-1 text-[11px] text-muted-foreground">套餐全部到期且用户仍处于升级组时,自动降回该用户组(每小时检查一次)。</p></div>
+              <p className="mt-1 text-[0.8rem] text-muted-foreground">套餐全部到期且用户仍处于升级组时,自动降回该用户组(每小时检查一次)。</p></div>
           </div>
           <div><label className="mb-1 block text-xs text-muted-foreground">说明</label>
             <Input placeholder="套餐说明(展示给用户)" value={desc} maxLength={100} onChange={(e) => setDesc(e.target.value)} /></div>
@@ -1408,7 +1408,7 @@ function UserGroupsPanel() {
                       <div className="flex flex-wrap gap-1">
                         {g.model_group_ids.map((gid, i) => (
                           <span key={gid} className="inline-flex items-center gap-1 rounded-md bg-muted/60 px-1.5 py-0.5 text-xs">
-                            <span className="mono text-[10px] text-muted-foreground">{i + 1}</span>
+                            <span className="mono text-[0.75rem] text-muted-foreground">{i + 1}</span>
                             {groups.find((x) => x.id === gid)?.name ?? `#${gid}`}
                           </span>
                         ))}
@@ -1558,8 +1558,8 @@ function UserGroupDialog({ dlg, defaults, groups, onClose, onSaved }: { dlg: { e
                 <div key={gid} className="flex items-center gap-2 rounded-md bg-muted/50 px-2 py-1.5 text-sm">
                   <span className="mono w-5 text-center text-xs text-muted-foreground">{i + 1}</span>
                   <span className="min-w-0 flex-1 truncate font-medium">{nameOf(gid)}</span>
-                  {i === 0 && <span className="rounded bg-brand-100 px-1.5 py-0.5 text-[10px] font-medium text-brand-700">主用</span>}
-                  {i > 0 && <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">容灾</span>}
+                  {i === 0 && <span className="rounded bg-brand-100 px-1.5 py-0.5 text-[0.75rem] font-medium text-brand-700">主用</span>}
+                  {i > 0 && <span className="rounded bg-muted px-1.5 py-0.5 text-[0.75rem] text-muted-foreground">容灾</span>}
                   <button type="button" aria-label="上移" disabled={i === 0} onClick={() => move(i, -1)}
                     className="rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-30"><ArrowUp className="h-3.5 w-3.5" /></button>
                   <button type="button" aria-label="下移" disabled={i === mgIds.length - 1} onClick={() => move(i, 1)}
@@ -1881,7 +1881,7 @@ function HealthBadge({ h, name, lastTestOk }: { h?: ProviderHealthItem; name?: s
         <div className="space-y-3">
           <div className="flex items-center justify-between gap-2">
             <span className="mono truncate text-sm font-semibold">{display}</span>
-            <span className={cn("inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-semibold", meta.cls)}>
+            <span className={cn("inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[0.75rem] font-semibold", meta.cls)}>
               <span className={cn("h-1 w-1 rounded-full", meta.dot, meta.pulse && "animate-pulse")} />
               {meta.label}
             </span>
@@ -1920,7 +1920,7 @@ function HealthBadge({ h, name, lastTestOk }: { h?: ProviderHealthItem; name?: s
               )}
             </>
           )}
-          <p className="text-[10px] leading-relaxed text-muted-foreground">统计窗口内该上游 key 的聚合指标;熔断后自动半开探测恢复。</p>
+          <p className="text-[0.75rem] leading-relaxed text-muted-foreground">统计窗口内该上游 key 的聚合指标;熔断后自动半开探测恢复。</p>
         </div>
       </PopoverContent>
     </Popover>
@@ -2275,14 +2275,14 @@ function ModelsPanel() {
                         {/* 对外映射:该上游模型被哪些「组/对外模型名」引用 */}
                         <span className="hidden items-center gap-1 xl:flex" title="对外模型映射:模型组/对外模型名">
                           {(routeMap[m.id] ?? []).slice(0, 2).map((x, i) => (
-                            <Badge key={i} variant="muted" className="text-[10px] font-normal">{x.group}/{x.public_name}</Badge>
+                            <Badge key={i} variant="muted" className="text-[0.75rem] font-normal">{x.group}/{x.public_name}</Badge>
                           ))}
                           {(routeMap[m.id] ?? []).length > 2 && (
-                            <span className="text-[10px] text-muted-foreground" title={(routeMap[m.id] ?? []).map((x) => `${x.group}/${x.public_name}`).join("\n")}>
+                            <span className="text-[0.75rem] text-muted-foreground" title={(routeMap[m.id] ?? []).map((x) => `${x.group}/${x.public_name}`).join("\n")}>
                               +{(routeMap[m.id] ?? []).length - 2}
                             </span>
                           )}
-                          {(routeMap[m.id] ?? []).length === 0 && <span className="text-[10px] text-muted-foreground/70">未加入路由</span>}
+                          {(routeMap[m.id] ?? []).length === 0 && <span className="text-[0.75rem] text-muted-foreground/70">未加入路由</span>}
                         </span>
                       </div>
                       <div className="flex items-center gap-2">
@@ -2353,7 +2353,7 @@ function ModelPickList({ models, selected, setSelected, existing }: {
           <label key={m} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm hover:bg-accent">
             <input type="checkbox" checked={selected.has(m)} onChange={() => toggle(m)} className="h-4 w-4 rounded border-input" />
             <span className="flex-1">{m}</span>
-            {existing?.has(m) && <span className="shrink-0 text-[10px] text-muted-foreground">已存在</span>}
+            {existing?.has(m) && <span className="shrink-0 text-[0.75rem] text-muted-foreground">已存在</span>}
             {selected.has(m) && <Check className="h-4 w-4 text-primary" />}
           </label>
         ))}
@@ -2595,7 +2595,7 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
           <div className="space-y-2.5">
             {TEMPLATE_GROUPS.map((g) => (
               <div key={g.group}>
-                <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-subtle-foreground">{g.group}</div>
+                <div className="mb-1.5 text-[0.75rem] font-semibold uppercase tracking-wider text-subtle-foreground">{g.group}</div>
                 <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
                   {g.items.map((i) => (
                     <button type="button" key={i.key}
@@ -2604,9 +2604,9 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
                       onClick={() => applyTemplate(i.key)}>
                       <div className="flex items-center justify-between gap-1">
                         <span className="text-xs font-semibold">{i.label}</span>
-                        {i.note && <span className="rounded bg-muted px-1 py-px text-[10px] text-muted-foreground">{i.note}</span>}
+                        {i.note && <span className="rounded bg-muted px-1 py-px text-[0.75rem] text-muted-foreground">{i.note}</span>}
                       </div>
-                      <div className="mono mt-0.5 truncate text-[10px] text-muted-foreground" title={i.base_url}>
+                      <div className="mono mt-0.5 truncate text-[0.75rem] text-muted-foreground" title={i.base_url}>
                         {i.base_url ? i.base_url.replace(/^https?:\/\//, "") : "手动填写"}
                       </div>
                     </button>
@@ -2619,12 +2619,12 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
             <select value={kind} onChange={(e) => setKind(e.target.value)} className={sel}>
               <option value="openai">openai 兼容</option><option value="anthropic">anthropic</option>
             </select>
-            <p className="mt-1 text-[11px] text-muted-foreground">这里选择上游协议；客户端入口协议由网关自动互转。</p></div>
+            <p className="mt-1 text-[0.8rem] text-muted-foreground">这里选择上游协议；客户端入口协议由网关自动互转。</p></div>
           <div><label className="mb-1 block text-xs text-muted-foreground">Base URL (选模板自动填,可改)</label>
             <Input className="font-mono" placeholder="https://api.deepseek.com/v1" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} /></div>
           <div><label className="mb-1 block text-xs text-muted-foreground">供应商并发上限</label>
             <Input type="number" min="0" step="1" value={maxConcurrency} onChange={(e) => setMaxConcurrency(e.target.value)} placeholder="留空继承全局,0 = 不限" />
-            <p className="mt-1 text-[11px] text-muted-foreground">限制该供应商全部模型的在途请求总数；留空继承全局默认，0 表示不限。</p></div>
+            <p className="mt-1 text-[0.8rem] text-muted-foreground">限制该供应商全部模型的在途请求总数；留空继承全局默认，0 表示不限。</p></div>
           <div><label className="mb-1 block text-xs text-muted-foreground">API Key (可选)</label>
             <Input type="password" placeholder="sk-..." value={apiKey} onChange={(e) => setApiKey(e.target.value)} /></div>
           <div><label className="mb-1 block text-xs text-muted-foreground">自定义请求头 (可选,JSON 对象,随上游请求附带)</label>
@@ -2912,7 +2912,7 @@ function GroupsPanel() {
                 sel === g.id ? "bg-accent font-medium" : "hover:bg-accent")} onClick={() => setSel(g.id)}>
                 <span className="flex min-w-0 items-center gap-1.5">
                   <span className="truncate">{g.name}</span>
-                  {g.is_active && <Badge variant="success" className="shrink-0 text-[10px]">默认</Badge>}
+                  {g.is_active && <Badge variant="success" className="shrink-0 text-[0.75rem]">默认</Badge>}
                 </span>
                 <span className="flex shrink-0 items-center gap-1">
                   <button title={g.is_active ? "当前默认组" : "设为默认(新用户注册自动绑定)"} aria-label={`${g.is_active ? "当前默认组" : "设为默认"}: ${g.name}`}
@@ -2956,12 +2956,12 @@ function GroupsPanel() {
             </div>
           </div>
           {sel != null && STRATEGY_HINT[curStrategy] && (
-            <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground" title="负载策略说明">
+            <p className="mt-1.5 text-[0.8rem] leading-relaxed text-muted-foreground" title="负载策略说明">
               <span className="font-medium text-foreground/80">{STRATEGY_LABEL[curStrategy]}:</span>{STRATEGY_HINT[curStrategy]}
             </p>
           )}
           {sel != null && (
-            <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground/80" title="路由决策链">
+            <p className="mt-1 text-[0.8rem] leading-relaxed text-muted-foreground/80" title="路由决策链">
               {ROUTE_ORDER_HINT}
             </p>
           )}
@@ -2974,11 +2974,11 @@ function GroupsPanel() {
                   <div className="flex items-center gap-2">
                     <Clock className="h-4 w-4 text-muted-foreground" />
                     <span className="text-sm font-medium">高峰/低谷时段策略</span>
-                    <span className="hidden text-[11px] text-muted-foreground sm:inline">按 星期+时间段 驱动 计费倍率 与 路由权重</span>
+                    <span className="hidden text-[0.8rem] text-muted-foreground sm:inline">按 星期+时间段 驱动 计费倍率 与 路由权重</span>
                   </div>
                   <Button size="sm" variant="outline" onClick={() => setTimeRuleDlg({ edit: null })}><Plus className="h-4 w-4" />添加时段</Button>
                 </div>
-                <p className="mb-2.5 text-[11px] leading-relaxed text-muted-foreground">
+                <p className="mb-2.5 text-[0.8rem] leading-relaxed text-muted-foreground">
                   搭配指引:时段规则命中时,<span className="text-foreground/75">计费倍率</span>按该时段 ×multiplier 结算;
                   <span className="text-foreground/75">权重覆盖</span>可临时改写各对外模型的路由权重(负载策略仍按当前模式执行,只是权重输入被临时替换)。
                   典型用法:高峰期 ×1.3 并把权重压向稳定供应商;低谷期 ×0.7 促销,或把权重调向便宜的模型。
@@ -2995,12 +2995,12 @@ function GroupsPanel() {
                             <span className="text-sm font-medium">{tr.name}</span>
                             <Badge variant={tr.multiplier === 1 ? "muted" : "default"}>×{tr.multiplier}</Badge>
                           </span>
-                          <span className="block truncate text-[11px] text-muted-foreground">
+                          <span className="block truncate text-[0.8rem] text-muted-foreground">
                             {tr.weekdays === "0-6" ? "每天" : "星期" + tr.weekdays} {tr.start_time}~{tr.end_time}
                             {!tr.active && <span className="ml-1 text-destructive">(停用)</span>}
                           </span>
                         </span>
-                        <span className="hidden shrink-0 text-[11px] text-muted-foreground md:inline">
+                        <span className="hidden shrink-0 text-[0.8rem] text-muted-foreground md:inline">
                           {tr.weight_map && tr.weight_map !== "{}" ? "含权重覆盖" : "仅倍率"}
                         </span>
                         <button className="text-muted-foreground transition-colors hover:text-foreground" title="编辑" onClick={() => setTimeRuleDlg({ edit: tr })}><Pencil className="h-3.5 w-3.5" /></button>
@@ -3466,7 +3466,7 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
               <div className="flex items-center justify-between gap-4 rounded-lg border bg-muted/30 px-3 py-2.5">
                 <div className="space-y-0.5">
                   <p className="text-xs font-medium">语义缓存</p>
-                  <p className="text-[11px] text-muted-foreground">开启后该路由的确定性请求(temperature≤0.001 或带 seed)可命中缓存,按全局折扣率计费。</p>
+                  <p className="text-[0.8rem] text-muted-foreground">开启后该路由的确定性请求(temperature≤0.001 或带 seed)可命中缓存,按全局折扣率计费。</p>
                 </div>
                 <Switch checked={useCache} onCheckedChange={setUseCache} aria-label="切换语义缓存" />
               </div>
@@ -3503,7 +3503,7 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
                   <label className="block text-xs font-medium text-muted-foreground">配置每条路由</label>
                   <div className="max-h-64 overflow-y-auto rounded-lg border p-3">
                     {/* 表头 */}
-                    <div className="mb-1 grid grid-cols-[130px_16px_1fr_64px_64px_64px_32px] items-center gap-2 text-[10px] text-muted-foreground">
+                    <div className="mb-1 grid grid-cols-[130px_16px_1fr_64px_64px_64px_32px] items-center gap-2 text-[0.75rem] text-muted-foreground">
                       <span>对外模型名</span><span/>
                       <span>→ 实际模型</span>
                       <span className="text-center" title="数值越大越优先;同档内才按负载策略分流">优先级</span>
@@ -3520,7 +3520,7 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
                           <div className="flex items-center gap-1.5 rounded border border-border/50 bg-muted/30 px-2 py-1 text-xs" title={m.upstream_model}>
                             <Boxes className="h-3 w-3 shrink-0 text-muted-foreground" />
                             <span className="truncate">{m.label || m.upstream_model}</span>
-                            <span className="shrink-0 text-[10px] text-muted-foreground">/ {m.upstream_model}</span>
+                            <span className="shrink-0 text-[0.75rem] text-muted-foreground">/ {m.upstream_model}</span>
                           </div>
                           <Input value={row.priority} onChange={(e) => updateRow(id, "priority", e.target.value)} className="h-8 text-xs text-center" />
                           <Input value={row.weight} onChange={(e) => updateRow(id, "weight", e.target.value)} className="h-8 text-xs text-center" />
@@ -3533,7 +3533,7 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
                   <div className="flex items-center justify-between gap-4 rounded-lg border bg-muted/30 px-3 py-2.5">
                     <div className="space-y-0.5">
                       <p className="text-xs font-medium">语义缓存(本批全部路由)</p>
-                      <p className="text-[11px] text-muted-foreground">开启后本批路由均启用语义缓存,命中时按全局折扣率计费。</p>
+                      <p className="text-[0.8rem] text-muted-foreground">开启后本批路由均启用语义缓存,命中时按全局折扣率计费。</p>
                     </div>
                     <Switch checked={batchCache} onCheckedChange={setBatchCache} aria-label="切换本批语义缓存" />
                   </div>
@@ -4526,10 +4526,10 @@ function CachePanel() {
               {trend.length > 0 ? (
                 <CacheTrendChart trend={trend} />
               ) : (
-                <div className="flex h-full w-full items-center justify-center text-[11px] text-muted-foreground">暂无趋势数据</div>
+                <div className="flex h-full w-full items-center justify-center text-[0.8rem] text-muted-foreground">暂无趋势数据</div>
               )}
             </div>
-            <div className="mt-1 text-[10px] text-muted-foreground">近 1 小时 · 每 5 分钟一桶(灰=未命中,绿=命中)</div>
+            <div className="mt-1 text-[0.75rem] text-muted-foreground">近 1 小时 · 每 5 分钟一桶(灰=未命中,绿=命中)</div>
           </CardContent>
         </Card>
         <Card>
@@ -4560,7 +4560,7 @@ function CachePanel() {
               <div className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-[width] duration-300"
                 style={{ width: `${Math.min(100, ((stats?.entries ?? 0) / 2048) * 100).toFixed(1)}%` }} />
             </div>
-            <div className="mt-1 text-[10px] text-muted-foreground">容量上限 2048 条,超限淘汰最旧</div>
+            <div className="mt-1 text-[0.75rem] text-muted-foreground">容量上限 2048 条,超限淘汰最旧</div>
           </CardContent>
         </Card>
       </div>
@@ -4617,9 +4617,9 @@ function CachePanel() {
                     <TableCell className="mono text-xs text-muted-foreground">{fmtTsShort(h.ts)}</TableCell>
                     <TableCell>
                       {h.hit_type === "exact" ? (
-                        <Badge variant="success" className="text-[10px]">精确</Badge>
+                        <Badge variant="success" className="text-[0.75rem]">精确</Badge>
                       ) : (
-                        <Badge className="bg-indigo-500/10 text-indigo-600 ring-1 ring-indigo-500/20 text-[10px]">语义</Badge>
+                        <Badge className="bg-indigo-500/10 text-indigo-600 ring-1 ring-indigo-500/20 text-[0.75rem]">语义</Badge>
                       )}
                     </TableCell>
                     <TableCell className="mono text-xs">
@@ -5293,7 +5293,7 @@ function SettingsPanel() {
                 value={fbMaxRetries}
                 onChange={(e) => setFbMaxRetries(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
               />
-              <p className="mt-1 text-[11px] text-muted-foreground">按模型路由的候选顺序依次尝试,超过次数即返回最后一次的错误。</p>
+              <p className="mt-1 text-[0.8rem] text-muted-foreground">按模型路由的候选顺序依次尝试,超过次数即返回最后一次的错误。</p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 border-t pt-4">
@@ -5366,14 +5366,14 @@ function SettingsPanel() {
                 onChange={(e) => setCacheThreshold(Number(e.target.value))}
                 disabled={!cacheEnabled} aria-label="语义相似度阈值"
                 className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary disabled:cursor-not-allowed disabled:opacity-50" />
-              <p className="mt-1 text-[11px] text-muted-foreground">值越高要求越严格(需更接近原文才命中);对语义命中生效(需在下方配置 embedding 供应商),精确命中不受影响。</p>
+              <p className="mt-1 text-[0.8rem] text-muted-foreground">值越高要求越严格(需更接近原文才命中);对语义命中生效(需在下方配置 embedding 供应商),精确命中不受影响。</p>
             </div>
             <div>
               <label className="mb-1 block text-xs text-muted-foreground">缓存有效期 TTL(秒)</label>
               <Input type="number" min={1} max={604800} disabled={!cacheEnabled} className={cacheEnabled ? "" : "opacity-50"}
                 value={cacheTtl}
                 onChange={(e) => setCacheTtl(Math.max(1, Math.floor(Number(e.target.value) || 1)))} />
-              <p className="mt-1 text-[11px] text-muted-foreground">
+              <p className="mt-1 text-[0.8rem] text-muted-foreground">
                 {cacheTtl >= 3600 && cacheTtl % 3600 === 0 ? `约 ${cacheTtl / 3600} 小时` : cacheTtl >= 60 ? `约 ${Math.round(cacheTtl / 60)} 分钟` : "最短 1 秒,最长 7 天"}
               </p>
             </div>
@@ -5382,7 +5382,7 @@ function SettingsPanel() {
               <Input type="number" min={1} max={100} disabled={!cacheEnabled} className={cacheEnabled ? "" : "opacity-50"}
                 value={cacheMultiTurn}
                 onChange={(e) => setCacheMultiTurn(Math.max(1, Math.floor(Number(e.target.value) || 1)))} />
-              <p className="mt-1 text-[11px] text-muted-foreground">消息条数超过该值的长对话跳过缓存,避免低质命中。</p>
+              <p className="mt-1 text-[0.8rem] text-muted-foreground">消息条数超过该值的长对话跳过缓存,避免低质命中。</p>
             </div>
             <div className="sm:col-span-2">
               <label className="mb-1 block text-xs text-muted-foreground">命中计费折扣率(0.0 ~ 1.0,当前 <span className="mono font-medium text-foreground">{cacheBilling.toFixed(2)}</span>)</label>
@@ -5390,7 +5390,7 @@ function SettingsPanel() {
                 onChange={(e) => setCacheBilling(Number(e.target.value))}
                 disabled={!cacheEnabled} aria-label="命中计费折扣率"
                 className="h-1.5 w-full cursor-pointer appearance-none rounded-full bg-muted accent-primary disabled:cursor-not-allowed disabled:opacity-50" />
-              <p className="mt-1 text-[11px] text-muted-foreground">命中回放时的扣费 = 实际 tokens × 用户倍率 × 折扣率。0 表示命中免费,1 表示照常计费;tokens 始终按实际值入账。</p>
+              <p className="mt-1 text-[0.8rem] text-muted-foreground">命中回放时的扣费 = 实际 tokens × 用户倍率 × 折扣率。0 表示命中免费,1 表示照常计费;tokens 始终按实际值入账。</p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 border-t pt-4">
@@ -5749,9 +5749,9 @@ function SettingsPanel() {
                 GitHub Releases
               </a>{" "}
               下载新版本包,解压后执行{" "}
-              <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[12px] text-foreground">sudo ./install.sh</code>{" "}
+              <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85rem] text-foreground">sudo ./install.sh</code>{" "}
               即可原地升级(配置与数据保留);Linux 服务器也可直接运行{" "}
-              <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[12px] text-foreground">sudo ./upgrade.sh</code>{" "}
+              <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85rem] text-foreground">sudo ./upgrade.sh</code>{" "}
               一键升级。
             </p>
           )}
@@ -5799,7 +5799,7 @@ function CountdownRing({ remaining_ms, window_secs }: { remaining_ms: number; wi
           strokeDasharray={`${dash.toFixed(2)} ${C.toFixed(2)}`}
           className="text-rose-500 transition-all duration-300 ease-linear" />
       </svg>
-      <span className="absolute inset-0 flex items-center justify-center text-[11px] font-semibold tabular-nums text-rose-600">
+      <span className="absolute inset-0 flex items-center justify-center text-[0.8rem] font-semibold tabular-nums text-rose-600">
         {secs > 0 ? `${secs}s` : "✓"}
       </span>
     </div>
@@ -5816,7 +5816,7 @@ function ConcurrencyBar({ s }: { s: UpstreamRow["concurrency"] }) {
   const unlimited = s.limit === 0;
   return (
     <div>
-      <div className="mb-1 flex items-center justify-between text-[11px] text-muted-foreground">
+      <div className="mb-1 flex items-center justify-between text-[0.8rem] text-muted-foreground">
         <span className="inline-flex items-center gap-1"><Cpu className="h-3 w-3" />并发槽</span>
         <span className="tabular-nums">
           {unlimited ? "不限" : (
@@ -5837,7 +5837,7 @@ function ConcurrencyBar({ s }: { s: UpstreamRow["concurrency"] }) {
         )}
         {unlimited && <div className="h-full w-full rounded-full bg-gradient-to-r from-emerald-500/40 to-teal-500/40" />}
       </div>
-      {!unlimited && <div className="mt-0.5 text-right text-[10px] text-muted-foreground tabular-nums">{used}%</div>}
+      {!unlimited && <div className="mt-0.5 text-right text-[0.75rem] text-muted-foreground tabular-nums">{used}%</div>}
     </div>
   );
 }
@@ -5888,19 +5888,19 @@ function UpstreamCard({ row, onReset, tickMs }: {
           <div className="min-w-0 flex-1">
             {/* 头部:协议 + Base URL + 状态徽标 */}
             <div className="mb-1.5 flex items-center gap-2">
-              <Badge variant="muted" className="shrink-0 text-[10px] uppercase tracking-wider">{row.kind}</Badge>
-              <span className={cn("rounded-md px-1.5 py-0.5 text-[10px] font-medium", badge.cls)}>
+              <Badge variant="muted" className="shrink-0 text-[0.75rem] uppercase tracking-wider">{row.kind}</Badge>
+              <span className={cn("rounded-md px-1.5 py-0.5 text-[0.75rem] font-medium", badge.cls)}>
                 {tone === "broken" && <ShieldAlert className="mr-1 inline h-3 w-3 -translate-y-[1px]" />}
                 {tone === "healthy" && <ShieldCheck className="mr-1 inline h-3 w-3 -translate-y-[1px]" />}
                 {badge.label}
               </span>
               {row.has_key ? (
-                <span className="rounded-md bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 ring-1 ring-sky-500/20"
+                <span className="rounded-md bg-sky-500/10 px-1.5 py-0.5 text-[0.75rem] font-medium text-sky-700 ring-1 ring-sky-500/20"
                   title={`Key 指纹: ${row.key_fingerprint}`}>
                   Key · {row.key_fingerprint.slice(0, 8)}
                 </span>
               ) : (
-                <span className="rounded-md bg-slate-500/10 px-1.5 py-0.5 text-[10px] text-slate-500 ring-1 ring-slate-500/20">
+                <span className="rounded-md bg-slate-500/10 px-1.5 py-0.5 text-[0.75rem] text-slate-500 ring-1 ring-slate-500/20">
                   无 Key
                 </span>
               )}
@@ -5937,7 +5937,7 @@ function UpstreamCard({ row, onReset, tickMs }: {
                       )} />
                     ))}
                   </div>
-                  <div className="mt-1.5 text-[10px] text-muted-foreground">
+                  <div className="mt-1.5 text-[0.75rem] text-muted-foreground">
                     {tone === "healthy" && "连续 0 次失败"}
                     {tone === "warn" && !row.breaker.is_broken && `已 ${row.breaker.fail_count} 次失败,再失败 ${Math.max(0, row.breaker.threshold - row.breaker.fail_count)} 次即熔断`}
                     {tone === "broken" && `熔断窗 ${row.breaker.window_secs}s,过半开 1 次探活恢复`}
@@ -5953,12 +5953,12 @@ function UpstreamCard({ row, onReset, tickMs }: {
 
         {/* 底部操作条 */}
         <div className="mt-3 flex items-center justify-between border-t pt-3">
-          <div className="text-[10px] text-muted-foreground tabular-nums">
+          <div className="text-[0.75rem] text-muted-foreground tabular-nums">
             <span className="font-mono">{encodeURIComponent(id).length > 40 ? id.slice(0, 40) + "…" : id}</span>
           </div>
           <div className="flex items-center gap-2">
             {tone === "broken" && (
-              <span className="inline-flex items-center gap-1 text-[11px] text-rose-600">
+              <span className="inline-flex items-center gap-1 text-[0.8rem] text-rose-600">
                 <Clock className="h-3 w-3" />
                 {localRemaining > 0
                   ? `约 ${Math.ceil(localRemaining / 1000)}s 后自动探活`
@@ -6328,7 +6328,7 @@ function UpstreamsPanel() {
           <CardTitle className="text-base flex items-center gap-2">
             <AlertTriangle className="h-4 w-4 text-amber-500" />
             失败审计 · 路由转移记录
-            <Badge variant="muted" className="ml-1.5 text-[10px]">
+            <Badge variant="muted" className="ml-1.5 text-[0.75rem]">
               {(failures?.stored ?? 0).toLocaleString()}
               <span className="mx-1 opacity-50">/</span>
               {failures?.capacity ?? AUDIT_CAP_FALLBACK}
@@ -6364,7 +6364,7 @@ function UpstreamsPanel() {
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b bg-muted/30 text-left text-[11px] uppercase tracking-wider text-muted-foreground">
+                  <tr className="border-b bg-muted/30 text-left text-[0.8rem] uppercase tracking-wider text-muted-foreground">
                     <th className="px-4 py-2.5 font-medium">时间</th>
                     <th className="px-3 py-2.5 font-medium">上游</th>
                     <th className="px-3 py-2.5 font-medium">模型 · 链路</th>
@@ -6382,7 +6382,7 @@ function UpstreamsPanel() {
                       <td className="px-4 py-3 align-top tabular-nums">
                         <div className="flex flex-col gap-0.5">
                           <span className="text-xs font-medium text-foreground">{fmtRel(r.ts_ms)}</span>
-                          <span className="text-[10px] text-muted-foreground" title={new Date(r.ts_ms).toLocaleString()}>
+                          <span className="text-[0.75rem] text-muted-foreground" title={new Date(r.ts_ms).toLocaleString()}>
                             {new Date(r.ts_ms).toLocaleString("zh-CN", { hour12: false })}
                           </span>
                         </div>
@@ -6390,17 +6390,17 @@ function UpstreamsPanel() {
                       <td className="px-3 py-3 align-top">
                         <div className="flex flex-col gap-1.5">
                           <div className="flex flex-wrap items-center gap-1.5">
-                            <Badge variant="muted" className="text-[10px] uppercase tracking-wider">{r.kind}</Badge>
+                            <Badge variant="muted" className="text-[0.75rem] uppercase tracking-wider">{r.kind}</Badge>
                             {r.key_fingerprint ? (
-                              <Badge variant="muted" className="text-[10px] bg-sky-500/10 text-sky-700 ring-1 ring-sky-500/20"
+                              <Badge variant="muted" className="text-[0.75rem] bg-sky-500/10 text-sky-700 ring-1 ring-sky-500/20"
                                 title={`Key 指纹: ${r.key_fingerprint}`}>
                                 Key · {r.key_fingerprint.slice(0, 8)}
                               </Badge>
                             ) : (
-                              <Badge variant="muted" className="text-[10px] text-slate-500">无 Key</Badge>
+                              <Badge variant="muted" className="text-[0.75rem] text-slate-500">无 Key</Badge>
                             )}
                             {r.triggered_break && (
-                              <span className="inline-flex items-center gap-1 rounded-md bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-rose-700 ring-1 ring-rose-500/30">
+                              <span className="inline-flex items-center gap-1 rounded-md bg-rose-500/15 px-1.5 py-0.5 text-[0.75rem] font-semibold text-rose-700 ring-1 ring-rose-500/30">
                                 <ShieldAlert className="h-3 w-3" />
                                 触发熔断
                               </span>
@@ -6411,11 +6411,11 @@ function UpstreamsPanel() {
                       </td>
                       <td className="px-3 py-3 align-top">
                         <div className="flex flex-col gap-1">
-                          <div className="inline-flex w-max items-center gap-1 rounded-md bg-indigo-500/10 px-1.5 py-0.5 text-[11px] font-medium text-indigo-700 ring-1 ring-indigo-500/20"
+                          <div className="inline-flex w-max items-center gap-1 rounded-md bg-indigo-500/10 px-1.5 py-0.5 text-[0.8rem] font-medium text-indigo-700 ring-1 ring-indigo-500/20"
                             title="用户请求的对外模型名">
                             {r.requested_model || "—"}
                           </div>
-                          <span className="text-[11px] text-muted-foreground">
+                          <span className="text-[0.8rem] text-muted-foreground">
                             {r.path === "chat" ? "聊天补全 /v1/chat/completions" :
                              r.path === "messages" ? "Anthropic Messages /v1/messages" :
                              r.path}
@@ -6441,7 +6441,7 @@ function UpstreamsPanel() {
                       </td>
                       <td className="px-3 py-3 align-top max-w-md">
                         <div className="group relative">
-                          <code className="block max-w-[28rem] truncate rounded-md bg-muted/60 px-2 py-1 text-[11px] text-rose-700 ring-1 ring-rose-500/10"
+                          <code className="block max-w-[28rem] truncate rounded-md bg-muted/60 px-2 py-1 text-[0.8rem] text-rose-700 ring-1 ring-rose-500/10"
                             title={r.error_summary}>
                             {r.error_summary || "(无错误描述)"}
                           </code>
@@ -6740,7 +6740,7 @@ function RealtimeCards() {
         <span>· 每 5 秒一拍,窗口指标为近 5 分钟</span>
         {err && <span className="text-rose-600">获取失败,重试中…</span>}
         <button
-          className="ml-auto rounded-md border border-slate-200 px-2 py-1 text-[11px] text-slate-500 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-800"
+          className="ml-auto rounded-md border border-slate-200 px-2 py-1 text-[0.8rem] text-slate-500 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-400 dark:hover:bg-slate-800"
           onClick={() => setLive((v) => !v)}
         >
           {live ? "暂停刷新" : "恢复刷新(5s)"}
@@ -6757,9 +6757,9 @@ function RealtimeCards() {
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
         {d ? cards.map((c) => (
           <div key={c.label} title={c.title} className="rounded-xl border border-slate-200 bg-white px-3.5 py-3 shadow-sm dark:border-slate-800 dark:bg-slate-900">
-            <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{c.label}</div>
+            <div className="text-[0.8rem] font-medium uppercase tracking-wide text-slate-400">{c.label}</div>
             <div className="mono mt-0.5 text-2xl font-semibold leading-tight" style={{ color: c.color }}>{c.value}</div>
-            <div className="mt-0.5 text-[11px] text-slate-400">{c.sub}</div>
+            <div className="mt-0.5 text-[0.8rem] text-slate-400">{c.sub}</div>
             <div className="mt-2">
               <Sparkline values={c.spark} color={c.color} />
             </div>
@@ -6774,12 +6774,12 @@ function RealtimeCards() {
       <div className="rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900">
         <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2.5 dark:border-slate-800">
           <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">并发用户</p>
-          <span className="text-[11px] text-slate-400">{d?.users?.length ?? 0} 个用户在途/排队</span>
+          <span className="text-[0.8rem] text-slate-400">{d?.users?.length ?? 0} 个用户在途/排队</span>
         </div>
         {d && (d.users?.length ?? 0) > 0 ? (
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-slate-100 text-left text-[11px] uppercase tracking-wide text-slate-400 dark:border-slate-800">
+              <tr className="border-b border-slate-100 text-left text-[0.8rem] uppercase tracking-wide text-slate-400 dark:border-slate-800">
                 <th className="px-4 py-2 font-medium">用户</th>
                 <th className="px-4 py-2 font-medium">在途</th>
                 <th className="px-4 py-2 font-medium">并发上限</th>
@@ -6796,7 +6796,7 @@ function RealtimeCards() {
                     <td className="mono px-4 py-2">{u.in_flight}</td>
                     <td className="mono px-4 py-2 text-slate-500">{u.limit > 0 ? u.limit : "不限"}</td>
                     <td className="mono px-4 py-2">
-                      {u.waiting > 0 ? <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[11px] font-medium text-amber-600">{u.waiting} 排队中</span> : <span className="text-slate-300">—</span>}
+                      {u.waiting > 0 ? <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[0.8rem] font-medium text-amber-600">{u.waiting} 排队中</span> : <span className="text-slate-300">—</span>}
                     </td>
                     <td className="px-4 py-2">
                       <div className="h-1.5 w-28 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
@@ -6805,7 +6805,7 @@ function RealtimeCards() {
                           style={{ width: `${u.limit > 0 ? Math.max(pct, 4) : 0}%` }}
                         />
                       </div>
-                      <span className="ml-2 text-[11px] text-slate-400">{u.limit > 0 ? `${pct}%` : ""}</span>
+                      <span className="ml-2 text-[0.8rem] text-slate-400">{u.limit > 0 ? `${pct}%` : ""}</span>
                     </td>
                   </tr>
                 );
@@ -7137,14 +7137,14 @@ function MetricsPanel() {
                               {u.base_url}
                             </span>
                             <span
-                              className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-500 dark:bg-slate-800 dark:text-slate-400"
+                              className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[0.75rem] text-slate-500 dark:bg-slate-800 dark:text-slate-400"
                               title="key fingerprint"
                             >
                               {u.key_fingerprint}
                             </span>
                           </div>
                           <div
-                            className="mt-1 truncate font-mono text-[10px] text-slate-400"
+                            className="mt-1 truncate font-mono text-[0.75rem] text-slate-400"
                             title={u.upstream_id}
                           >
                             {u.upstream_id}
@@ -7296,13 +7296,13 @@ function AuditPanel() {
                       <TableCell className="mono text-xs whitespace-nowrap">{fmtTime(r.ts)}</TableCell>
                       <TableCell className="text-xs font-medium">{r.actor}</TableCell>
                       <TableCell>
-                        <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold", auditMethodColor(r.method))}>
+                        <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[0.75rem] font-semibold", auditMethodColor(r.method))}>
                           {r.method}
                         </span>
                       </TableCell>
                       <TableCell className="mono max-w-[320px] truncate text-xs" title={r.path}>{r.path}</TableCell>
                       <TableCell>
-                        <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(r.status))}>
+                        <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[0.75rem] font-semibold ring-1 ring-inset", attemptStatusColor(r.status))}>
                           {r.status}
                         </span>
                       </TableCell>
@@ -7596,12 +7596,12 @@ function RequestLogPanel() {
                           <TableCell className="text-xs">
                             <span className="inline-flex items-center gap-1.5">
                               <span className="font-medium">{r.requested_model}</span>
-                              {r.path !== "chat" && <Badge variant="muted" className="text-[10px]">{r.path}</Badge>}
-                              {r.stream && <span className="text-[10px] text-muted-foreground" title="流式请求">SSE</span>}
+                              {r.path !== "chat" && <Badge variant="muted" className="text-[0.75rem]">{r.path}</Badge>}
+                              {r.stream && <span className="text-[0.75rem] text-muted-foreground" title="流式请求">SSE</span>}
                             </span>
                           </TableCell>
                           <TableCell>
-                            <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(r.final_status))}>
+                            <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[0.75rem] font-semibold ring-1 ring-inset", attemptStatusColor(r.final_status))}>
                               {attemptStatusLabel(r.final_status)}
                             </span>
                           </TableCell>
@@ -7660,7 +7660,7 @@ function CopyBtn({ text, title, className }: { text: string; title: string; clas
   return (
     <button
       className={cn(
-        "flex shrink-0 items-center gap-1 rounded p-1 text-[10px] transition-colors hover:bg-accent hover:text-foreground",
+        "flex shrink-0 items-center gap-1 rounded p-1 text-[0.75rem] transition-colors hover:bg-accent hover:text-foreground",
         state === "ok" && "text-emerald-600",
         state === "fail" && "text-rose-600",
         className
@@ -7706,13 +7706,13 @@ function RequestLogDetail({ row, userName, provNames }: { row: RequestLogRow; us
     <SheetContent className="w-full overflow-y-auto p-0 sm:w-[min(94vw,768px)] sm:max-w-3xl">
       <SheetHeader className="border-b px-4 py-3">
         <SheetTitle className="flex flex-wrap items-center gap-2 text-sm">
-          <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(row.final_status))}>
+          <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[0.75rem] font-semibold ring-1 ring-inset", attemptStatusColor(row.final_status))}>
             {attemptStatusLabel(row.final_status)}
           </span>
           <span>{row.requested_model}</span>
           {isFail && <span className="text-xs font-normal text-destructive">本次调用失败,可按尝试链定位</span>}
         </SheetTitle>
-        <SheetDescription className="mono text-[11px]">
+        <SheetDescription className="mono text-[0.8rem]">
           {fmtTimeLocal(row.ts)} · {userName} · {row.stream ? "流式" : "非流式"}
         </SheetDescription>
       </SheetHeader>
@@ -7723,7 +7723,7 @@ function RequestLogDetail({ row, userName, provNames }: { row: RequestLogRow; us
             <span className="text-muted-foreground">请求 ID</span>
             <span className="flex items-center gap-1.5">
               {/* 抽屉加宽后 40 字符 mono 可单行完整展示;break-all 兜底保证任何宽度下全量可见(不裁切、复制完整)。 */}
-              <code className="mono block break-all rounded bg-muted px-1.5 py-0.5 text-[11px]" title={row.request_id}>{row.request_id}</code>
+              <code className="mono block break-all rounded bg-muted px-1.5 py-0.5 text-[0.8rem]" title={row.request_id}>{row.request_id}</code>
               <CopyBtn text={row.request_id} title="复制请求 ID" />
             </span>
             <span className="text-muted-foreground">用户</span>
@@ -7733,7 +7733,7 @@ function RequestLogDetail({ row, userName, provNames }: { row: RequestLogRow; us
             <span className="text-muted-foreground">接入方式</span>
             <span>
               <span className="font-medium">{PATH_LABELS[row.path]?.name || row.path}</span>
-              {PATH_LABELS[row.path]?.endpoint && <span className="mono ml-1.5 text-[10px] text-muted-foreground">{PATH_LABELS[row.path].endpoint}</span>}
+              {PATH_LABELS[row.path]?.endpoint && <span className="mono ml-1.5 text-[0.75rem] text-muted-foreground">{PATH_LABELS[row.path].endpoint}</span>}
             </span>
             <span className="text-muted-foreground">响应形态</span>
             <span>
@@ -7766,24 +7766,24 @@ function RequestLogDetail({ row, userName, provNames }: { row: RequestLogRow; us
                   <div key={i} className="relative">
                     <span className={cn("absolute -left-[21px] top-1.5 h-[9px] w-[9px] rounded-full ring-2 ring-background", dot)} />
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
-                      <span className="mono text-[10px] text-muted-foreground">#{i + 1}</span>
+                      <span className="mono text-[0.75rem] text-muted-foreground">#{i + 1}</span>
                       <span className="font-medium" title={`上游账号 ${c.provider || "—"}`}>{(c.provider && provNames[c.provider]) || c.provider || "—"}</span>
                       <span className="text-muted-foreground">{c.upstream_model}</span>
-                      <span className="mono text-[10px] text-muted-foreground" title="负载权重">w{c.weight}</span>
+                      <span className="mono text-[0.75rem] text-muted-foreground" title="负载权重">w{c.weight}</span>
                       {att ? (
                         <>
-                          <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(att.status))}>
+                          <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[0.75rem] font-semibold ring-1 ring-inset", attemptStatusColor(att.status))}>
                             {attemptStatusLabel(att.status)}
                           </span>
                           {att.latency_ms > 0 && <span className="mono text-muted-foreground">{att.latency_ms}ms</span>}
-                          {hit && <span className="text-[10px] font-semibold text-emerald-600">✓ 命中</span>}
-                          {skip && <span className="text-[10px] text-amber-600">熔断跳过</span>}
+                          {hit && <span className="text-[0.75rem] font-semibold text-emerald-600">✓ 命中</span>}
+                          {skip && <span className="text-[0.75rem] text-amber-600">熔断跳过</span>}
                         </>
                       ) : (
-                        <span className="text-[10px] text-muted-foreground/70">未尝试(前面候选已命中或请求失败)</span>
+                        <span className="text-[0.75rem] text-muted-foreground/70">未尝试(前面候选已命中或请求失败)</span>
                       )}
                     </div>
-                    {att?.error && <p className="mt-0.5 break-all rounded bg-rose-500/5 px-1.5 py-0.5 text-[11px] text-rose-700 dark:text-rose-400">{att.error}</p>}
+                    {att?.error && <p className="mt-0.5 break-all rounded bg-rose-500/5 px-1.5 py-0.5 text-[0.8rem] text-rose-700 dark:text-rose-400">{att.error}</p>}
                   </div>
                 );
               })}
@@ -7792,15 +7792,15 @@ function RequestLogDetail({ row, userName, provNames }: { row: RequestLogRow; us
                 <div key={`extra-${i}`} className="relative">
                   <span className={cn("absolute -left-[21px] top-1.5 h-[9px] w-[9px] rounded-full ring-2 ring-background", a.status === 200 ? "bg-emerald-500" : "bg-rose-500")} />
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
-                    <span className="mono text-[10px] text-muted-foreground">重试</span>
+                    <span className="mono text-[0.75rem] text-muted-foreground">重试</span>
                     <span className="font-medium" title={`上游账号 ${a.provider || a.kind}`}>{provNames[a.provider || ""] || a.provider || a.kind}</span>
                     <span className="text-muted-foreground">{a.upstream_model}</span>
-                    <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(a.status))}>
+                    <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[0.75rem] font-semibold ring-1 ring-inset", attemptStatusColor(a.status))}>
                       {attemptStatusLabel(a.status)}
                     </span>
                     {a.latency_ms > 0 && <span className="mono text-muted-foreground">{a.latency_ms}ms</span>}
                   </div>
-                  {a.error && <p className="mt-0.5 break-all text-[11px] text-muted-foreground">{a.error}</p>}
+                  {a.error && <p className="mt-0.5 break-all text-[0.8rem] text-muted-foreground">{a.error}</p>}
                 </div>
               ))}
             </div>
@@ -7816,7 +7816,7 @@ function RequestLogDetail({ row, userName, provNames }: { row: RequestLogRow; us
                     <span>请求体</span>
                     <CopyBtn text={row.req_body || ""} title="复制请求体" />
                   </p>
-                  <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/30 p-2 text-[11px] leading-relaxed">{prettyMaybeJson(row.req_body)}</pre>
+                  <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/30 p-2 text-[0.8rem] leading-relaxed">{prettyMaybeJson(row.req_body)}</pre>
                 </div>
               )}
               {row.resp_body && (
@@ -7826,7 +7826,7 @@ function RequestLogDetail({ row, userName, provNames }: { row: RequestLogRow; us
                     <CopyBtn text={row.resp_body || ""} title="复制响应体" />
                   </p>
                   {row.stream ? <SseEventList body={row.resp_body} /> : (
-                    <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/30 p-2 text-[11px] leading-relaxed">{prettyMaybeJson(row.resp_body)}</pre>
+                    <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/30 p-2 text-[0.8rem] leading-relaxed">{prettyMaybeJson(row.resp_body)}</pre>
                   )}
                 </div>
               )}
@@ -7885,19 +7885,19 @@ function SseEventList({ body }: { body: string }) {
   const events = parseSseEvents(body);
   const [showRaw, setShowRaw] = useState(false);
   if (events.length === 0) {
-    return <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/30 p-2 text-[11px] leading-relaxed">{body}</pre>;
+    return <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-all rounded-lg border bg-muted/30 p-2 text-[0.8rem] leading-relaxed">{body}</pre>;
   }
   return (
     <div className="space-y-1.5">
       <button
-        className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground transition hover:bg-accent"
+        className="rounded border border-border px-1.5 py-0.5 text-[0.75rem] text-muted-foreground transition hover:bg-accent"
         onClick={() => setShowRaw((v) => !v)}
       >
         {showRaw ? "显示摘要" : `显示原始 data(${events.length} 个事件)`}
       </button>
       <div className="max-h-64 space-y-1 overflow-y-auto rounded-lg border bg-muted/30 p-2">
         {events.map((e, i) => (
-          <div key={i} className="text-[11px] leading-relaxed">
+          <div key={i} className="text-[0.8rem] leading-relaxed">
             {showRaw ? (
               <pre className="whitespace-pre-wrap break-all text-muted-foreground">{e.raw}</pre>
             ) : (

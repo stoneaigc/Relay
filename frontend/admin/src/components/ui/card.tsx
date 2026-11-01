@@ -14,17 +14,17 @@ export const Card = React.forwardRef<HTMLDivElement, Div>(({ className, ...props
 Card.displayName = "Card";
 
 export const CardHeader = ({ className, ...props }: Div) => (
-  <div className={cn("flex flex-col space-y-1.5 p-5", className)} {...props} />
+  <div className={cn("flex flex-col space-y-1.5 p-6", className)} {...props} />
 );
 export const CardTitle = ({ className, ...props }: Div) => (
-  <div className={cn("text-[15px] font-semibold leading-none tracking-tight text-foreground", className)} {...props} />
+  <div className={cn("text-base font-semibold leading-none tracking-tight text-foreground", className)} {...props} />
 );
 export const CardDescription = ({ className, ...props }: Div) => (
   <div className={cn("text-sm text-muted-foreground", className)} {...props} />
 );
 export const CardContent = ({ className, ...props }: Div) => (
-  <div className={cn("p-5 pt-0", className)} {...props} />
+  <div className={cn("p-6 pt-0", className)} {...props} />
 );
 export const CardFooter = ({ className, ...props }: Div) => (
-  <div className={cn("flex items-center p-5 pt-0", className)} {...props} />
+  <div className={cn("flex items-center p-6 pt-0", className)} {...props} />
 );

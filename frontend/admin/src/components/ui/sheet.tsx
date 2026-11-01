@@ -69,7 +69,7 @@ const SheetDescription = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <SheetPrimitive.Description
     ref={ref}
-    className={cn("text-[13px] leading-relaxed text-muted-foreground", className)}
+    className={cn("text-[0.85rem] leading-relaxed text-muted-foreground", className)}
     {...props}
   />
 ));
@@ -106,8 +106,8 @@ const SheetSection = ({
   <section className={cn("space-y-3.5", className)}>
     <div className="flex items-center gap-2">
       <span className="brand-gradient h-3.5 w-[3px] shrink-0 rounded-full" aria-hidden />
-      <h4 className="text-[13px] font-semibold text-foreground">{title}</h4>
-      {hint && <span className="ml-0.5 text-[11px] text-subtle-foreground">{hint}</span>}
+      <h4 className="text-[0.85rem] font-semibold text-foreground">{title}</h4>
+      {hint && <span className="ml-0.5 text-[0.8rem] text-subtle-foreground">{hint}</span>}
     </div>
     {children}
   </section>
