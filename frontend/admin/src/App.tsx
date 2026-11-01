@@ -2979,9 +2979,9 @@ function GroupsPanel() {
                   <Button size="sm" variant="outline" onClick={() => setTimeRuleDlg({ edit: null })}><Plus className="h-4 w-4" />添加时段</Button>
                 </div>
                 <p className="mb-2.5 text-[0.8rem] leading-relaxed text-muted-foreground">
-                  搭配指引:时段规则命中时,<span className="text-foreground/75">计费倍率</span>按该时段 ×multiplier 结算;
-                  <span className="text-foreground/75">权重覆盖</span>可临时改写各对外模型的路由权重(负载策略仍按当前模式执行,只是权重输入被临时替换)。
-                  典型用法:高峰期 ×1.3 并把权重压向稳定供应商;低谷期 ×0.7 促销,或把权重调向便宜的模型。
+                  执行顺序:先看是否命中时段规则 → 命中则<span className="text-foreground/75">计费倍率 = 模型倍率 × 时段倍率</span>(只影响计费);
+                  再按组内负载策略(加权/随机/智能)分流,若该时段填了<span className="text-foreground/75">权重覆盖</span>,分流比例临时改写、策略本身不变。
+                  典型用法:高峰 ×1.3 并把流量压向稳定上游;低谷 ×0.7 或调向便宜模型。
                 </p>
                 {timeRules.length === 0 ? (
                   <p className="text-xs text-muted-foreground">尚未配置时段规则。未命中时段时,使用默认倍率 ×1.0 与默认权重。</p>
@@ -3637,7 +3637,7 @@ function TimeRuleDialog({ dlg, groupId, onClose, onSaved }: {
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>{edit ? "编辑时段规则" : "添加时段规则"}</DialogTitle>
-          <DialogDescription>命中该时间段时:计费倍率按 ×multiplier 计算,并可覆盖各模型的路由权重(高峰/低谷策略)。</DialogDescription>
+          <DialogDescription>命中该时间段时,计费倍率 = 模型倍率 × 这里填的倍率。下面的权重覆盖是高级选项,不填就只影响计费。</DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <div className="grid grid-cols-3 gap-3">
@@ -3668,14 +3668,13 @@ function TimeRuleDialog({ dlg, groupId, onClose, onSaved }: {
               </button></div>
           </div>
           <div>
-            <label className="mb-1 block text-xs text-muted-foreground">路由权重覆盖(可选,JSON)</label>
-            <textarea value={weightMap} onChange={(e) => setWeightMap(e.target.value)} rows={3}
-              placeholder={'{\n  "deepseek-chat": {"101": 30, "102": 70}\n}\n外层键 = 对外模型名,内层键 = 上游模型 ID: 权重'}
+            <label className="mb-1 block text-xs text-muted-foreground">路由权重覆盖(高级,可不填)</label>
+            <textarea value={weightMap} onChange={(e) => setWeightMap(e.target.value)} rows={5}
+              placeholder={'只想改计费倍率 → 这里留空不用管。\n\n想把流量多分给某家上游时才填,抄这个改数字:\n{\n  "deepseek-chat": {"101": 70, "102": 30}\n}'}
               className="w-full rounded-lg border border-input bg-card p-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring" />
             <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-              命中时段时临时替换路由权重:外层键填<b>对外模型名</b>,内层键填<b>上游模型 ID</b>(「模型」页列表可见),值为非负整数权重。
-              只填想调整的模型,未提及的模型沿用组内原权重;整框留空或 {"{}"} 表示本时段<b>只改计费倍率、权重不动</b>。
-              加权随机/轮询直接按覆盖权重分流;智能自适应则把权重作为第三因子(占 0.2)参与打分。
+              例子含义:此时段内,deepseek-chat 的请求改由上游 101 接 70%、102 接 30%(数字只看大小比例)。
+              外层填<b>模型名</b>,内层填<b>上游 ID</b>(「模型」页可见);没写到的模型维持原权重;留空 = 本时段只改计费。
             </p>
           </div>
           {err && <p className="text-sm text-destructive">{err}</p>}
