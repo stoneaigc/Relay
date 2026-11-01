@@ -2867,20 +2867,20 @@ function GroupsPanel() {
     action: async () => { if (sel != null) { await api.deleteTimeRule(sel, id); loadTimeRules(sel); } },
   });
   const STRATEGY_LABEL: Record<string, string> = {
-    weighted_random: "加权随机",
+    weighted_random: "加权随机（默认）",
     weighted_round_robin: "加权轮询",
-    auto: "智能自适应（默认）",
+    auto: "智能自适应",
   };
   // 各负载策略的语义与配置指引(选中即提示,降低误配成本)。
   const STRATEGY_HINT: Record<string, string> = {
-    auto: "默认策略。自动挑「快且省」的上游:近期响应快、单价低的优先;快慢差不多时按权重分流;新上游先分少量请求试跑。配置:模型填好单价即可,权重留默认。",
-    weighted_random: "按「权重」随机分流,权重越大分到的请求越多。适合想精确控制流量比例的场景(如 70/30)。",
+    auto: "自动挑「稳、快、省」的上游:近期失败/限流少的优先,再看响应快慢与单价;同一模型挂多家明显不同的上游时才划算,只有一路时等同于随机。",
+    weighted_random: "默认策略。按「权重」随机分流,权重越大分到的请求越多;失败自动换下一个(failover)。适合要精确控制流量比例(如 70/30)的场景。",
     weighted_round_robin: "按「权重」轮流分流,分配严格按比例、无随机抖动。权重全填 1 就是简单轮询。",
   };
   // 路由决策链:让「优先级 → 策略 → 时段」三个层次一眼看清。
   const ROUTE_ORDER_HINT = "路由顺序:① 优先级分档(数值越大越优先,高档全部失败才降档)→ ② 档内按当前负载策略分流 → ③ 命中高峰/低谷时段时,按时段规则临时覆盖权重与计费倍率。";
   const curGroup = groups.find((g) => g.id === sel);
-  const curStrategy = curGroup?.strategy ?? "auto";
+  const curStrategy = curGroup?.strategy ?? "weighted_random";
   const filteredGroups = groups.filter((g) => !gq.trim() || g.name.includes(gq.trim()));
   // 路由分页切片(始终按 优先级降序 → 权重降序 排列,便于查看故障转移链)
   const routeTotal = routes.length;

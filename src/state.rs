@@ -642,6 +642,9 @@ pub struct AppState {
     pub round_robin: DashMap<i64, std::sync::atomic::AtomicU32>,
     /// 延迟优先策略用的 P50 延迟快照:provider 名 -> P50(ms)。由后台任务周期刷新,热路径只读。
     pub latency_p50: DashMap<String, u64>,
+    /// 智能自适应用的近 1h 失败率快照:provider 名 -> 失败率(0..1,含 5xx/超时/限流/上游不可用)。
+    /// 与 latency_p50 同期刷新;窗口内无请求的供应商不写入(由评分侧按中位数占位处理)。
+    pub provider_err: DashMap<String, f64>,
     /// 高峰/低谷时段判断用的时区偏移秒数(Asia/Shanghai → 28800;DST 感知)。
     pub tz_offset_secs: i32,
     /// ---------- 路由失败审计(ring buffer,最新 push_back) ----------
@@ -1483,9 +1486,11 @@ impl AppState {
         })
     }
 
-    /// 刷新延迟优先策略的 P50 快照:按内存路由表逐个供应商聚合近 1h 指标,取成功请求的 P50(ms)。
+    /// 刷新智能自适应/延迟优先策略用的上游表现快照:按内存路由表逐个供应商聚合近 1h 指标。
+    /// - 延迟:成功请求的 P50(ms),失败样本不参与(避免超时把均值带偏)。
+    /// - 失败率:(req - success) / req,含 5xx、超时、限流与上游不可用;这是「避开爱故障的上游」的主要信号。
     /// 由 main.rs 后台任务周期调用;窗口内无请求的供应商保留上次快照(新供应商冷启动随机分摊)。
-    pub async fn refresh_latency_p50(&self) {
+    pub async fn refresh_provider_stats(&self) {
         use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let since_min = now.saturating_sub(3600) / 60 * 60;
@@ -1502,7 +1507,11 @@ impl AppState {
             if total.req == 0 {
                 continue;
             }
-            self.latency_p50.insert(name.clone(), total.p(0.50) as u64);
+            if total.success > 0 {
+                self.latency_p50.insert(name.clone(), total.p(0.50) as u64);
+            }
+            let failed = total.req.saturating_sub(total.success);
+            self.provider_err.insert(name.clone(), (failed as f64 / total.req as f64).clamp(0.0, 1.0));
         }
     }
 
@@ -1931,6 +1940,7 @@ mod tests {
             upstream_breakers: DashMap::new(),
             round_robin: DashMap::new(),
             latency_p50: DashMap::new(),
+            provider_err: DashMap::new(),
             tz_offset_secs: 28800,
             audit_failures: AsyncMutex::new(VecDeque::new()),
             metrics: MetricsStore::default(),
@@ -2049,6 +2059,7 @@ mod tests {
             upstream_breakers: DashMap::new(),
             round_robin: DashMap::new(),
             latency_p50: DashMap::new(),
+            provider_err: DashMap::new(),
             tz_offset_secs: 28800,
             audit_failures: AsyncMutex::new(VecDeque::new()),
             metrics: MetricsStore::default(),

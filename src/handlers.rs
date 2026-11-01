@@ -486,7 +486,7 @@ pub async fn run_chat(
     // 再在组内按该组负载策略把对外模型名解析到全部候选上游。
     // failover:依次尝试每个候选(跨组按组优先级拼接);仅可重试错误(Unavailable)才切换到下一目标。
     let routing = state.routing.load();
-    let candidates = match routing.resolve_priority(&user.resolve_group_ids(&routing), &model, &state.round_robin, &state.latency_p50, state.tz_offset_secs, None) {
+    let candidates = match routing.resolve_priority(&user.resolve_group_ids(&routing), &model, &state.round_robin, &state.latency_p50, &state.provider_err, state.tz_offset_secs, None) {
         Ok(c) => c,
         Err(e) => {
             fail_global!();
@@ -1289,7 +1289,7 @@ pub async fn run_messages(
 
     // 两级寻址:先按用户组绑定的有序模型组(或回落用户直属组)选定组,再在组内按该组负载策略解析候选。
     let routing = state.routing.load();
-    let candidates = match routing.resolve_priority(&user.resolve_group_ids(&routing), &model, &state.round_robin, &state.latency_p50, state.tz_offset_secs, None) {
+    let candidates = match routing.resolve_priority(&user.resolve_group_ids(&routing), &model, &state.round_robin, &state.latency_p50, &state.provider_err, state.tz_offset_secs, None) {
         Ok(c) => c,
         Err(e) => { fail_global!(); return Err(e); }
     };

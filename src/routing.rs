@@ -283,7 +283,8 @@ impl Routing {
     /// 1) 先按该组绑定的负载策略算出候选顺序(第一条就是本次命中的目标,后面是 failover 次序);
     /// 2) 然后按 (kind + base_url + upstream_model) 去重,避免重复打同一个上游。
     /// `rr_counter`: 组级轮询游标(加权轮询 / 简单轮询需要跨请求记住轮到哪),由 AppState 持有。
-    /// `lat_p50`: 供应商名 -> P50 延迟(ms)的快照(延迟优先策略用),由 AppState 后台周期刷新。
+    /// `lat_p50`: 供应商名 -> P50 延迟(ms)的快照,由 AppState 后台周期刷新。
+    /// `err_rate`: 供应商名 -> 近 1h 失败率(0..1)的快照,同上;智能自适应用它给爱故障的上游加罚。
     /// `now`: 可选的当前时间(测试注入用);None 则用 Utc::now()。
     pub fn resolve_all(
         &self,
@@ -291,6 +292,7 @@ impl Routing {
         requested: &str,
         rr_counter: &dashmap::DashMap<i64, std::sync::atomic::AtomicU32>,
         lat_p50: &dashmap::DashMap<String, u64>,
+        err_rate: &dashmap::DashMap<String, f64>,
         tz_offset_secs: i32,
         now: Option<chrono::DateTime<Utc>>,
     ) -> Result<Vec<Resolved>, ApiError> {
@@ -313,8 +315,9 @@ impl Routing {
             weight_over.and_then(|m| m.get(&t.model_id)).copied().unwrap_or(t.weight).max(1)
         };
         // 按该组绑定的负载策略生成候选顺序(命中的排前,其后是 failover 次序)。
-        // 未显式设置策略的组默认智能自适应(延迟+成本综合评分)。
-        let strategy = self.group_strategy.get(&group_id).copied().unwrap_or(Strategy::Auto);
+        // 未显式设置策略的组默认加权随机(与 DB 列默认值一致):这是业界通行的「简单分流 + failover」组合,
+        // 可预测、可解释;智能自适应是需要多上游差异明显才划算的可选项。
+        let strategy = self.group_strategy.get(&group_id).copied().unwrap_or(Strategy::WeightedRandom);
         // 时段覆盖权重时,不透传原权重给排序,单独构造一份带覆盖权重的 targets 快照。
         let weighted_targets: Option<Vec<Target>> = rule.as_ref().map(|_| {
             targets.iter().map(|t| Target { model_id: t.model_id, priority: t.priority, weight: eff_weight(t), multiplier: t.multiplier, cache_enabled: t.cache_enabled }).collect()
@@ -339,7 +342,7 @@ impl Routing {
                 }
                 Strategy::WeightedRoundRobin => shuffle_weighted(&tier),
                 Strategy::WeightedRandom => shuffle_weighted(&tier),
-                Strategy::Auto => order_by_auto(&tier, &self.models, lat_p50, tier_weights.as_deref()),
+                Strategy::Auto => order_by_auto(&tier, &self.models, lat_p50, err_rate, tier_weights.as_deref()),
             };
             order.extend(in_tier.into_iter().map(|j| idxs[j]));
         }
@@ -385,6 +388,7 @@ impl Routing {
         requested: &str,
         rr_counter: &dashmap::DashMap<i64, std::sync::atomic::AtomicU32>,
         lat_p50: &dashmap::DashMap<String, u64>,
+        err_rate: &dashmap::DashMap<String, f64>,
         tz_offset_secs: i32,
         now: Option<chrono::DateTime<Utc>>,
     ) -> Result<Vec<Resolved>, ApiError> {
@@ -406,7 +410,7 @@ impl Routing {
                 continue;
             }
             had_name = true;
-            let mut cands = self.resolve_all(*gid, requested, rr_counter, lat_p50, tz_offset_secs, now)?;
+            let mut cands = self.resolve_all(*gid, requested, rr_counter, lat_p50, err_rate, tz_offset_secs, now)?;
             for r in cands.drain(..) {
                 if seen.insert((r.kind, r.base_url.clone(), r.upstream_model.clone())) {
                     out.push(r);
@@ -617,6 +621,19 @@ fn target_latency(t: &Target, models: &HashMap<i64, ModelDef>, lat_p50: &dashmap
         .and_then(|m| lat_p50.get(&m.provider).map(|e| *e.value()))
 }
 
+/// 单个目标的近 1h 失败率(0..1):经模型查供应商名,再查快照;窗口内无请求 = None。
+fn target_err(t: &Target, models: &HashMap<i64, ModelDef>, err_rate: &dashmap::DashMap<String, f64>) -> Option<f64> {
+    models
+        .get(&t.model_id)
+        .and_then(|m| err_rate.get(&m.provider).map(|e| *e.value()))
+}
+
+/// 智能自适应的失败率惩罚系数:score ×= 1 + 系数 × 失败率(10% 失败 → ×1.2;50% → ×2.0)。
+/// 之所以做成乘性而非加性,是为了不破坏「延迟 vs 成本」已有的配比语义,且高失败率惩罚更陡。
+const ERR_PENALTY: f64 = 2.0;
+/// 并列最优带:得分在最佳分 ×(1+该值)以内的候选随机打头,防止把最快的上游打爆。
+const AUTO_TIE_BUFFER: f64 = 0.15;
+
 /// 取中位数(None 不参与);样本为空返回 None。
 fn median(vals: &mut Vec<f64>) -> Option<f64> {
     if vals.is_empty() {
@@ -637,10 +654,12 @@ fn median(vals: &mut Vec<f64>) -> Option<f64> {
 /// 智能自适应排序:延迟 P50 与成本归一化后按 (0.5, 0.5) 加权;`weights` 为 Some 时
 /// (时段规则覆盖了路由权重)额外纳入权重因子:score = 0.4×lat + 0.4×cost + 0.2×(1-norm_weight),
 /// 让「高峰压向稳定供应商」的时段权重对 auto 也生效。得分低者排前。
+/// 再乘上近 1h 失败率的惩罚项(见 ERR_PENALTY):这是实测收益最大的一维——避开爱故障/限流的上游。
 fn order_by_auto(
     targets: &[Target],
     models: &HashMap<i64, ModelDef>,
     lat_p50: &dashmap::DashMap<String, u64>,
+    err_rate: &dashmap::DashMap<String, f64>,
     weights: Option<&[u32]>,
 ) -> Vec<usize> {
     let n = targets.len();
@@ -649,11 +668,14 @@ fn order_by_auto(
     }
     let lats: Vec<Option<f64>> = targets.iter().map(|t| target_latency(t, models, lat_p50).map(|v| v as f64)).collect();
     let costs: Vec<Option<f64>> = targets.iter().map(|t| target_cost(t, models)).collect();
+    let errs: Vec<Option<f64>> = targets.iter().map(|t| target_err(t, models, err_rate)).collect();
     let med_lat = median(&mut lats.iter().flatten().copied().collect());
     let med_cost = median(&mut costs.iter().flatten().copied().collect());
+    let med_err = median(&mut errs.iter().flatten().copied().collect());
     // 归一化基准取「填充后」的最大值,保证 0..1 区间。
     let max_lat = lats.iter().map(|v| v.or(med_lat)).flatten().fold(0.0f64, f64::max);
     let max_cost = costs.iter().map(|v| v.or(med_cost)).flatten().fold(0.0f64, f64::max);
+    let max_err = errs.iter().map(|v| v.or(med_err)).flatten().fold(0.0f64, f64::max);
     // 权重归一化基准(权重全等时各候选同分,不改变延迟/成本决定的次序)。
     let max_w = weights
         .map(|ws| ws.iter().copied().fold(0u32, u32::max) as f64)
@@ -668,19 +690,36 @@ fn order_by_auto(
         .map(|i| {
             let nl = norm(lats[i], med_lat, max_lat);
             let nc = norm(costs[i], med_cost, max_cost);
-            let score = match (weights, max_w) {
+            let ne = norm(errs[i], med_err, max_err);
+            let base = match (weights, max_w) {
                 (Some(ws), mw) if mw > 0.0 => {
                     let w_norm = (ws.get(i).copied().unwrap_or(0) as f64 / mw).clamp(0.0, 1.0);
                     0.4 * nl + 0.4 * nc + 0.2 * (1.0 - w_norm)
                 }
                 _ => 0.5 * nl + 0.5 * nc,
             };
+            // 失败率作为乘性惩罚而非加性项:不改变「延迟 vs 成本」的既有配比语义,
+            // 且失败率越高惩罚越陡——10% 失败率 ×1.2,50% 失败率 ×2.0,几乎必失败的上游基本不会被选中。
+            let score = base * (1.0 + ERR_PENALTY * ne);
             (i, score)
         })
         .collect();
     fisher_yates_shuffle(&mut keyed);
     keyed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    // 并列最优带:得分在最佳分 ×(1+BUFFER) 以内的候选视为并列,随机挑一个打头——
+    // 否则「最快的那家」会被连续选中、被自己的负载拖慢、再换人,来回振荡(LiteLLM lowest_latency_buffer 同思路)。
+    let best = keyed.first().map(|(_, s)| *s).unwrap_or(0.0);
+    let tied: Vec<usize> = keyed
+        .iter()
+        .filter(|(_, s)| *s <= best * (1.0 + AUTO_TIE_BUFFER))
+        .map(|(i, _)| *i)
+        .collect();
     let mut order: Vec<usize> = keyed.into_iter().map(|(i, _)| i).collect();
+    if tied.len() > 1 {
+        let pick = tied[rand::random::<usize>() % tied.len()];
+        order.retain(|&i| i != pick);
+        order.insert(0, pick);
+    }
     // 冷启动探索:无延迟数据的候选按 10% 概率置顶,避免"无数据 → 无流量 → 永远无数据"。
     let unknown: Vec<usize> = (0..n).filter(|&i| lats[i].is_none()).collect();
     if !unknown.is_empty() && rand::random::<f64>() < 0.1 {
@@ -834,17 +873,25 @@ mod tests {
         m
     }
 
+    /// 带手动定价的供应商模型(测试成本维度用;不依赖内置价表)。
+    fn prov_model_priced(prov: &str, upstream: &str, in_p: f64, out_p: f64) -> ModelDef {
+        let mut m = mdl(upstream, Some(in_p), Some(out_p));
+        m.provider = prov.into();
+        m
+    }
+
     #[test]
     fn auto_prefers_fastest_when_cost_equal() {
         let mut models = HashMap::new();
         models.insert(1, prov_model("p-slow", "gpt-4o-mini"));
         models.insert(2, prov_model("p-fast", "gpt-4o-mini"));
         let lat = lat_map(&[("p-slow", 800), ("p-fast", 200)]);
+        let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
         let targets = vec![
             Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
             Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
         ];
-        let order = order_by_auto(&targets, &models, &lat, None);
+        let order = order_by_auto(&targets, &models, &lat, &err, None);
         assert_eq!(order[0], 1);
     }
 
@@ -854,11 +901,12 @@ mod tests {
         models.insert(1, prov_model("p1", "gpt-4o"));
         models.insert(2, prov_model("p2", "gpt-4o-mini"));
         let lat = lat_map(&[("p1", 300), ("p2", 300)]);
+        let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
         let targets = vec![
             Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
             Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
         ];
-        let order = order_by_auto(&targets, &models, &lat, None);
+        let order = order_by_auto(&targets, &models, &lat, &err, None);
         assert_eq!(order[0], 1);
     }
 
@@ -870,17 +918,93 @@ mod tests {
         models.insert(1, prov_model("p1", "gpt-4o-mini"));
         models.insert(2, prov_model("p2", "gpt-4o-mini"));
         let lat = lat_map(&[("p1", 300), ("p2", 300)]);
+        let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
         let targets = vec![
             Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
             Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
         ];
         // p2 权重被时段覆盖为 300(远高于 p1 的 1)→ p2 应稳定排第一(下标 1)。
-        let order = order_by_auto(&targets, &models, &lat, Some(&[1, 300]));
+        let order = order_by_auto(&targets, &models, &lat, &err, Some(&[1, 300]));
         assert_eq!(order[0], 1);
         // 无权重因子(None)时不得改变行为:同延迟同价 → 随机,两种次序都可能出现;
         // 这里只断言不 panic 且长度一致。
-        let order2 = order_by_auto(&targets, &models, &lat, None);
+        let order2 = order_by_auto(&targets, &models, &lat, &err, None);
         assert_eq!(order2.len(), 2);
+    }
+
+    /// 延迟与成本完全相同时,近期失败率低的上游必须优先——这是智能策略实测收益最大的一维。
+    #[test]
+    fn auto_avoids_error_prone_upstream() {
+        let mut models = HashMap::new();
+        models.insert(1, prov_model("p-flaky", "gpt-4o-mini"));
+        models.insert(2, prov_model("p-steady", "gpt-4o-mini"));
+        let lat = lat_map(&[("p-flaky", 300), ("p-steady", 300)]);
+        let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
+        err.insert("p-flaky".to_string(), 0.40);
+        err.insert("p-steady".to_string(), 0.02);
+        let targets = vec![
+            Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+        ];
+        // 延迟、单价都一样时,p-steady(下标 1)应稳定置顶;重复多次确认不是偶然。
+        for _ in 0..20 {
+            assert_eq!(order_by_auto(&targets, &models, &lat, &err, None)[0], 1);
+        }
+    }
+
+    /// 失败率高到一定程度时,应压过价格优势:贵但稳的上游优先于便宜但频繁失败的上游。
+    #[test]
+    fn auto_prefers_stable_over_cheap_but_flaky() {
+        let mut models = HashMap::new();
+        // p-cheap 单价 1(便宜)但 60% 失败;p-steady 单价 4(贵)但几乎不失败。
+        models.insert(1, prov_model_priced("p-cheap", "gpt-4o-mini", 1.0, 1.0));
+        models.insert(2, prov_model_priced("p-steady", "gpt-4o-mini", 4.0, 4.0));
+        let lat = lat_map(&[("p-cheap", 300), ("p-steady", 300)]);
+        let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
+        err.insert("p-cheap".to_string(), 0.60);
+        err.insert("p-steady".to_string(), 0.0);
+        let targets = vec![
+            Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+        ];
+        assert_eq!(order_by_auto(&targets, &models, &lat, &err, None)[0], 1);
+    }
+
+    /// 并列最优带:得分差距在 buffer 内时不应永远锁死同一家,否则最快的上游会被自己的负载拖垮。
+    #[test]
+    fn auto_tie_buffer_spreads_close_candidates() {
+        let mut models = HashMap::new();
+        models.insert(1, prov_model("p1", "gpt-4o-mini"));
+        models.insert(2, prov_model("p2", "gpt-4o-mini"));
+        // 300 vs 315:归一化后差距 5%,落在 15% 的并列带内。
+        let lat = lat_map(&[("p1", 300), ("p2", 315)]);
+        let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
+        let targets = vec![
+            Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+        ];
+        let mut firsts = std::collections::HashSet::new();
+        for _ in 0..200 {
+            firsts.insert(order_by_auto(&targets, &models, &lat, &err, None)[0]);
+        }
+        assert_eq!(firsts.len(), 2, "并列带内应两家都拿得到首发,实际: {firsts:?}");
+    }
+
+    /// 差距明显超出并列带时,仍然稳定选优(不能为了打散而牺牲选择质量)。
+    #[test]
+    fn auto_clear_winner_still_wins() {
+        let mut models = HashMap::new();
+        models.insert(1, prov_model("p-fast", "gpt-4o-mini"));
+        models.insert(2, prov_model("p-slow", "gpt-4o-mini"));
+        let lat = lat_map(&[("p-fast", 200), ("p-slow", 2000)]);
+        let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
+        let targets = vec![
+            Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+        ];
+        for _ in 0..20 {
+            assert_eq!(order_by_auto(&targets, &models, &lat, &err, None)[0], 0);
+        }
     }
 
     /// 权重全等时权重因子对排序无影响(与 None 行为分布一致),避免时段覆盖误伤均匀分流。
@@ -890,13 +1014,14 @@ mod tests {
         models.insert(1, prov_model("p-fast", "gpt-4o-mini"));
         models.insert(2, prov_model("p-slow", "gpt-4o-mini"));
         let lat = lat_map(&[("p-fast", 200), ("p-slow", 800)]);
+        let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
         let targets = vec![
             Target { model_id: 1, weight: 100, priority: 0, multiplier: 1.0, cache_enabled: false },
             Target { model_id: 2, weight: 100, priority: 0, multiplier: 1.0, cache_enabled: false },
         ];
         // 快者稳定第一(权重相同,不干预)。
-        assert_eq!(order_by_auto(&targets, &models, &lat, Some(&[100, 100]))[0], 0);
-        assert_eq!(order_by_auto(&targets, &models, &lat, None)[0], 0);
+        assert_eq!(order_by_auto(&targets, &models, &lat, &err, Some(&[100, 100]))[0], 0);
+        assert_eq!(order_by_auto(&targets, &models, &lat, &err, None)[0], 0);
     }
 
     /// 回归:无数据候选不能被永久排在最后(否则新上游永远拿不到流量 → 冷启动死锁)。
@@ -906,13 +1031,14 @@ mod tests {
         models.insert(1, prov_model("p-known", "gpt-4o-mini"));
         models.insert(2, prov_model("p-new", "gpt-4o-mini"));
         let lat = lat_map(&[("p-known", 800)]); // p-new 无数据
+        let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
         let targets = vec![
             Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
             Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
         ];
         let mut new_first = 0;
         for _ in 0..200 {
-            if order_by_auto(&targets, &models, &lat, None)[0] == 1 {
+            if order_by_auto(&targets, &models, &lat, &err, None)[0] == 1 {
                 new_first += 1;
             }
         }
@@ -925,11 +1051,12 @@ mod tests {
         models.insert(1, prov_model("p1", "gpt-4o-mini"));
         models.insert(2, prov_model("p2", "gpt-4o-mini"));
         let lat = dashmap::DashMap::new();
+        let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
         let targets = vec![
             Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
             Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
         ];
-        let mut sorted = order_by_auto(&targets, &models, &lat, None);
+        let mut sorted = order_by_auto(&targets, &models, &lat, &err, None);
         sorted.sort();
         assert_eq!(sorted, vec![0, 1]);
     }
@@ -940,20 +1067,22 @@ mod tests {
         models.insert(1, prov_model("p1", "gpt-4o"));
         models.insert(2, prov_model("p2", "gpt-4o"));
         let lat = lat_map(&[("p1", 300), ("p2", 300)]);
+        let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
         let targets = vec![
             Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
             Target { model_id: 2, weight: 1, priority: 0, multiplier: 0.1, cache_enabled: false },
         ];
-        assert_eq!(order_by_auto(&targets, &models, &lat, None)[0], 1);
+        assert_eq!(order_by_auto(&targets, &models, &lat, &err, None)[0], 1);
     }
 
     #[test]
     fn auto_empty_and_single() {
         let models: HashMap<i64, ModelDef> = HashMap::new();
         let lat = dashmap::DashMap::new();
-        assert!(order_by_auto(&[], &models, &lat, None).is_empty());
+        let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
+        assert!(order_by_auto(&[], &models, &lat, &err, None).is_empty());
         let one = vec![Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false }];
-        assert_eq!(order_by_auto(&one, &models, &lat, None), vec![0]);
+        assert_eq!(order_by_auto(&one, &models, &lat, &err, None), vec![0]);
     }
 
     // ---- resolve_priority(两级寻址) ----
@@ -1010,7 +1139,7 @@ mod tests {
     fn priority_first_group_wins_then_failover_chain() {
         let r = two_level_routing();
         // 用户组绑定 [组1, 组2]:首候选必须来自高优先级的组 1,组 2 拼接为容灾链。
-        let out = r.resolve_priority(&[1, 2], "pub", &rr(), &dashmap::DashMap::new(), 0, None).unwrap();
+        let out = r.resolve_priority(&[1, 2], "pub", &rr(), &dashmap::DashMap::new(), &dashmap::DashMap::new(), 0, None).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].upstream_model, "ma");
         assert_eq!(out[1].upstream_model, "mb");
@@ -1022,7 +1151,7 @@ mod tests {
     fn priority_order_flips_with_binding_order() {
         let r = two_level_routing();
         // 绑定顺序反过来 [组2, 组1]:首候选来自组 2。
-        let out = r.resolve_priority(&[2, 1], "pub", &rr(), &dashmap::DashMap::new(), 0, None).unwrap();
+        let out = r.resolve_priority(&[2, 1], "pub", &rr(), &dashmap::DashMap::new(), &dashmap::DashMap::new(), 0, None).unwrap();
         assert_eq!(out[0].upstream_model, "mb");
         assert_eq!(out[1].upstream_model, "ma");
     }
@@ -1031,7 +1160,7 @@ mod tests {
     fn priority_skips_group_without_model() {
         let r = two_level_routing();
         // "only-b" 只在组 2:即使组 1 优先级更高,也直接落到组 2。
-        let out = r.resolve_priority(&[1, 2], "only-b", &rr(), &dashmap::DashMap::new(), 0, None).unwrap();
+        let out = r.resolve_priority(&[1, 2], "only-b", &rr(), &dashmap::DashMap::new(), &dashmap::DashMap::new(), 0, None).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].upstream_model, "mb");
     }
@@ -1039,7 +1168,7 @@ mod tests {
     #[test]
     fn priority_empty_groups_not_allowed() {
         let r = two_level_routing();
-        match r.resolve_priority(&[], "pub", &rr(), &dashmap::DashMap::new(), 0, None) {
+        match r.resolve_priority(&[], "pub", &rr(), &dashmap::DashMap::new(), &dashmap::DashMap::new(), 0, None) {
             Err(e) => assert!(matches!(e, ApiError::ModelNotAllowed(_))),
             Ok(_) => panic!("expected ModelNotAllowed"),
         }
@@ -1048,7 +1177,7 @@ mod tests {
     #[test]
     fn priority_unknown_model_not_found() {
         let r = two_level_routing();
-        match r.resolve_priority(&[1, 2], "nope", &rr(), &dashmap::DashMap::new(), 0, None) {
+        match r.resolve_priority(&[1, 2], "nope", &rr(), &dashmap::DashMap::new(), &dashmap::DashMap::new(), 0, None) {
             Err(e) => assert!(matches!(e, ApiError::ModelNotFound(_))),
             Ok(_) => panic!("expected ModelNotFound"),
         }
@@ -1063,7 +1192,7 @@ mod tests {
             "pub".to_string(),
             vec![Target { model_id: 1, weight: 100, priority: 0, multiplier: 1.0, cache_enabled: false }],
         );
-        let out = r.resolve_priority(&[1, 2], "pub", &rr(), &dashmap::DashMap::new(), 0, None).unwrap();
+        let out = r.resolve_priority(&[1, 2], "pub", &rr(), &dashmap::DashMap::new(), &dashmap::DashMap::new(), 0, None).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].upstream_model, "ma");
     }
