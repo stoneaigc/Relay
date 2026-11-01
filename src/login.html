@@ -6,6 +6,19 @@
 <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f5fa">
 <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0d0f14">
 <title>Relay · 统一登录</title>
+<script>
+// 免登录回流(?back=admin/portal)时先隐藏整页,避免探测令牌期间闪现登录表单;
+// 探测完成(跳转)或令牌无效(下方回流脚本恢复)后再显示。
+(function () {
+  try {
+    var back = new URLSearchParams(location.search).get("back");
+    if (back === "admin" || back === "portal") {
+      document.documentElement.style.visibility = "hidden";
+      window.__relayBackProbe = true;
+    }
+  } catch (_) {}
+})();
+</script>
 <style>
   :root { color-scheme: light dark;
     --accent: #6366f1; --accent-2: #8b5cf6;
@@ -468,15 +481,17 @@ $("f-reset").addEventListener("submit", async (ev) => {
   const back = new URLSearchParams(location.search).get("back");
   if (back !== "admin" && back !== "portal") return;
   history.replaceState(null, "", location.pathname); // 清掉参数,防刷新重复触发
+  const restore = () => { document.documentElement.style.visibility = ""; };
   const key = back === "admin" ? "relay_admin_token" : "relay_portal_token";
   const t = localStorage.getItem(key);
-  if (!t) return;
+  if (!t) { restore(); return; }
   const probe = back === "admin" ? "admin/api/overview" : "portal/api/me";
   try {
     const res = await fetch(probe, { headers: { Authorization: "Bearer " + t } });
     if (res.ok) { location.replace(back === "admin" ? "admin/" : "portal/"); return; }
     localStorage.removeItem(key);
   } catch (_) { /* 网络异常:留在登录页,不误清令牌 */ }
+  restore();
 })();
 </script>
 </body>

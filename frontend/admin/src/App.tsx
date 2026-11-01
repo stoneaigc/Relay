@@ -19,6 +19,7 @@ import ApiDocsPanel from "./ApiDocs";
 import { Toaster, toast } from "sonner";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { Switch } from "@/components/ui/switch";
+import { PasswordInput } from "@/components/ui/password-input";
 
 // 子路径反代兼容:部署在 https://host/relay/admin/ 这类前缀下时,路由 basename 探测为 "/relay/admin"。
 const APP_BASE = (() => {
@@ -456,6 +457,13 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
 
   const submit = async () => {
     setErr("");
+    // 用户名规则:仅英文(字母开头,可含数字/下划线/中划线,2-32 位);中文姓名等展示用「显示名」字段。
+    if (!edit) {
+      if (!/^[A-Za-z][A-Za-z0-9_-]{1,31}$/.test(username.trim())) {
+        setErr("用户名需为英文:字母开头,可含数字/下划线/中划线,长度 2-32;中文姓名请填「显示名」");
+        return;
+      }
+    }
     const numOrUndef = (s: string) => {
       const t = s.trim();
       if (t === "") return undefined;
@@ -542,13 +550,16 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
             <SheetSection title="账号">
               <div className="grid grid-cols-2 gap-3.5">
                 <div><label className={lbl}>用户名{edit ? "(不可改)" : " *"}</label>
-                  <Input placeholder="登录用户名" value={username} onChange={(e) => setUsername(e.target.value)} disabled={!!edit} autoFocus={!edit} /></div>
+                  <Input placeholder="仅英文,如 zhangsan" value={username} onChange={(e) => setUsername(e.target.value)} disabled={!!edit} autoFocus={!edit} />
+                  {!edit && username.trim() && !/^[A-Za-z][A-Za-z0-9_-]{1,31}$/.test(username.trim()) && (
+                    <p className="mt-1 text-[11px] text-red-500">字母开头,可含数字/下划线/中划线,2-32 位</p>
+                  )}</div>
                 <div><label className={lbl}>显示名(中文,可选)</label>
                   <Input placeholder="如:张三 / 市场部-李四" value={displayName} onChange={(e) => setDisplayName(e.target.value)} /></div>
               </div>
               <div className="grid grid-cols-2 gap-3.5">
                 <div><label className={lbl}>{edit ? "密码(留空不改)" : "密码(留空自动生成)"}</label>
-                  <Input type="password" placeholder={edit ? "留空保持不变" : "自动生成 16 位"} value={password} onChange={(e) => setPassword(e.target.value)} /></div>
+                  <PasswordInput placeholder={edit ? "留空保持不变" : "自动生成 16 位"} value={password} onChange={(e) => setPassword(e.target.value)} /></div>
                 <div><label className={lbl}>邮箱(可选)</label>
                   <Input placeholder="name@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
               </div>
@@ -2801,18 +2812,20 @@ function GroupsPanel() {
     action: async () => { if (sel != null) { await api.deleteTimeRule(sel, id); loadTimeRules(sel); } },
   });
   const STRATEGY_LABEL: Record<string, string> = {
-    weighted_random: "加权随机（默认）",
+    weighted_random: "加权随机",
     weighted_round_robin: "加权轮询",
-    auto: "智能自适应",
+    auto: "智能自适应（默认）",
   };
   // 各负载策略的语义与配置指引(选中即提示,降低误配成本)。
   const STRATEGY_HINT: Record<string, string> = {
-    weighted_random: "按「权重」比例随机分流,权重越大命中概率越高;适合大多数场景。配置:给同档路由设权重(如 70/30)。",
-    weighted_round_robin: "按「权重」比例轮转分流(累计分布严格符合权重,无随机抖动);适合需要按比例分摊的场景。配置:给同档路由设权重;权重全填 1 即简单轮询。",
-    auto: "按「延迟 + 成本」综合得分自适应:得分越低越优先;新上线无延迟数据的上游按中位数参与并保留少量探索流量(不会饿死)。配置:给模型填单价,权重保持默认即可。",
+    auto: "默认策略。自动挑「快且省」的上游:近期响应快、单价低的优先;快慢差不多时按权重分流;新上游先分少量请求试跑。配置:模型填好单价即可,权重留默认。",
+    weighted_random: "按「权重」随机分流,权重越大分到的请求越多。适合想精确控制流量比例的场景(如 70/30)。",
+    weighted_round_robin: "按「权重」轮流分流,分配严格按比例、无随机抖动。权重全填 1 就是简单轮询。",
   };
+  // 路由决策链:让「优先级 → 策略 → 时段」三个层次一眼看清。
+  const ROUTE_ORDER_HINT = "路由顺序:① 优先级分档(数值越大越优先,高档全部失败才降档)→ ② 档内按当前负载策略分流 → ③ 命中高峰/低谷时段时,按时段规则临时覆盖权重与计费倍率。";
   const curGroup = groups.find((g) => g.id === sel);
-  const curStrategy = curGroup?.strategy ?? "weighted_random";
+  const curStrategy = curGroup?.strategy ?? "auto";
   const filteredGroups = groups.filter((g) => !gq.trim() || g.name.includes(gq.trim()));
   // 路由分页切片(始终按 优先级降序 → 权重降序 排列,便于查看故障转移链)
   const routeTotal = routes.length;
@@ -2890,6 +2903,11 @@ function GroupsPanel() {
           {sel != null && STRATEGY_HINT[curStrategy] && (
             <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground" title="负载策略说明">
               <span className="font-medium text-foreground/80">{STRATEGY_LABEL[curStrategy]}:</span>{STRATEGY_HINT[curStrategy]}
+            </p>
+          )}
+          {sel != null && (
+            <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground/80" title="路由决策链">
+              {ROUTE_ORDER_HINT}
             </p>
           )}
         </CardHeader>
@@ -5055,7 +5073,7 @@ function SettingsPanel() {
   // 加载失败的设置卡清单:展示提示并禁用对应「保存」,避免默认值回写。
   const failedCards = Object.entries(loaded).filter(([, ok]) => !ok).map(([k]) => k);
   const cardLabel: Record<string, string> = {
-    email: "邮箱配置", fallback: "降级配置", breaker: "熔断配置", cache: "语义缓存", embedding: "向量嵌入",
+    email: "邮箱配置", fallback: "降级配置", breaker: "熔断配置", cache: "语义缓存", embedding: "语义向量",
     logging: "日志策略", portal: "门户设置", admKeys: "管理员密钥", sms: "短信网关",
     defaults: "全局默认限额", billing: "费用显示",
   };
@@ -5325,54 +5343,53 @@ function SettingsPanel() {
             {cacheNote && <span className="text-xs text-success">{cacheNote}</span>}
             {cacheErr && <span className="text-xs text-destructive">{cacheErr}</span>}
           </div>
-        </CardContent>
-      </Card>
 
-      <Card className={tabCls("engine")}>
-        <CardHeader>
-          <div className="flex items-center justify-between gap-3">
-            <CardTitle className="text-base">语义向量(embedding)</CardTitle>
-            <Badge variant={embEnabled && embHasKey ? "success" : "muted"}>
-              {embEnabled ? (embHasKey ? "✓ 已启用" : "⚠ 缺少 API Key") : "未启用"}
-            </Badge>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <p className="text-xs text-muted-foreground">
-            配置 OpenAI 兼容的 /embeddings 接口后,语义缓存从「精确哈希命中」升级为「语义相似命中」:意思相近的请求(相似度达到上方阈值)也免费回放。请求文本会发送至该供应商做向量化(仅用于本地相似度计算);任何失败都会自动降级为精确命中,不影响转发。
-          </p>
-          <div className="flex items-center justify-between gap-4 rounded-xl border bg-muted/30 px-4 py-3">
-            <div className="space-y-0.5">
-              <p className="text-sm font-medium">启用语义向量</p>
-              <p className="text-xs text-muted-foreground">关闭后语义缓存仅做精确哈希命中。</p>
+          {/* 语义向量(embedding):语义缓存的向量化引擎,与缓存配置同块管理。 */}
+          <div className="space-y-4 border-t pt-5" data-testid="embedding-section">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-semibold">语义向量(embedding)</p>
+                <Badge variant={embEnabled && embHasKey ? "success" : "muted"}>
+                  {embEnabled ? (embHasKey ? "✓ 已启用" : "⚠ 缺少 API Key") : "未启用"}
+                </Badge>
+              </div>
             </div>
-            <Switch checked={embEnabled} onCheckedChange={setEmbEnabled} aria-label="切换语义向量" />
-          </div>
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div><label className="mb-1 block text-xs text-muted-foreground">API 基础地址 base_url</label>
-              <Input placeholder="如 https://api.openai.com/v1" disabled={!embEnabled} className={embEnabled ? "" : "opacity-50"}
-                value={embBaseUrl} onChange={(e) => setEmbBaseUrl(e.target.value)} /></div>
-            <div><label className="mb-1 block text-xs text-muted-foreground">Embedding 模型</label>
-              <Input placeholder="如 text-embedding-3-small" disabled={!embEnabled} className={embEnabled ? "" : "opacity-50"}
-                value={embModel} onChange={(e) => setEmbModel(e.target.value)} /></div>
-            <div className="sm:col-span-2"><label className="mb-1 block text-xs text-muted-foreground">API Key{embHasKey ? "(已设置,留空保持不变)" : ""}</label>
-              <Input type="password" placeholder={embHasKey ? "留空保持不变" : "sk-..."} disabled={!embEnabled}
-                className={embEnabled ? "" : "opacity-50"}
-                value={embKey} onChange={(e) => setEmbKey(e.target.value)} /></div>
-          </div>
-          <div className="flex flex-wrap items-center gap-2 border-t pt-4">
-            <Button onClick={saveEmbedding} disabled={embSaving || !loaded.embedding}>{embSaving ? "保存中…" : "保存配置"}</Button>
-            <Button variant="outline" onClick={testEmbeddingConn}
-              disabled={embTesting === "loading" || !embBaseUrl.trim() || !embModel.trim()}>
-              <Zap className="h-4 w-4" />{embTesting === "loading" ? "测试中…" : "测试连接"}
-            </Button>
-            {embTesting && embTesting !== "loading" && (
-              <span className={cn("text-xs", embTesting.ok ? "text-success" : "text-destructive")} title={embTesting.msg}>
-                {embTesting.ok ? "✓ " : "✗ "}{embTesting.msg}
-              </span>
-            )}
-            {embNote && <span className="text-xs text-success">{embNote}</span>}
-            {embErr && <span className="text-xs text-destructive">{embErr}</span>}
+            <p className="text-xs text-muted-foreground">
+              配置 OpenAI 兼容的 /embeddings 接口后,语义缓存从「精确哈希命中」升级为「语义相似命中」:意思相近的请求(相似度达到上方阈值)也免费回放。请求文本会发送至该供应商做向量化(仅用于本地相似度计算);任何失败都会自动降级为精确命中,不影响转发。
+            </p>
+            <div className="flex items-center justify-between gap-4 rounded-xl border bg-muted/30 px-4 py-3">
+              <div className="space-y-0.5">
+                <p className="text-sm font-medium">启用语义向量</p>
+                <p className="text-xs text-muted-foreground">关闭后语义缓存仅做精确哈希命中。</p>
+              </div>
+              <Switch checked={embEnabled} onCheckedChange={setEmbEnabled} aria-label="切换语义向量" />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div><label className="mb-1 block text-xs text-muted-foreground">API 基础地址 base_url</label>
+                <Input placeholder="如 https://api.openai.com/v1" disabled={!embEnabled} className={embEnabled ? "" : "opacity-50"}
+                  value={embBaseUrl} onChange={(e) => setEmbBaseUrl(e.target.value)} /></div>
+              <div><label className="mb-1 block text-xs text-muted-foreground">Embedding 模型</label>
+                <Input placeholder="如 text-embedding-3-small" disabled={!embEnabled} className={embEnabled ? "" : "opacity-50"}
+                  value={embModel} onChange={(e) => setEmbModel(e.target.value)} /></div>
+              <div className="sm:col-span-2"><label className="mb-1 block text-xs text-muted-foreground">API Key{embHasKey ? "(已设置,留空保持不变)" : ""}</label>
+                <Input type="password" placeholder={embHasKey ? "留空保持不变" : "sk-..."} disabled={!embEnabled}
+                  className={embEnabled ? "" : "opacity-50"}
+                  value={embKey} onChange={(e) => setEmbKey(e.target.value)} /></div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button onClick={saveEmbedding} disabled={embSaving || !loaded.embedding}>{embSaving ? "保存中…" : "保存向量配置"}</Button>
+              <Button variant="outline" onClick={testEmbeddingConn}
+                disabled={embTesting === "loading" || !embBaseUrl.trim() || !embModel.trim()}>
+                <Zap className="h-4 w-4" />{embTesting === "loading" ? "测试中…" : "测试连接"}
+              </Button>
+              {embTesting && embTesting !== "loading" && (
+                <span className={cn("text-xs", embTesting.ok ? "text-success" : "text-destructive")} title={embTesting.msg}>
+                  {embTesting.ok ? "✓ " : "✗ "}{embTesting.msg}
+                </span>
+              )}
+              {embNote && <span className="text-xs text-success">{embNote}</span>}
+              {embErr && <span className="text-xs text-destructive">{embErr}</span>}
+            </div>
           </div>
         </CardContent>
       </Card>

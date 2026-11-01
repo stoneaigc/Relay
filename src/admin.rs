@@ -441,6 +441,19 @@ pub async fn create_user(
     if body.username.trim().is_empty() {
         return Err(ApiError::BadRequest("username required".into()));
     }
+    // 用户名仅英文:字母开头,可含数字/下划线/中划线,2-32 位(中文姓名走 display_name)。
+    {
+        let u = body.username.trim();
+        let ok = u.len() >= 2
+            && u.len() <= 32
+            && u.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false)
+            && u.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !ok {
+            return Err(ApiError::BadRequest(
+                "用户名需为英文:字母开头,可含数字/下划线/中划线,长度 2-32;中文姓名请填 display_name".into(),
+            ));
+        }
+    }
     // 密码可空:留空自动生成 16 位默认密码;手填则最低 8 位(与门户注册口径一致)。
     let initial_plain = match body.password.as_deref().filter(|p| !p.is_empty()) {
         Some(p) => {

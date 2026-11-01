@@ -638,7 +638,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         <div className="px-3 pb-2 text-xs text-muted-foreground">{phone}</div>
         {isAdmin && (
           <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground"
-            onClick={() => { window.location.href = SITE_PREFIX + "/?back=admin"; }}>
+            onClick={() => { window.location.href = SITE_PREFIX + "/admin/"; }}>
             <ExternalLink className="h-4 w-4" />返回管理端
           </Button>
         )}
