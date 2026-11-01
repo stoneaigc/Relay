@@ -739,7 +739,7 @@ pub async fn run_chat(
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
-                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_UNAVAILABLE, up_start.elapsed()).await;
+                        state.record_metrics_upstream_attempt(&ukey, crate::state::METRIC_STATUS_UNAVAILABLE, up_start.elapsed()).await;
                         state
                             .record_failure(&ukey, &model, "chat", &e.to_string(), fail_cnt)
                             .await;
@@ -859,7 +859,7 @@ pub async fn run_chat(
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
-                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_UNAVAILABLE, up_start.elapsed()).await;
+                        state.record_metrics_upstream_attempt(&ukey, crate::state::METRIC_STATUS_UNAVAILABLE, up_start.elapsed()).await;
                         state
                             .record_failure(&ukey, &model, "chat", &e.to_string(), fail_cnt)
                             .await;
@@ -1484,7 +1484,7 @@ pub async fn run_messages(
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
-                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_UNAVAILABLE, up_start.elapsed()).await;
+                        state.record_metrics_upstream_attempt(&ukey, crate::state::METRIC_STATUS_UNAVAILABLE, up_start.elapsed()).await;
                         state
                             .record_failure(&ukey, &model, "messages", &e.to_string(), fail_cnt)
                             .await;
@@ -1588,7 +1588,7 @@ pub async fn run_messages(
                     }
                     Err(ApiError::Unavailable(e)) => {
                         let fail_cnt = state.breaker_unavailable(&ukey).await;
-                        state.record_metrics_request(Some(&ukey), crate::state::METRIC_STATUS_UNAVAILABLE, up_start.elapsed()).await;
+                        state.record_metrics_upstream_attempt(&ukey, crate::state::METRIC_STATUS_UNAVAILABLE, up_start.elapsed()).await;
                         state
                             .record_failure(&ukey, &model, "messages", &e.to_string(), fail_cnt)
                             .await;

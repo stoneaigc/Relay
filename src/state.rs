@@ -1182,6 +1182,22 @@ impl AppState {
         self.record_metrics(key, status, latency, 0, 0).await;
     }
 
+    /// 记录一次「重试中途的上游尝试失败」:只写上游分桶(供上游健康度/失败率统计),
+    /// 不写全局桶——全局口径(请求总数/成功率/延迟分位)只反映每个请求的最终结果,
+    /// 否则 failover 成功的请求会被计成「1 失败 + 1 成功」,把成功率虚低、触发误告警。
+    pub async fn record_metrics_upstream_attempt(
+        &self,
+        key: &UpstreamKey,
+        status: u16,
+        latency: Duration,
+    ) {
+        let ms = latency.as_millis().min(u32::MAX as u128) as u32;
+        let is_ok = (200..300).contains(&status);
+        let unavailable = status == METRIC_STATUS_UNAVAILABLE;
+        let ub = self.metrics.get_bucket(Some(key.clone()));
+        ub.lock().await.push(ms, is_ok, unavailable, 0, 0);
+    }
+
     /// 仅累加 tokens(不增加 req 计数/不写入延迟样本,用于 charge 函数结算处补记 TPM 数据)。
     pub async fn record_metrics_tokens(
         &self,
