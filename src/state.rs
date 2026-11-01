@@ -1582,6 +1582,37 @@ mod tests {
 
     // --- 白盒 3:MetricsStore push_tokens_only 不污染 req/samples ---
     #[tokio::test]
+    async fn user_queue_acquire_with_wait() {
+        // 排队语义:名额满时进入 waiting 计数,有空位即放行;超时返回 None 且计数归零。
+        let u = Arc::new(UserState::new(Uuid::new_v4(), "q", 1_000_000, 0, 1, 0, 1.0, 0, 0));
+        let g1 = u.try_acquire().expect("首个名额应成功");
+        assert_eq!(u.in_flight.load(Ordering::Relaxed), 1);
+
+        // 满员:wait=0 立即拒绝,waiting 不应留下残留。
+        assert!(u.acquire_with_wait(Duration::ZERO).await.is_none());
+        assert_eq!(u.waiting.load(Ordering::Relaxed), 0);
+
+        // 满员排队:期间 waiting=1;释放名额后在等待窗口内拿到 guard。
+        let u2 = Arc::clone(&u);
+        let waiter = tokio::spawn(async move { u2.acquire_with_wait(Duration::from_secs(2)).await });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(u.waiting.load(Ordering::Relaxed), 1, "排队期间 waiting 应为 1");
+        drop(g1); // 释放名额
+        let got = waiter.await.expect("join").expect("释放后应在超时前拿到名额");
+        assert_eq!(u.waiting.load(Ordering::Relaxed), 0, "成功获取后 waiting 应归零");
+        assert_eq!(u.in_flight.load(Ordering::Relaxed), 1);
+        drop(got);
+
+        // 超时路径:满员且无人释放,等满窗口返回 None,waiting 归零。
+        let g3 = u.try_acquire().expect("重新占满");
+        let t0 = std::time::Instant::now();
+        assert!(u.acquire_with_wait(Duration::from_millis(120)).await.is_none());
+        assert!(t0.elapsed() >= Duration::from_millis(110), "应等满窗口而非立即拒绝");
+        assert_eq!(u.waiting.load(Ordering::Relaxed), 0, "超时后 waiting 应归零");
+        drop(g3);
+    }
+
+    #[tokio::test]
     async fn metrics_store_push_tokens_only_is_side_effect_free() {
         let store = MetricsStore::default();
         let key = UpstreamKey::new(ProviderKind::Openai, "http://x", Some("k"));

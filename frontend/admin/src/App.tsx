@@ -6658,7 +6658,7 @@ function RealtimeCards() {
                       <div className="h-1.5 w-28 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
                         <div
                           className={cn("h-full rounded-full", u.limit > 0 && pct >= 90 ? "bg-rose-500" : u.limit > 0 && pct >= 70 ? "bg-amber-500" : "bg-indigo-500")}
-                          style={{ width: `${u.limit > 0 ? Math.max(pct, 4) : 100}%` }}
+                          style={{ width: `${u.limit > 0 ? Math.max(pct, 4) : 0}%` }}
                         />
                       </div>
                       <span className="ml-2 text-[11px] text-slate-400">{u.limit > 0 ? `${pct}%` : ""}</span>
@@ -6688,6 +6688,7 @@ function MetricsPanel() {
   const [tab, setTab] = useState<"live" | "trend">("live");
 
   useEffect(() => {
+    if (tab !== "trend") return; // 实时 Tab 不拉趋势数据
     let cancelled = false;
     (async () => {
       setBusy(true);
@@ -6785,12 +6786,14 @@ function MetricsPanel() {
     return () => {
       cancelled = true;
     };
-  }, [range, tick]);
+  }, [range, tick, tab]);
 
+  // 15s 自动刷新仅在趋势 Tab 生效;实时 Tab 由 RealtimeCards 自带 5s 采样,避免双路轮询空转。
   useEffect(() => {
+    if (tab !== "trend") return;
     const t = window.setInterval(() => setTick((x) => x + 1), 15_000);
     return () => window.clearInterval(t);
-  }, []);
+  }, [tab]);
 
   const s = data?.summary;
   const series = data?.series ?? [];
@@ -6842,10 +6845,11 @@ function MetricsPanel() {
         )}
       </div>
 
-      {tab === "live" ? (
+      {/* 两个 Tab 均保持挂载,仅用 CSS 切换显隐:切回时采样历史/趋势数据不丢失 */}
+      <div className={tab === "live" ? "" : "hidden"}>
         <RealtimeCards />
-      ) : (
-        <>
+      </div>
+      <div className={tab === "trend" ? "" : "hidden"}>
       {/* 窗口趋势分析区 */}
       <p className="pt-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
         窗口趋势分析({RANGE_PRESETS.find((p) => p.secs === range)?.label ?? "自定义"})
@@ -7052,8 +7056,7 @@ function MetricsPanel() {
           </div>
         </CardContent>
       </Card>
-        </>
-      )}
+      </div>
     </div>
   );
 }
