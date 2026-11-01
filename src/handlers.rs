@@ -1755,7 +1755,10 @@ fn anthropic_passthrough_stream(
     trace: RunTrace,
 ) -> Response {
     let hdrs = relay_headers(&provider_name, &trace.request_id);
-    let s = async_stream::stream! {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
+    // 独立 task 承担透传 + 结算(与 stream_response 同理:task 内代码保证执行完毕,
+    // 不受客户端断开影响;客户端断开时 tx.send 返回 Err 精确感知)。
+    tokio::spawn(async move {
         let mut trace = trace;
         let _guard = guard;
         let _group_slots = group_slots;
@@ -1765,6 +1768,7 @@ fn anthropic_passthrough_stream(
         let mut input = 0u32;
         let mut output = 0u32;
         let mut stream_ok = true;
+        let mut client_gone = false;
         while let Some(item) = upstream.next().await {
             match item {
                 Ok(bytes) => {
@@ -1773,13 +1777,16 @@ fn anthropic_passthrough_stream(
                     }
                     // 透传 Anthropic 事件:行缓冲后 JSON 级改写 model 名,同时扫 usage。
                     let out = rw.feed(&bytes, &model, &mut input, &mut output);
-                    if !out.is_empty() {
-                        yield Ok::<Bytes, std::io::Error>(Bytes::from(out));
+                    if !out.is_empty() && tx.send(Ok(Bytes::from(out))).await.is_err() {
+                        client_gone = true;
+                        break;
                     }
                 }
                 Err(e) => {
                     stream_ok = false;
-                    yield Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                    let _ = tx
+                        .send(Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+                        .await;
                     break;
                 }
             }
@@ -1787,14 +1794,21 @@ fn anthropic_passthrough_stream(
         if stream_ok {
             let tail = rw.finish();
             if !tail.is_empty() {
-                yield Ok(Bytes::from(tail));
+                let _ = tx.send(Ok(Bytes::from(tail))).await;
             }
         }
+        drop(upstream);
         // 部分产出的 token 照实入账;失败流按失败收口(不虚记成功)并让熔断感知。
         let charged = ((input as f64 + output as f64) * multiplier * user.bill_multiplier()).round() as i64;
         user.deduct(charged);
         user.record_tokens(input.saturating_add(output));
-        let status = if stream_ok { 200u16 } else { crate::state::METRIC_STATUS_UNAVAILABLE };
+        let status = if client_gone {
+            crate::state::METRIC_STATUS_CLIENT_CLOSED
+        } else if stream_ok {
+            200u16
+        } else {
+            crate::state::METRIC_STATUS_UNAVAILABLE
+        };
         let _ = state.usage_tx.send(UsageEvent {
             user_id: user.id, key_id, cost_usd: 0.0, bill_multiplier: multiplier * user.bill_multiplier(),
             model: model.clone(), provider: provider_name.clone(),
@@ -1803,11 +1817,21 @@ fn anthropic_passthrough_stream(
         }).await;
         let k = UpstreamKey::new(ProviderKind::Anthropic, &base_url, api_key.as_deref());
         state.record_metrics_tokens(Some(&k), input as u64, output as u64).await;
-        if stream_ok {
+        if client_gone {
+            // 客户端中途断开:已产出 tokens 照常计费,审计日志记 499,不动熔断。
+            trace.emit_error(&state, crate::state::METRIC_STATUS_CLIENT_CLOSED as i32).await;
+        } else if stream_ok {
             trace.emit_success(&state, input, output, charged).await;
         } else {
             state.breaker_unavailable(&k).await;
             trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
+        }
+    });
+    // 外层生成器只做 rx → Stream 的桥接,drop 无副作用。
+    let s = async_stream::stream! {
+        let mut rx = rx;
+        while let Some(item) = rx.recv().await {
+            yield item;
         }
     };
     let mut resp = sse_response(s);
@@ -1857,7 +1881,10 @@ fn messages_openai_stream(
     trace: RunTrace,
 ) -> Response {
     let hdrs = relay_headers(&provider_name, &trace.request_id);
-    let s = async_stream::stream! {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
+    // 独立 task 承担翻译 + 结算(与 stream_response 同理:task 内代码保证执行完毕;
+    // 客户端断开时 tx.send 返回 Err,置位标志后由外层循环退出)。
+    tokio::spawn(async move {
         let mut trace = trace;
         let _guard = guard;
         let _group_slots = group_slots;
@@ -1872,9 +1899,20 @@ fn messages_openai_stream(
         let mut next_index = 0i64;
         let mut tool_map: std::collections::HashMap<u64, i64> = std::collections::HashMap::new();
         let msg_id = format!("msg_{}", &uuid::Uuid::new_v4().to_string()[..12]);
+        let mut client_gone = false;
 
-        while let Some(item) = upstream.next().await {
-            let bytes = match item { Ok(b) => { if trace.first_byte_ms.is_none() { trace.first_byte_ms = Some(trace.started.elapsed().as_millis() as u32); } b }, Err(e) => { yield Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())); break; } };
+        // 下发一个 Anthropic SSE 事件;客户端已断开时置位标志(外层循环检查后退出)。
+        macro_rules! send {
+            ($b:expr) => {
+                if tx.send(Ok($b)).await.is_err() {
+                    client_gone = true;
+                }
+            };
+        }
+
+        while !client_gone {
+            let Some(item) = upstream.next().await else { break };
+            let bytes = match item { Ok(b) => { if trace.first_byte_ms.is_none() { trace.first_byte_ms = Some(trace.started.elapsed().as_millis() as u32); } b }, Err(e) => { let _ = tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))).await; break; } };
             buf.extend_from_slice(&bytes);
             while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=pos).collect();
@@ -1890,7 +1928,7 @@ fn messages_openai_stream(
                 }
                 if !started {
                     started = true;
-                    yield Ok::<Bytes, std::io::Error>(a_event("message_start", json!({
+                    send!(a_event("message_start", json!({
                         "type":"message_start",
                         "message":{"id":msg_id,"type":"message","role":"assistant","model":model,"content":[],"stop_reason":Value::Null,"stop_sequence":Value::Null,"usage":{"input_tokens":input,"output_tokens":0}}
                     })));
@@ -1900,40 +1938,40 @@ fn messages_openai_stream(
                 if let Some(text) = delta.and_then(|d| d.get("reasoning").or_else(|| d.get("reasoning_content"))).and_then(|c| c.as_str()) {
                     if !text.is_empty() {
                         if !matches!(cur, Some((_, Blk::Think))) {
-                            if let Some((idx, _)) = cur { yield Ok(a_event("content_block_stop", json!({"type":"content_block_stop","index":idx}))); }
-                            yield Ok(a_event("content_block_start", json!({"type":"content_block_start","index":next_index,"content_block":{"type":"thinking","thinking":""}})));
+                            if let Some((idx, _)) = cur { send!(a_event("content_block_stop", json!({"type":"content_block_stop","index":idx}))); }
+                            send!(a_event("content_block_start", json!({"type":"content_block_start","index":next_index,"content_block":{"type":"thinking","thinking":""}})));
                             cur = Some((next_index, Blk::Think)); next_index += 1;
                         }
                         let idx = cur.unwrap().0;
-                        yield Ok(a_event("content_block_delta", json!({"type":"content_block_delta","index":idx,"delta":{"type":"thinking_delta","thinking":text}})));
+                        send!(a_event("content_block_delta", json!({"type":"content_block_delta","index":idx,"delta":{"type":"thinking_delta","thinking":text}})));
                     }
                 }
                 if let Some(text) = delta.and_then(|d| d.get("content")).and_then(|c| c.as_str()) {
                     if !text.is_empty() {
                         if !matches!(cur, Some((_, Blk::Text))) {
-                            if let Some((idx, _)) = cur { yield Ok(a_event("content_block_stop", json!({"type":"content_block_stop","index":idx}))); }
-                            yield Ok(a_event("content_block_start", json!({"type":"content_block_start","index":next_index,"content_block":{"type":"text","text":""}})));
+                            if let Some((idx, _)) = cur { send!(a_event("content_block_stop", json!({"type":"content_block_stop","index":idx}))); }
+                            send!(a_event("content_block_start", json!({"type":"content_block_start","index":next_index,"content_block":{"type":"text","text":""}})));
                             cur = Some((next_index, Blk::Text)); next_index += 1;
                         }
                         let idx = cur.unwrap().0;
-                        yield Ok(a_event("content_block_delta", json!({"type":"content_block_delta","index":idx,"delta":{"type":"text_delta","text":text}})));
+                        send!(a_event("content_block_delta", json!({"type":"content_block_delta","index":idx,"delta":{"type":"text_delta","text":text}})));
                     }
                 }
                 if let Some(tcs) = delta.and_then(|d| d.get("tool_calls")).and_then(|t| t.as_array()) {
                     for tc in tcs {
                         let oi = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
                         if !tool_map.contains_key(&oi) {
-                            if let Some((idx, _)) = cur { yield Ok(a_event("content_block_stop", json!({"type":"content_block_stop","index":idx}))); }
+                            if let Some((idx, _)) = cur { send!(a_event("content_block_stop", json!({"type":"content_block_stop","index":idx}))); }
                             let bidx = next_index; next_index += 1; tool_map.insert(oi, bidx);
                             let tid = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
                             let name = tc.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("");
-                            yield Ok(a_event("content_block_start", json!({"type":"content_block_start","index":bidx,"content_block":{"type":"tool_use","id":tid,"name":name,"input":{}}})));
+                            send!(a_event("content_block_start", json!({"type":"content_block_start","index":bidx,"content_block":{"type":"tool_use","id":tid,"name":name,"input":{}}})));
                             cur = Some((bidx, Blk::Tool));
                         }
                         if let Some(args) = tc.pointer("/function/arguments").and_then(|v| v.as_str()) {
                             if !args.is_empty() {
                                 let bidx = *tool_map.get(&oi).unwrap();
-                                yield Ok(a_event("content_block_delta", json!({"type":"content_block_delta","index":bidx,"delta":{"type":"input_json_delta","partial_json":args}})));
+                                send!(a_event("content_block_delta", json!({"type":"content_block_delta","index":bidx,"delta":{"type":"input_json_delta","partial_json":args}})));
                             }
                         }
                     }
@@ -1944,13 +1982,20 @@ fn messages_openai_stream(
             }
         }
 
-        if let Some((idx, _)) = cur { yield Ok(a_event("content_block_stop", json!({"type":"content_block_stop","index":idx}))); }
+        if let Some((idx, _)) = cur { send!(a_event("content_block_stop", json!({"type":"content_block_stop","index":idx}))); }
         if started {
             let stop = crate::translate::map_finish_to_stop(finish.as_deref());
-            yield Ok(a_event("message_delta", json!({"type":"message_delta","delta":{"stop_reason":stop,"stop_sequence":Value::Null},"usage":{"output_tokens":output}})));
-            yield Ok(a_event("message_stop", json!({"type":"message_stop"})));
+            send!(a_event("message_delta", json!({"type":"message_delta","delta":{"stop_reason":stop,"stop_sequence":Value::Null},"usage":{"output_tokens":output}})));
+            send!(a_event("message_stop", json!({"type":"message_stop"})));
         }
         anth_charge(&state, &user, key_id, input, output, multiplier, model, provider_name, upstream_model, kind, &base_url, api_key.as_deref(), Some(trace.request_id.clone()), trace).await;
+    });
+    // 外层生成器只做 rx → Stream 的桥接,drop 无副作用。
+    let s = async_stream::stream! {
+        let mut rx = rx;
+        while let Some(item) = rx.recv().await {
+            yield item;
+        }
     };
     let mut resp = sse_response(s);
     apply_relay_headers(&mut resp, &hdrs);
@@ -2036,10 +2081,15 @@ fn cache_wrap(
         .unwrap_or(if is_stream { "text/event-stream" } else { "application/json" })
         .to_string();
     let upstream = body.into_data_stream();
-    let s = async_stream::stream! {
+    // 独立 task 承担透传 + 缓存累积:缓存写回在 task 内保证执行。
+    // (async_stream 方案的坑:客户端读毕响应立即断开时 hyper 停止 poll,
+    //  生成器被 drop,yield 之后的缓存写回永远不会执行,流式响应永远不进缓存。)
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, axum::Error>>(16);
+    tokio::spawn(async move {
         let mut upstream = upstream;
         let mut buf: Vec<u8> = Vec::new();
-        let mut complete = true;
+        let mut complete = true; // 上游是否自然 EOF(截断/错误流不可缓存)
+        let mut client_gone = false;
         // 超过单条上限即提前放弃缓存:清空累积并继续透传(逃生口兜底,不让大响应卡住链路)。
         let max_body = crate::semantic_cache::MAX_BODY;
         let mut caching = true;
@@ -2053,7 +2103,10 @@ fn cache_wrap(
                     if caching {
                         buf.extend_from_slice(&b);
                     }
-                    yield Ok::<Bytes, axum::Error>(b);
+                    if tx.send(Ok(b)).await.is_err() {
+                        client_gone = true;
+                        break;
+                    }
                 }
                 Err(_) => {
                     complete = false;
@@ -2061,7 +2114,9 @@ fn cache_wrap(
                 }
             }
         }
-        if caching && complete && !buf.is_empty() {
+        drop(upstream);
+        // 缓存写回:仅当上游自然 EOF 且客户端读到了完整响应(中途断开与旧行为一致不写)。
+        if caching && complete && !client_gone && !buf.is_empty() {
             let body_bytes = Bytes::from(buf);
             let (input_tokens, output_tokens) =
                 crate::semantic_cache::extract_usage(&body_bytes, is_stream);
@@ -2095,6 +2150,13 @@ fn cache_wrap(
                     }
                 }
             }
+        }
+    });
+    // 外层生成器只做 rx → Stream 的桥接,drop 无副作用。
+    let s = async_stream::stream! {
+        let mut rx = rx;
+        while let Some(item) = rx.recv().await {
+            yield item;
         }
     };
     let mut resp = Response::from_parts(parts, Body::from_stream(s));
