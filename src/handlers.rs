@@ -43,7 +43,7 @@ pub struct RunTrace {
     pub latency_ms: u32,
     /// 请求体预览(截断到 body_preview_max_bytes)。
     pub req_preview: Option<String>,
-    /// 响应体预览(仅非流式响应捕获;流式为 None)。
+    /// 响应体预览(非流式为完整 JSON 截断;流式为改写后 SSE 输出头部截断)。
     pub resp_preview: Option<String>,
 }
 
@@ -112,6 +112,35 @@ fn resp_preview_of(state: &AppState, v: &Value) -> Option<String> {
         return None;
     }
     reqlog::body_preview(&serde_json::to_vec(v).unwrap_or_default(), max)
+}
+
+/// 流式响应预览累积器:抓取改写后下发的 SSE 字节头部,截断到 body_preview_max_bytes,
+/// 结算时写入 request_logs.resp_body —— 让流式请求在调用日志里也能看到响应内容预览。
+/// 与非流式的 resp_preview_of 同一配置开关(0=关闭);只存头部,不放大内存占用。
+struct StreamPreview {
+    buf: Vec<u8>,
+    max: usize,
+}
+
+impl StreamPreview {
+    fn new(state: &AppState) -> Self {
+        Self { buf: Vec::new(), max: state.config.load().logging.body_preview_max_bytes }
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        if self.buf.len() < self.max {
+            let take = (self.max - self.buf.len()).min(bytes.len());
+            self.buf.extend_from_slice(&bytes[..take]);
+        }
+    }
+
+    /// 结算:UTF-8 边界安全截断;未捕获到内容(关闭/空流)返回 None。
+    fn finish(self) -> Option<String> {
+        if self.buf.is_empty() {
+            return None;
+        }
+        reqlog::body_preview(&self.buf, self.max)
+    }
 }
 
 /// 构造候选初始列表(weight 填充,status 未定)。
@@ -1020,19 +1049,23 @@ fn anthropic_stream_response(
         // Anthropic content block index -> OpenAI tool_call index。
         let mut block_to_tool: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
         let mut next_tool = 0usize;
+        let mut preview = StreamPreview::new(&state);
 
         // 起始 chunk:role。失败即客户端未消费,置位后跳过上游读取。
         let first = Bytes::from(oai_chunk(&id, &model, json!({"role":"assistant"}), None));
+        preview.push(&first);
         let mut client_gone = tx.send(Ok(first)).await.is_err();
 
         // 下发一个 SSE chunk;客户端已断开时置位标志(外层循环检查后退出,
         // 当前 chunk 内残余行的下发失败无害,只是对已关闭 channel 的快速 no-op)。
         macro_rules! send {
-            ($b:expr) => {
-                if tx.send(Ok($b)).await.is_err() {
+            ($b:expr) => {{
+                let b = $b;
+                preview.push(b.as_ref());
+                if tx.send(Ok(b)).await.is_err() {
                     client_gone = true;
                 }
-            };
+            }};
         }
 
         while !client_gone {
@@ -1120,6 +1153,7 @@ fn anthropic_stream_response(
         // 起始 chunk:role(放在循环前后不影响语义,挪到连接建立后第一发)。
         // 尽早关闭上游连接(客户端已断开时不浪费上游流量)。
         drop(upstream);
+        trace.resp_preview = preview.finish();
 
         // ---- 结算(task 内,保证执行) ----
         let charged = ((input as f64 + output as f64) * multiplier * user.bill_multiplier()).round() as i64;
@@ -1765,6 +1799,7 @@ fn anthropic_passthrough_stream(
         let _slot = slot;
         let mut upstream = resp.bytes_stream();
         let mut rw = SseRewriter::new(SseFlavor::AnthropicPassthrough);
+        let mut preview = StreamPreview::new(&state);
         let mut input = 0u32;
         let mut output = 0u32;
         let mut stream_ok = true;
@@ -1777,9 +1812,12 @@ fn anthropic_passthrough_stream(
                     }
                     // 透传 Anthropic 事件:行缓冲后 JSON 级改写 model 名,同时扫 usage。
                     let out = rw.feed(&bytes, &model, &mut input, &mut output);
-                    if !out.is_empty() && tx.send(Ok(Bytes::from(out))).await.is_err() {
-                        client_gone = true;
-                        break;
+                    if !out.is_empty() {
+                        preview.push(&out);
+                        if tx.send(Ok(Bytes::from(out))).await.is_err() {
+                            client_gone = true;
+                            break;
+                        }
                     }
                 }
                 Err(e) => {
@@ -1794,10 +1832,12 @@ fn anthropic_passthrough_stream(
         if stream_ok {
             let tail = rw.finish();
             if !tail.is_empty() {
+                preview.push(&tail);
                 let _ = tx.send(Ok(Bytes::from(tail))).await;
             }
         }
         drop(upstream);
+        trace.resp_preview = preview.finish();
         // 部分产出的 token 照实入账;失败流按失败收口(不虚记成功)并让熔断感知。
         let charged = ((input as f64 + output as f64) * multiplier * user.bill_multiplier()).round() as i64;
         user.deduct(charged);
@@ -1900,14 +1940,17 @@ fn messages_openai_stream(
         let mut tool_map: std::collections::HashMap<u64, i64> = std::collections::HashMap::new();
         let msg_id = format!("msg_{}", &uuid::Uuid::new_v4().to_string()[..12]);
         let mut client_gone = false;
+        let mut preview = StreamPreview::new(&state);
 
         // 下发一个 Anthropic SSE 事件;客户端已断开时置位标志(外层循环检查后退出)。
         macro_rules! send {
-            ($b:expr) => {
-                if tx.send(Ok($b)).await.is_err() {
+            ($b:expr) => {{
+                let b = $b;
+                preview.push(b.as_ref());
+                if tx.send(Ok(b)).await.is_err() {
                     client_gone = true;
                 }
-            };
+            }};
         }
 
         while !client_gone {
@@ -1988,6 +2031,7 @@ fn messages_openai_stream(
             send!(a_event("message_delta", json!({"type":"message_delta","delta":{"stop_reason":stop,"stop_sequence":Value::Null},"usage":{"output_tokens":output}})));
             send!(a_event("message_stop", json!({"type":"message_stop"})));
         }
+        trace.resp_preview = preview.finish();
         anth_charge(&state, &user, key_id, input, output, multiplier, model, provider_name, upstream_model, kind, &base_url, api_key.as_deref(), Some(trace.request_id.clone()), trace).await;
     });
     // 外层生成器只做 rx → Stream 的桥接,drop 无副作用。
@@ -2211,6 +2255,7 @@ fn stream_response(
         let mut upstream = resp.bytes_stream();
         // 行缓冲 + JSON 级改写:修复跨 chunk 边界漏改(模型名泄露 / reasoning 漏转换)与值内容误伤。
         let mut rw = SseRewriter::new(SseFlavor::OpenaiChat);
+        let mut preview = StreamPreview::new(&state);
         let mut input = 0u32;
         let mut output = 0u32;
         let mut stream_ok = true;
@@ -2223,9 +2268,12 @@ fn stream_response(
                         trace.first_byte_ms = Some(trace.started.elapsed().as_millis() as u32);
                     }
                     let out = rw.feed(&bytes, &model, &mut input, &mut output);
-                    if !out.is_empty() && tx.send(Ok(Bytes::from(out))).await.is_err() {
-                        client_gone = true;
-                        break;
+                    if !out.is_empty() {
+                        preview.push(&out);
+                        if tx.send(Ok(Bytes::from(out))).await.is_err() {
+                            client_gone = true;
+                            break;
+                        }
                     }
                 }
                 Err(e) => {
@@ -2240,11 +2288,13 @@ fn stream_response(
         if stream_ok {
             let tail = rw.finish();
             if !tail.is_empty() {
+                preview.push(&tail);
                 let _ = tx.send(Ok(Bytes::from(tail))).await;
             }
         }
         // 尽早关闭上游连接(客户端已断开时不浪费上游流量)。
         drop(upstream);
+        trace.resp_preview = preview.finish();
 
         // ---- 结算(task 内,保证执行) ----
         let charged =
