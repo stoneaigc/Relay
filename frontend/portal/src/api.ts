@@ -95,6 +95,8 @@ export interface QuotaInfo {
 export interface PlanCard {
   id: string; name: string; token_quota: number; validity_days: number;
   price_cents: number; description: string | null;
+  reset_period?: "none" | "daily" | "weekly" | "monthly";
+  purchase_limit?: number;
 }
 
 export const api = {

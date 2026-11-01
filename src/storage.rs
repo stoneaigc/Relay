@@ -394,6 +394,28 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {    let is_pg = backe
         let _ = q!("ALTER TABLE users ADD COLUMN IF NOT EXISTS initial_password TEXT")
             .execute(pool)
             .await;
+        // 套餐增强(旧库补列):重置周期/购买上限/升降级分组 + 桶上的周期重置三列。
+        let _ = q!("ALTER TABLE plans ADD COLUMN IF NOT EXISTS reset_period TEXT NOT NULL DEFAULT 'none'")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE plans ADD COLUMN IF NOT EXISTS purchase_limit BIGINT NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE plans ADD COLUMN IF NOT EXISTS upgrade_user_group_id BIGINT")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE plans ADD COLUMN IF NOT EXISTS downgrade_user_group_id BIGINT")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE user_plan_quota ADD COLUMN IF NOT EXISTS plan_quota BIGINT NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE user_plan_quota ADD COLUMN IF NOT EXISTS next_reset_at BIGINT NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
+        let _ = q!("ALTER TABLE user_plan_quota ADD COLUMN IF NOT EXISTS period_secs BIGINT NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await;
         // 用量日志:密钥归因 + 计费口径成本(USD)。
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS key_id TEXT")
             .execute(pool)
@@ -409,6 +431,14 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {    let is_pg = backe
         let _ = q!("ALTER TABLE reward_claims ADD COLUMN task_id INTEGER").execute(pool).await;
         // 用户显示名(中文昵称):SQLite 不支持 ADD COLUMN IF NOT EXISTS,用 PRAGMA 判存在后补列。
         ensure_sqlite_column(pool, "users", "display_name", "TEXT").await;
+        // 套餐增强(旧库补列):重置周期/购买上限/升降级分组 + 桶上的周期重置三列。
+        ensure_sqlite_column(pool, "plans", "reset_period", "TEXT NOT NULL DEFAULT 'none'").await;
+        ensure_sqlite_column(pool, "plans", "purchase_limit", "INTEGER NOT NULL DEFAULT 0").await;
+        ensure_sqlite_column(pool, "plans", "upgrade_user_group_id", "BIGINT").await;
+        ensure_sqlite_column(pool, "plans", "downgrade_user_group_id", "BIGINT").await;
+        ensure_sqlite_column(pool, "user_plan_quota", "plan_quota", "INTEGER NOT NULL DEFAULT 0").await;
+        ensure_sqlite_column(pool, "user_plan_quota", "next_reset_at", "INTEGER NOT NULL DEFAULT 0").await;
+        ensure_sqlite_column(pool, "user_plan_quota", "period_secs", "INTEGER NOT NULL DEFAULT 0").await;
         let _ = q!("ALTER TABLE users ADD COLUMN bill_multiplier REAL NOT NULL DEFAULT 1.0")
             .execute(pool)
             .await;
@@ -490,6 +520,9 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {    let is_pg = backe
             .await;
         // ---------- 套餐机制 ----------
         // 套餐定义:一次发放含 N token、有效期 M 天;售价字段为付费功能预留。
+        // reset_period: 额度重置周期(none/daily/weekly/monthly,固定秒数近似月);
+        // purchase_limit: 同一用户可获取该套餐的次数上限(0=不限,仅约束购买/充值类发放);
+        // upgrade/downgrade_user_group_id: 购买升级分组 / 到期降级分组(NULL=不变)。
         let _ = q!(
             "CREATE TABLE IF NOT EXISTS plans (
                 id TEXT PRIMARY KEY,
@@ -499,6 +532,10 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {    let is_pg = backe
                 price_cents INTEGER NOT NULL DEFAULT 0,
                 description TEXT NOT NULL DEFAULT '',
                 enabled INTEGER NOT NULL DEFAULT 1,
+                reset_period TEXT NOT NULL DEFAULT 'none',
+                purchase_limit INTEGER NOT NULL DEFAULT 0,
+                upgrade_user_group_id BIGINT,
+                downgrade_user_group_id BIGINT,
                 created_at TEXT NOT NULL
             )"
         )
@@ -519,6 +556,7 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {    let is_pg = backe
         .execute(pool)
         .await;
         // 用户在某个套餐下的余量桶:扣费时按到期时间升序消费,耗尽后回落主余额。
+        // 周期重置套餐另记 plan_quota(每周期额度)/next_reset_at(下次重置时间)/period_secs(0=不重置)。
         let _ = q!(
             "CREATE TABLE IF NOT EXISTS user_plan_quota (
                 id TEXT PRIMARY KEY,
@@ -527,7 +565,10 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {    let is_pg = backe
                 remaining_tokens INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL,
                 source TEXT NOT NULL DEFAULT 'recharge',
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                plan_quota INTEGER NOT NULL DEFAULT 0,
+                next_reset_at INTEGER NOT NULL DEFAULT 0,
+                period_secs INTEGER NOT NULL DEFAULT 0
             )"
         )
         .execute(pool)
@@ -764,7 +805,7 @@ pub async fn load_into_memory(
     }
     // 套餐余量桶:按用户归拢进内存(扣费临期优先消费,随余额 flush 同批落库)。
     let bucket_rows = q!(
-        "SELECT q.id, q.user_id, q.plan_id, COALESCE(p.name, '') AS plan_name, q.remaining_tokens, q.expires_at
+        "SELECT q.id, q.user_id, q.plan_id, COALESCE(p.name, '') AS plan_name, q.remaining_tokens, q.expires_at, q.plan_quota, q.next_reset_at, q.period_secs
          FROM user_plan_quota q LEFT JOIN plans p ON p.id = q.plan_id
          ORDER BY q.user_id, q.expires_at ASC"
     )
@@ -780,6 +821,9 @@ pub async fn load_into_memory(
                 plan_name: r.get("plan_name"),
                 remaining_tokens: r.get("remaining_tokens"),
                 expires_at: r.get("expires_at"),
+                plan_quota: r.try_get("plan_quota").unwrap_or(0),
+                next_reset_at: r.try_get("next_reset_at").unwrap_or(0),
+                period_secs: r.try_get("period_secs").unwrap_or(0),
                 dirty: false,
             });
         }
@@ -2090,6 +2134,7 @@ pub async fn set_group_default_plan(pool: &Db, user_group_id: i64, plan_id: Opti
 pub async fn list_plans(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = q!(
         "SELECT p.id, p.name, p.token_quota, p.validity_days, p.price_cents, p.description, p.enabled, p.created_at, \
+                p.reset_period, p.purchase_limit, p.upgrade_user_group_id, p.downgrade_user_group_id, \
                 (SELECT COUNT(*) FROM user_group_plans gp WHERE gp.plan_id = p.id) AS group_count, \
                 (SELECT COUNT(*) FROM user_plan_quota q WHERE q.plan_id = p.id) AS issued_count
          FROM plans p ORDER BY p.created_at DESC"
@@ -2107,6 +2152,10 @@ pub async fn list_plans(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
                 "price_cents": r.get::<i64, _>("price_cents"),
                 "description": r.get::<String, _>("description"),
                 "enabled": r.get::<i64, _>("enabled") != 0,
+                "reset_period": r.try_get::<String, _>("reset_period").unwrap_or_else(|_| "none".into()),
+                "purchase_limit": r.try_get::<i64, _>("purchase_limit").unwrap_or(0),
+                "upgrade_user_group_id": r.try_get::<Option<i64>, _>("upgrade_user_group_id").ok().flatten(),
+                "downgrade_user_group_id": r.try_get::<Option<i64>, _>("downgrade_user_group_id").ok().flatten(),
                 "group_count": r.get::<i64, _>("group_count"),
                 "issued_count": r.get::<i64, _>("issued_count"),
                 "created_at": r.get::<String, _>("created_at"),
@@ -2115,7 +2164,8 @@ pub async fn list_plans(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
         .collect())
 }
 
-/// 新建套餐,返回完整行。
+/// 新建套餐,返回完整行。reset_period ∈ none|daily|weekly|monthly(none=一次性额度)。
+#[allow(clippy::too_many_arguments)]
 pub async fn create_plan(
     pool: &Db,
     name: &str,
@@ -2123,15 +2173,23 @@ pub async fn create_plan(
     validity_days: i64,
     price_cents: i64,
     description: &str,
+    reset_period: &str,
+    purchase_limit: i64,
+    upgrade_user_group_id: Option<i64>,
+    downgrade_user_group_id: Option<i64>,
 ) -> anyhow::Result<serde_json::Value> {
     let id = uuid::Uuid::new_v4().to_string();
-    q!("INSERT INTO plans (id, name, token_quota, validity_days, price_cents, description, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)")
+    q!("INSERT INTO plans (id, name, token_quota, validity_days, price_cents, description, enabled, reset_period, purchase_limit, upgrade_user_group_id, downgrade_user_group_id, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)")
         .bind(&id)
         .bind(name)
         .bind(token_quota)
         .bind(validity_days)
         .bind(price_cents)
         .bind(description)
+        .bind(reset_period)
+        .bind(purchase_limit)
+        .bind(upgrade_user_group_id)
+        .bind(downgrade_user_group_id)
         .bind(now_iso())
         .execute(pool)
         .await?;
@@ -2139,10 +2197,14 @@ pub async fn create_plan(
         "id": id, "name": name, "token_quota": token_quota,
         "validity_days": validity_days, "price_cents": price_cents,
         "description": description, "enabled": true,
+        "reset_period": reset_period, "purchase_limit": purchase_limit,
+        "upgrade_user_group_id": upgrade_user_group_id,
+        "downgrade_user_group_id": downgrade_user_group_id,
     }))
 }
 
 /// 更新套餐(全量字段);返回是否存在。
+#[allow(clippy::too_many_arguments)]
 pub async fn update_plan(
     pool: &Db,
     id: &str,
@@ -2152,14 +2214,22 @@ pub async fn update_plan(
     price_cents: i64,
     description: &str,
     enabled: bool,
+    reset_period: &str,
+    purchase_limit: i64,
+    upgrade_user_group_id: Option<i64>,
+    downgrade_user_group_id: Option<i64>,
 ) -> anyhow::Result<bool> {
-    let r = q!("UPDATE plans SET name = ?, token_quota = ?, validity_days = ?, price_cents = ?, description = ?, enabled = ? WHERE id = ?")
+    let r = q!("UPDATE plans SET name = ?, token_quota = ?, validity_days = ?, price_cents = ?, description = ?, enabled = ?, reset_period = ?, purchase_limit = ?, upgrade_user_group_id = ?, downgrade_user_group_id = ? WHERE id = ?")
         .bind(name)
         .bind(token_quota)
         .bind(validity_days)
         .bind(price_cents)
         .bind(description)
         .bind(enabled as i64)
+        .bind(reset_period)
+        .bind(purchase_limit)
+        .bind(upgrade_user_group_id)
+        .bind(downgrade_user_group_id)
         .bind(id)
         .execute(pool)
         .await?;
@@ -2177,9 +2247,32 @@ pub async fn delete_plan(pool: &Db, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 用户已获取某套餐的次数(含已过期桶;购买上限预检用)。
+pub async fn user_plan_purchase_count(pool: &Db, user_id: Uuid, plan_id: &str) -> anyhow::Result<i64> {
+    Ok(q!("SELECT COUNT(*) AS n FROM user_plan_quota WHERE user_id = ? AND plan_id = ?")
+        .bind(user_id.to_string())
+        .bind(plan_id)
+        .fetch_one(pool)
+        .await?
+        .get::<i64, _>("n"))
+}
+
+/// 重置周期 → 秒数(monthly 以固定 30 天近似,与 validity_days 的天口径保持一致)。
+pub fn reset_period_secs(period: &str) -> i64 {
+    match period {
+        "daily" => 86400,
+        "weekly" => 604800,
+        "monthly" => 2592000,
+        _ => 0,
+    }
+}
+
 /// 给用户发放一个套餐余量桶(充值/系统发放)。
-pub async fn grant_plan_quota(pool: &Db, user_id: Uuid, plan_id: &str, source: &str) -> anyhow::Result<serde_json::Value> {
-    let row = q!("SELECT name, token_quota, validity_days, enabled FROM plans WHERE id = ?")
+/// `enforce_limit`: 是否校验购买上限(true = 门户购买/自助充值路径;管理端手动发放传 false)。
+/// 周期重置套餐:桶上记 plan_quota/next_reset_at/period_secs,扣费路径惰性重置(见 state::deduct)。
+/// 升级分组:套餐配置了 upgrade_user_group_id 时,发放成功后把用户切到该用户组(返回 upgraded_group_id)。
+pub async fn grant_plan_quota(pool: &Db, user_id: Uuid, plan_id: &str, source: &str, enforce_limit: bool) -> anyhow::Result<serde_json::Value> {
+    let row = q!("SELECT name, token_quota, validity_days, enabled, reset_period, purchase_limit, upgrade_user_group_id FROM plans WHERE id = ?")
         .bind(plan_id)
         .fetch_optional(pool)
         .await?
@@ -2188,25 +2281,121 @@ pub async fn grant_plan_quota(pool: &Db, user_id: Uuid, plan_id: &str, source: &
     if enabled == 0 {
         anyhow::bail!("套餐已停用");
     }
+    // 购买上限:同一用户累计获取该套餐的桶数(含已过期)达到上限则拒绝。
+    let purchase_limit: i64 = row.try_get("purchase_limit").unwrap_or(0);
+    if enforce_limit && purchase_limit > 0 {
+        let count = q!("SELECT COUNT(*) AS n FROM user_plan_quota WHERE user_id = ? AND plan_id = ?")
+            .bind(user_id.to_string())
+            .bind(plan_id)
+            .fetch_one(pool)
+            .await?
+            .get::<i64, _>("n");
+        if count >= purchase_limit {
+            anyhow::bail!("已达到该套餐的购买上限({purchase_limit} 次)");
+        }
+    }
     let quota: i64 = row.get("token_quota");
     let days: i64 = row.get("validity_days");
+    let period: String = row.try_get("reset_period").unwrap_or_else(|_| "none".into());
+    let period_secs = reset_period_secs(&period);
+    let now = now_secs();
     let bucket_id = uuid::Uuid::new_v4().to_string();
-    let expires_at = now_secs() + days.max(1) * 86400;
-    q!("INSERT INTO user_plan_quota (id, user_id, plan_id, remaining_tokens, expires_at, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    let expires_at = now + days.max(1) * 86400;
+    let next_reset_at = if period_secs > 0 { now + period_secs } else { 0 };
+    q!("INSERT INTO user_plan_quota (id, user_id, plan_id, remaining_tokens, expires_at, source, created_at, plan_quota, next_reset_at, period_secs) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(&bucket_id)
         .bind(user_id.to_string())
         .bind(plan_id)
         .bind(quota)
         .bind(expires_at)
         .bind(source)
-        .bind(now_secs())
+        .bind(now)
+        .bind(quota)
+        .bind(next_reset_at)
+        .bind(period_secs)
         .execute(pool)
         .await?;
+    // 升级分组:配置了目标用户组且与当前不同时切换(DB),内存侧由调用方同步。
+    let upgrade_group: Option<i64> = row.try_get("upgrade_user_group_id").ok().flatten();
+    let mut upgraded_group: Option<i64> = None;
+    if let Some(gid) = upgrade_group {
+        if gid > 0 {
+            let cur = q!("SELECT COALESCE(user_group_id, 0) AS g FROM users WHERE id = ?")
+                .bind(user_id.to_string())
+                .fetch_optional(pool)
+                .await?
+                .map(|r| r.get::<i64, _>("g"))
+                .unwrap_or(0);
+            if cur != gid {
+                q!("UPDATE users SET user_group_id = ? WHERE id = ?")
+                    .bind(gid)
+                    .bind(user_id.to_string())
+                    .execute(pool)
+                    .await?;
+                upgraded_group = Some(gid);
+            }
+        }
+    }
     Ok(serde_json::json!({
         "id": bucket_id, "user_id": user_id, "plan_id": plan_id,
         "plan_name": row.get::<String, _>("name"),
         "remaining_tokens": quota, "expires_at": expires_at, "source": source,
+        "plan_quota": quota, "next_reset_at": next_reset_at, "period_secs": period_secs,
+        "upgraded_group_id": upgraded_group,
     }))
+}
+
+/// 套餐到期降级:扫描已过期桶,若套餐配置了降级组、用户当前组 == 该套餐的升级组
+/// (即确实由该套餐升上去),且用户不再持有该套餐的任何未过期桶 → 降级到降级组。
+/// 返回被降级的 (user_id, 新用户组) 列表,供调用方同步内存态。
+pub async fn downgrade_expired_plans(pool: &Db) -> anyhow::Result<Vec<(Uuid, i64)>> {
+    let rows = q!(
+        "SELECT p.upgrade_user_group_id AS up_gid, p.downgrade_user_group_id AS down_gid, q.user_id
+         FROM user_plan_quota q JOIN plans p ON p.id = q.plan_id
+         WHERE q.expires_at <= ? AND p.downgrade_user_group_id IS NOT NULL
+           AND p.downgrade_user_group_id > 0 AND p.upgrade_user_group_id IS NOT NULL",
+    )
+    .bind(now_secs())
+    .fetch_all(pool)
+    .await?;
+    let mut out: Vec<(Uuid, i64)> = Vec::new();
+    for r in rows {
+        let up_gid: i64 = r.get("up_gid");
+        let down_gid: i64 = r.get("down_gid");
+        let uid_str: String = r.get("user_id");
+        let Ok(uid) = Uuid::parse_str(&uid_str) else { continue };
+        // 用户当前组必须等于升级组(说明仍被该套餐类型托举),否则不动。
+        let cur = q!("SELECT COALESCE(user_group_id, 0) AS g FROM users WHERE id = ?")
+            .bind(&uid_str)
+            .fetch_optional(pool)
+            .await?
+            .map(|x| x.get::<i64, _>("g"))
+            .unwrap_or(0);
+        if cur != up_gid {
+            continue;
+        }
+        // 该用户还持有该套餐(或任何配置了同一升级组)的未过期桶 → 仍在有效期内,不降。
+        let active = q!(
+            "SELECT COUNT(*) AS n FROM user_plan_quota q JOIN plans p ON p.id = q.plan_id
+             WHERE q.user_id = ? AND q.expires_at > ? AND p.upgrade_user_group_id = ?"
+        )
+        .bind(&uid_str)
+        .bind(now_secs())
+        .bind(up_gid)
+        .fetch_one(pool)
+        .await?
+        .get::<i64, _>("n");
+        if active > 0 {
+            continue;
+        }
+        q!("UPDATE users SET user_group_id = ? WHERE id = ?")
+            .bind(down_gid)
+            .bind(&uid_str)
+            .execute(pool)
+            .await?;
+        out.push((uid, down_gid));
+    }
+    Ok(out)
 }
 
 /// 用户当前持有的套餐余量桶(含套餐名;过期桶也返回,前端标灰)。
@@ -2238,8 +2427,9 @@ pub async fn list_user_plan_quota(pool: &Db, user_id: Uuid) -> anyhow::Result<Ve
 /// 把内存中变动的套餐余量桶批量落库(随余额 flush 同批执行)。
 pub async fn flush_plan_buckets(pool: &Db, buckets: &[crate::state::PlanBucket]) -> anyhow::Result<()> {
     for b in buckets {
-        q!("UPDATE user_plan_quota SET remaining_tokens = ? WHERE id = ?")
+        q!("UPDATE user_plan_quota SET remaining_tokens = ?, next_reset_at = ? WHERE id = ?")
             .bind(b.remaining_tokens)
+            .bind(b.next_reset_at)
             .bind(&b.id)
             .execute(pool)
             .await?;

@@ -45,8 +45,34 @@ pub struct PlanBucket {
     pub remaining_tokens: i64,
     /// 过期时间(unix 秒)。
     pub expires_at: i64,
-    /// 自上次落盘以来是否被扣减。
+    /// 每周期重置的目标额度(0 = 旧数据/一次性套餐,不参与重置)。
+    pub plan_quota: i64,
+    /// 下次重置时间(unix 秒;0 = 不重置)。
+    pub next_reset_at: i64,
+    /// 重置周期秒数(0 = 不重置)。
+    pub period_secs: i64,
+    /// 自上次落盘以来是否被扣减/重置。
     pub dirty: bool,
+}
+
+impl PlanBucket {
+    /// 惰性周期重置:周期套餐到达重置点后把余量补满并推进重置点(扣费/展示前调用)。
+    /// 总有效期(expires_at)内才会重置;跨多个周期一次性追平。
+    fn maybe_reset(&mut self, now: i64) {
+        if self.period_secs <= 0 || self.next_reset_at <= 0 || self.plan_quota <= 0 {
+            return;
+        }
+        if self.expires_at <= now || now < self.next_reset_at {
+            return;
+        }
+        let mut next = self.next_reset_at;
+        while next <= now {
+            next += self.period_secs;
+        }
+        self.next_reset_at = next;
+        self.remaining_tokens = self.plan_quota;
+        self.dirty = true;
+    }
 }
 
 /// 单用户运行态。token 余额/并发都是原子量,落库异步进行。
@@ -337,12 +363,14 @@ impl UserState {
 
     /// 扣减 token:先按到期时间升序消费套餐余量桶(临期优先),耗尽后扣主余额。
     /// 允许扣到负数(让本次请求完成,下次再拒)。同时累计消耗量,与余额共享 dirty 标记、同批落库。
+    /// 消费前对周期重置套餐做惰性重置(到达重置点即补满,无需后台定时器)。
     pub fn deduct(&self, amount: i64) {
         let mut remaining = amount;
         {
             let mut buckets = self.buckets();
             let now = crate::storage::now_secs();
             for b in buckets.iter_mut() {
+                b.maybe_reset(now);
                 if remaining <= 0 {
                     break;
                 }
@@ -1492,6 +1520,70 @@ impl AppState {
 mod tests {
     use super::*;
     use crate::config::ProviderKind;
+
+    // --- 套餐余量桶:惰性周期重置 ---
+    fn bucket(quota: i64, remaining: i64, period: i64, next_reset: i64, expires: i64) -> PlanBucket {
+        PlanBucket {
+            id: "b1".into(),
+            plan_id: "p1".into(),
+            plan_name: "测试套餐".into(),
+            remaining_tokens: remaining,
+            expires_at: expires,
+            plan_quota: quota,
+            next_reset_at: next_reset,
+            period_secs: period,
+            dirty: false,
+        }
+    }
+
+    #[test]
+    fn plan_bucket_maybe_reset_single_period() {
+        // 周期 100s,配额 1000;已用剩 100,重置点 1000s,当前 1050s → 补满并推进到 1100。
+        let mut b = bucket(1000, 100, 100, 1000, 5000);
+        b.maybe_reset(1050);
+        assert_eq!(b.remaining_tokens, 1000);
+        assert_eq!(b.next_reset_at, 1100);
+        assert!(b.dirty);
+    }
+
+    #[test]
+    fn plan_bucket_maybe_reset_multi_period_catchup() {
+        // 跨多个周期一次性追平:重置点 1000,周期 100,当前 1330 → 推进到 1400(只补一次额度,不按周期叠加)。
+        let mut b = bucket(1000, 0, 100, 1000, 5000);
+        b.maybe_reset(1330);
+        assert_eq!(b.remaining_tokens, 1000);
+        assert_eq!(b.next_reset_at, 1400);
+    }
+
+    #[test]
+    fn plan_bucket_maybe_reset_noop_cases() {
+        // 未到重置点:不动。
+        let mut b = bucket(1000, 100, 100, 1000, 5000);
+        b.maybe_reset(999);
+        assert_eq!(b.remaining_tokens, 100);
+        assert!(!b.dirty);
+        // 已过总有效期:不重置(过期桶不再续命)。
+        let mut b2 = bucket(1000, 100, 100, 1000, 900);
+        b2.maybe_reset(1005);
+        assert_eq!(b2.remaining_tokens, 100);
+        // 一次性套餐(period=0):不动。
+        let mut b3 = bucket(1000, 100, 0, 0, 5000);
+        b3.maybe_reset(5000);
+        assert_eq!(b3.remaining_tokens, 100);
+    }
+
+    #[test]
+    fn deduct_triggers_lazy_reset() {
+        // deduct 消费路径触发惰性重置:重置点已过 → 先补满再扣。
+        let u = UserState::new(Uuid::new_v4(), "u", 0, 0, 0, 0, 1.0, 0, 0);
+        let now = crate::storage::now_secs();
+        u.buckets().push(bucket(1000, 50, 86400, now - 10, now + 86400 * 30));
+        u.deduct(10);
+        let bs = u.buckets();
+        assert_eq!(bs[0].remaining_tokens, 990);
+        assert!(bs[0].next_reset_at > now);
+        assert!(bs[0].dirty);
+    }
 
     // --- 白盒 1:MetricsBucket 计数与分位 ---
     #[test]

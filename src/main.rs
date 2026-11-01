@@ -403,6 +403,30 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // 后台:套餐到期降级(每 60s 扫一次过期桶;套餐配置了降级组且用户确实被其升级组托举时降级)。
+    tokio::spawn({
+        let state = Arc::clone(&state);
+        async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(60));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                match storage::downgrade_expired_plans(&state.db).await {
+                    Ok(downgraded) if !downgraded.is_empty() => {
+                        for (uid, gid) in downgraded {
+                            if let Some(u) = state.users.get(&uid) {
+                                u.user_group_id.store(gid, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            tracing::info!("套餐到期降级: user {uid} → 用户组 {gid}");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::error!("套餐到期降级扫描失败: {e}"),
+                }
+            }
+        }
+    });
+
     // ---- 门户 API(挂到 /portal/api)----
     let portal_api = Router::new()
         .route("/auth/login", post(portal::password_login))

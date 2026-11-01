@@ -853,7 +853,7 @@ async fn plan_exists_or_err(state: &AppState, plan_id: &str) -> Result<(), ApiEr
 #[derive(Deserialize)]
 pub struct PlanBody {
     pub name: String,
-    /// 套餐含 token 量。
+    /// 套餐含 token 量(周期重置套餐 = 每周期额度)。
     pub token_quota: i64,
     /// 有效期(天)。
     pub validity_days: i64,
@@ -864,6 +864,18 @@ pub struct PlanBody {
     pub description: String,
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// 额度重置周期:none | daily | weekly | monthly(默认 none = 一次性额度)。
+    #[serde(default)]
+    pub reset_period: String,
+    /// 同一用户可获取该套餐的次数上限(0 = 不限;仅约束购买/充值类发放)。
+    #[serde(default)]
+    pub purchase_limit: i64,
+    /// 购买后切换到的用户组(NULL = 不变)。
+    #[serde(default)]
+    pub upgrade_user_group_id: Option<i64>,
+    /// 到期降级到的用户组(NULL = 不变)。
+    #[serde(default)]
+    pub downgrade_user_group_id: Option<i64>,
 }
 
 /// GET /admin/api/plans
@@ -883,7 +895,15 @@ pub async fn create_plan(State(state): State<Arc<AppState>>, headers: HeaderMap,
     if body.token_quota <= 0 || body.validity_days <= 0 {
         return Err(ApiError::BadRequest("token 额度与有效期必须大于 0".into()));
     }
-    let plan = storage::create_plan(&state.db, name, body.token_quota, body.validity_days, body.price_cents, body.description.trim())
+    let rp = body.reset_period.trim();
+    let reset_period = if rp.is_empty() { "none" } else { rp };
+    if !["none", "daily", "weekly", "monthly"].contains(&reset_period) {
+        return Err(ApiError::BadRequest("重置周期仅支持 none / daily / weekly / monthly".into()));
+    }
+    if body.purchase_limit < 0 {
+        return Err(ApiError::BadRequest("购买上限不能为负(0 = 不限)".into()));
+    }
+    let plan = storage::create_plan(&state.db, name, body.token_quota, body.validity_days, body.price_cents, body.description.trim(), reset_period, body.purchase_limit, body.upgrade_user_group_id.filter(|g| *g > 0), body.downgrade_user_group_id.filter(|g| *g > 0))
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(plan))
@@ -901,7 +921,12 @@ pub async fn update_plan(
     if name.is_empty() {
         return Err(ApiError::BadRequest("套餐名称不能为空".into()));
     }
-    let ok = storage::update_plan(&state.db, &id, name, body.token_quota, body.validity_days, body.price_cents, body.description.trim(), body.enabled.unwrap_or(true))
+    let rp = body.reset_period.trim();
+    let reset_period = if rp.is_empty() { "none" } else { rp };
+    if !["none", "daily", "weekly", "monthly"].contains(&reset_period) {
+        return Err(ApiError::BadRequest("重置周期仅支持 none / daily / weekly / monthly".into()));
+    }
+    let ok = storage::update_plan(&state.db, &id, name, body.token_quota, body.validity_days, body.price_cents, body.description.trim(), body.enabled.unwrap_or(true), reset_period, body.purchase_limit, body.upgrade_user_group_id.filter(|g| *g > 0), body.downgrade_user_group_id.filter(|g| *g > 0))
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     if !ok {
@@ -933,10 +958,10 @@ pub struct GrantPlanBody {
 pub async fn grant_user_plan(State(state): State<Arc<AppState>>, headers: HeaderMap, Path(id): Path<Uuid>, Json(body): Json<GrantPlanBody>) -> Result<Json<Value>, ApiError> {
     admin_guard(&state, &headers)?;
     plan_exists_or_err(&state, &body.plan_id).await?;
-    let bucket = storage::grant_plan_quota(&state.db, id, &body.plan_id, "recharge")
+    let bucket = storage::grant_plan_quota(&state.db, id, &body.plan_id, "recharge", false)
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    // 同步内存:新桶追加(保持到期升序)。
+    // 同步内存:新桶追加(保持到期升序);套餐配置升级分组时一并切内存用户组。
     if let Some(u) = state.users.get(&id) {
         let mut buckets = u.buckets();
         buckets.push(crate::state::PlanBucket {
@@ -945,9 +970,15 @@ pub async fn grant_user_plan(State(state): State<Arc<AppState>>, headers: Header
             plan_name: bucket["plan_name"].as_str().unwrap_or_default().to_string(),
             remaining_tokens: bucket["remaining_tokens"].as_i64().unwrap_or(0),
             expires_at: bucket["expires_at"].as_i64().unwrap_or(0),
+            plan_quota: bucket["plan_quota"].as_i64().unwrap_or(0),
+            next_reset_at: bucket["next_reset_at"].as_i64().unwrap_or(0),
+            period_secs: bucket["period_secs"].as_i64().unwrap_or(0),
             dirty: false,
         });
         buckets.sort_by_key(|b| b.expires_at);
+        if let Some(gid) = bucket["upgraded_group_id"].as_i64() {
+            u.user_group_id.store(gid, std::sync::atomic::Ordering::Relaxed);
+        }
     }
     Ok(Json(bucket))
 }
@@ -4554,6 +4585,8 @@ pub async fn payment_notify(
         .await
         .map_err(|e| ApiError::BadRequest(format!("回调验签失败: {e}")))?;
     // TODO(支付接入): 验签通过后按 order_id 幂等确认订单,执行套餐发放/余额充值。
+    // 套餐发放必须走 storage::grant_plan_quota(..., enforce_limit=true)(购买上限兜底),
+    // 并按返回的 upgraded_group_id 同步内存用户组;发放失败需走退款/人工对账。
     Ok(Json(json!({ "ok": true, "order_id": order_id, "paid": paid })))
 }
 

@@ -320,10 +320,18 @@ impl Routing {
             targets.iter().map(|t| Target { model_id: t.model_id, priority: t.priority, weight: eff_weight(t), multiplier: t.multiplier, cache_enabled: t.cache_enabled }).collect()
         });
         let sort_targets: &[Target] = weighted_targets.as_deref().unwrap_or(targets);
+        // 时段覆盖权重时,auto 评分纳入第三因子(权重高的候选得分更低、更优先):
+        // 权重因子占 0.2,延迟/成本各 0.4;无时段覆盖时保持纯「延迟+成本」评分,行为不变。
+        let auto_weights: Option<Vec<u32>> = rule
+            .as_ref()
+            .map(|_| sort_targets.iter().map(|t| eff_weight(t)).collect());
         // 先按优先级分档(高→低,只有高档全不可用才降档),档内再按策略排序。
         let mut order: Vec<usize> = Vec::with_capacity(sort_targets.len());
         for (tier_rank, idxs) in priority_tiers(sort_targets).into_iter().enumerate() {
             let tier: Vec<Target> = idxs.iter().map(|&i| sort_targets[i].clone()).collect();
+            let tier_weights: Option<Vec<u32>> = auto_weights
+                .as_ref()
+                .map(|w| idxs.iter().map(|&i| w[i]).collect());
             let in_tier = match strategy {
                 // 加权轮询只对最高档做严格轮转;更低档只在容灾时用,保持随机次序即可。
                 Strategy::WeightedRoundRobin if tier_rank == 0 => {
@@ -331,7 +339,7 @@ impl Routing {
                 }
                 Strategy::WeightedRoundRobin => shuffle_weighted(&tier),
                 Strategy::WeightedRandom => shuffle_weighted(&tier),
-                Strategy::Auto => order_by_auto(&tier, &self.models, lat_p50),
+                Strategy::Auto => order_by_auto(&tier, &self.models, lat_p50, tier_weights.as_deref()),
             };
             order.extend(in_tier.into_iter().map(|j| idxs[j]));
         }
@@ -626,10 +634,14 @@ fn median(vals: &mut Vec<f64>) -> Option<f64> {
 /// - **冷启动探索**:无延迟数据的候选以 10% 概率被直接提到队首,保证能产生延迟样本
 ///   (仅靠中位数占位,在成本不同时仍会被永久压住)。
 /// - 同分随机(先洗牌再稳定排序)。
+/// 智能自适应排序:延迟 P50 与成本归一化后按 (0.5, 0.5) 加权;`weights` 为 Some 时
+/// (时段规则覆盖了路由权重)额外纳入权重因子:score = 0.4×lat + 0.4×cost + 0.2×(1-norm_weight),
+/// 让「高峰压向稳定供应商」的时段权重对 auto 也生效。得分低者排前。
 fn order_by_auto(
     targets: &[Target],
     models: &HashMap<i64, ModelDef>,
     lat_p50: &dashmap::DashMap<String, u64>,
+    weights: Option<&[u32]>,
 ) -> Vec<usize> {
     let n = targets.len();
     if n <= 1 {
@@ -642,6 +654,10 @@ fn order_by_auto(
     // 归一化基准取「填充后」的最大值,保证 0..1 区间。
     let max_lat = lats.iter().map(|v| v.or(med_lat)).flatten().fold(0.0f64, f64::max);
     let max_cost = costs.iter().map(|v| v.or(med_cost)).flatten().fold(0.0f64, f64::max);
+    // 权重归一化基准(权重全等时各候选同分,不改变延迟/成本决定的次序)。
+    let max_w = weights
+        .map(|ws| ws.iter().copied().fold(0u32, u32::max) as f64)
+        .unwrap_or(0.0);
     let norm = |v: Option<f64>, med: Option<f64>, max: f64| -> f64 {
         match v.or(med) {
             Some(x) if max > 0.0 => (x / max).clamp(0.0, 1.0),
@@ -650,7 +666,15 @@ fn order_by_auto(
     };
     let mut keyed: Vec<(usize, f64)> = (0..n)
         .map(|i| {
-            let score = 0.5 * norm(lats[i], med_lat, max_lat) + 0.5 * norm(costs[i], med_cost, max_cost);
+            let nl = norm(lats[i], med_lat, max_lat);
+            let nc = norm(costs[i], med_cost, max_cost);
+            let score = match (weights, max_w) {
+                (Some(ws), mw) if mw > 0.0 => {
+                    let w_norm = (ws.get(i).copied().unwrap_or(0) as f64 / mw).clamp(0.0, 1.0);
+                    0.4 * nl + 0.4 * nc + 0.2 * (1.0 - w_norm)
+                }
+                _ => 0.5 * nl + 0.5 * nc,
+            };
             (i, score)
         })
         .collect();
@@ -820,7 +844,7 @@ mod tests {
             Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
             Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
         ];
-        let order = order_by_auto(&targets, &models, &lat);
+        let order = order_by_auto(&targets, &models, &lat, None);
         assert_eq!(order[0], 1);
     }
 
@@ -834,8 +858,45 @@ mod tests {
             Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
             Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
         ];
-        let order = order_by_auto(&targets, &models, &lat);
+        let order = order_by_auto(&targets, &models, &lat, None);
         assert_eq!(order[0], 1);
+    }
+
+    /// 时段规则覆盖权重时,auto 评分纳入权重因子:延迟/成本完全相同时,权重最高者稳定置顶。
+    /// (无权重因子时二者中性随机,顺序不确定;有了 0.2 权重项后高权重候选得分更低。)
+    #[test]
+    fn auto_respects_overridden_weights() {
+        let mut models = HashMap::new();
+        models.insert(1, prov_model("p1", "gpt-4o-mini"));
+        models.insert(2, prov_model("p2", "gpt-4o-mini"));
+        let lat = lat_map(&[("p1", 300), ("p2", 300)]);
+        let targets = vec![
+            Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
+        ];
+        // p2 权重被时段覆盖为 300(远高于 p1 的 1)→ p2 应稳定排第一(下标 1)。
+        let order = order_by_auto(&targets, &models, &lat, Some(&[1, 300]));
+        assert_eq!(order[0], 1);
+        // 无权重因子(None)时不得改变行为:同延迟同价 → 随机,两种次序都可能出现;
+        // 这里只断言不 panic 且长度一致。
+        let order2 = order_by_auto(&targets, &models, &lat, None);
+        assert_eq!(order2.len(), 2);
+    }
+
+    /// 权重全等时权重因子对排序无影响(与 None 行为分布一致),避免时段覆盖误伤均匀分流。
+    #[test]
+    fn auto_equal_weights_have_no_effect() {
+        let mut models = HashMap::new();
+        models.insert(1, prov_model("p-fast", "gpt-4o-mini"));
+        models.insert(2, prov_model("p-slow", "gpt-4o-mini"));
+        let lat = lat_map(&[("p-fast", 200), ("p-slow", 800)]);
+        let targets = vec![
+            Target { model_id: 1, weight: 100, priority: 0, multiplier: 1.0, cache_enabled: false },
+            Target { model_id: 2, weight: 100, priority: 0, multiplier: 1.0, cache_enabled: false },
+        ];
+        // 快者稳定第一(权重相同,不干预)。
+        assert_eq!(order_by_auto(&targets, &models, &lat, Some(&[100, 100]))[0], 0);
+        assert_eq!(order_by_auto(&targets, &models, &lat, None)[0], 0);
     }
 
     /// 回归:无数据候选不能被永久排在最后(否则新上游永远拿不到流量 → 冷启动死锁)。
@@ -851,7 +912,7 @@ mod tests {
         ];
         let mut new_first = 0;
         for _ in 0..200 {
-            if order_by_auto(&targets, &models, &lat)[0] == 1 {
+            if order_by_auto(&targets, &models, &lat, None)[0] == 1 {
                 new_first += 1;
             }
         }
@@ -868,7 +929,7 @@ mod tests {
             Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
             Target { model_id: 2, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
         ];
-        let mut sorted = order_by_auto(&targets, &models, &lat);
+        let mut sorted = order_by_auto(&targets, &models, &lat, None);
         sorted.sort();
         assert_eq!(sorted, vec![0, 1]);
     }
@@ -883,16 +944,16 @@ mod tests {
             Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false },
             Target { model_id: 2, weight: 1, priority: 0, multiplier: 0.1, cache_enabled: false },
         ];
-        assert_eq!(order_by_auto(&targets, &models, &lat)[0], 1);
+        assert_eq!(order_by_auto(&targets, &models, &lat, None)[0], 1);
     }
 
     #[test]
     fn auto_empty_and_single() {
         let models: HashMap<i64, ModelDef> = HashMap::new();
         let lat = dashmap::DashMap::new();
-        assert!(order_by_auto(&[], &models, &lat).is_empty());
+        assert!(order_by_auto(&[], &models, &lat, None).is_empty());
         let one = vec![Target { model_id: 1, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false }];
-        assert_eq!(order_by_auto(&one, &models, &lat), vec![0]);
+        assert_eq!(order_by_auto(&one, &models, &lat, None), vec![0]);
     }
 
     // ---- resolve_priority(两级寻址) ----

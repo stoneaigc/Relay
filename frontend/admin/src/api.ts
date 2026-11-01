@@ -574,9 +574,9 @@ export const api = {
 
   // ---- 套餐管理 ----
   plans: (): Promise<{ data: PlanRow[] }> => req("/admin/api/plans"),
-  createPlan: (body: { name: string; token_quota: number; validity_days: number; price_cents?: number; description?: string }): Promise<PlanRow> =>
+  createPlan: (body: PlanBody): Promise<PlanRow> =>
     req("/admin/api/plans", { method: "POST", body: JSON.stringify(body) }),
-  updatePlan: (id: string, body: { name: string; token_quota: number; validity_days: number; price_cents?: number; description?: string; enabled?: boolean }): Promise<{ ok: boolean }> =>
+  updatePlan: (id: string, body: PlanBody): Promise<{ ok: boolean }> =>
     req(`/admin/api/plans/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   deletePlan: (id: string): Promise<{ ok: boolean }> => req(`/admin/api/plans/${id}`, { method: "DELETE" }),
   userPlanQuota: (userId: string): Promise<{ data: PlanQuotaRow[] }> => req(`/admin/api/users/${userId}/plan-quota`),
@@ -980,6 +980,8 @@ export interface RequestAttempt {
 }
 
 
+export type ResetPeriod = "none" | "daily" | "weekly" | "monthly";
+
 export interface PlanRow {
   id: string;
   name: string;
@@ -988,9 +990,26 @@ export interface PlanRow {
   price_cents: number;
   description: string;
   enabled: boolean;
+  reset_period?: ResetPeriod;
+  purchase_limit?: number;
+  upgrade_user_group_id?: number | null;
+  downgrade_user_group_id?: number | null;
   group_count?: number;
   issued_count?: number;
   created_at?: string;
+}
+
+export interface PlanBody {
+  name: string;
+  token_quota: number;
+  validity_days: number;
+  price_cents?: number;
+  description?: string;
+  reset_period?: ResetPeriod;
+  purchase_limit?: number;
+  upgrade_user_group_id?: number | null;
+  downgrade_user_group_id?: number | null;
+  enabled?: boolean;
 }
 
 export interface PlanQuotaRow {

@@ -279,7 +279,7 @@ pub async fn register(
     );
     // 默认套餐发放:所属用户组配置了 default_plan_id 时,注册即写入余量桶并同步内存。
     if let Some(plan_id) = default_group.as_ref().and_then(|g| g.default_plan_id.clone()) {
-        match storage::grant_plan_quota(&state.db, id, &plan_id, "grant").await {
+        match storage::grant_plan_quota(&state.db, id, &plan_id, "grant", false).await {
             Ok(bucket) => {
                 us.buckets().push(crate::state::PlanBucket {
                     id: bucket["id"].as_str().unwrap_or_default().to_string(),
@@ -287,6 +287,9 @@ pub async fn register(
                     plan_name: bucket["plan_name"].as_str().unwrap_or_default().to_string(),
                     remaining_tokens: bucket["remaining_tokens"].as_i64().unwrap_or(0),
                     expires_at: bucket["expires_at"].as_i64().unwrap_or(0),
+                    plan_quota: bucket["plan_quota"].as_i64().unwrap_or(0),
+                    next_reset_at: bucket["next_reset_at"].as_i64().unwrap_or(0),
+                    period_secs: bucket["period_secs"].as_i64().unwrap_or(0),
                     dirty: false,
                 });
             }
@@ -955,6 +958,17 @@ pub async fn create_payment_order(
         .ok_or_else(|| ApiError::BadRequest("套餐不存在".into()))?;
     if !plan.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
         return Err(ApiError::BadRequest("该套餐已下架".into()));
+    }
+    // 购买上限预检:同一用户累计获取该套餐的次数(含已过期)达到上限则下单即拒,
+    // 避免支付完成后才发现超限(发放回调处以 grant_plan_quota 的同规则兜底)。
+    let limit = plan.get("purchase_limit").and_then(|v| v.as_i64()).unwrap_or(0);
+    if limit > 0 {
+        let count = storage::user_plan_purchase_count(&state.db, uid, body.plan_id.trim())
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        if count >= limit {
+            return Err(ApiError::BadRequest(format!("已达到该套餐的购买上限({limit} 次)")));
+        }
     }
     let tokens = plan.get("token_quota").and_then(|v| v.as_i64()).unwrap_or(0);
     let amount = plan.get("price_cents").and_then(|v| v.as_i64()).unwrap_or(0);

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { Users as UsersIcon, UsersRound, KeyRound, Copy, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen, SlidersHorizontal, Undo2, Ban, ChevronRight, ArrowUp, ArrowDown, Inbox } from "lucide-react";
-import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, UserGroupRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint, AdminKeyRow, AdminApiKeyRow, PlanRow, PlanQuotaRow, UsageTrendPoint } from "./api";
+import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, UserGroupRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, PlanBody, ResetPeriod, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint, AdminKeyRow, AdminApiKeyRow, PlanRow, PlanQuotaRow, UsageTrendPoint } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -1168,6 +1168,8 @@ function PlansPanel() {
                 <TableHead>名称</TableHead>
                 <TableHead className="text-right">含 tokens</TableHead>
                 <TableHead className="text-right">有效期(天)</TableHead>
+                <TableHead className="text-right">重置周期</TableHead>
+                <TableHead className="text-right">购买上限</TableHead>
                 <TableHead className="text-right">售价(元)</TableHead>
                 <TableHead>说明</TableHead>
                 <TableHead className="text-right">绑定组</TableHead>
@@ -1177,11 +1179,15 @@ function PlansPanel() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {rows.map((p) => (
+              {rows.map((p) => {
+                const periodLabel: Record<string, string> = { none: "—", daily: "每日", weekly: "每周", monthly: "每月" };
+                return (
                 <TableRow key={p.id}>
                   <TableCell className="font-medium">{p.name}</TableCell>
-                  <TableCell className="mono text-right" title={p.token_quota.toLocaleString()}>{fmtTokens(p.token_quota)}</TableCell>
+                  <TableCell className="mono text-right" title={p.token_quota.toLocaleString()}>{fmtTokens(p.token_quota)}{p.reset_period && p.reset_period !== "none" && <span className="ml-0.5 text-[10px] text-muted-foreground">/周期</span>}</TableCell>
                   <TableCell className="mono text-right">{p.validity_days}</TableCell>
+                  <TableCell className="text-right text-xs">{periodLabel[p.reset_period ?? "none"]}</TableCell>
+                  <TableCell className="mono text-right">{p.purchase_limit ? `${p.purchase_limit} 次` : "不限"}</TableCell>
                   <TableCell className="mono text-right">{p.price_cents > 0 ? (p.price_cents / 100).toFixed(2) : "—"}</TableCell>
                   <TableCell className="max-w-[240px] truncate text-xs text-muted-foreground" title={p.description}>{p.description || "—"}</TableCell>
                   <TableCell className="mono text-right">{p.group_count ?? 0}</TableCell>
@@ -1198,12 +1204,13 @@ function PlansPanel() {
                     ]} />
                   </TableCell>
                 </TableRow>
-              ))}
+                );
+              })}
               {rows.length === 0 && !err && (
-                <TableRow><TableCell colSpan={9} className="py-10 text-center text-sm text-muted-foreground">还没有套餐;创建后到「用户组」里绑定默认套餐与可充值范围</TableCell></TableRow>
+                <TableRow><TableCell colSpan={11} className="py-10 text-center text-sm text-muted-foreground">还没有套餐;创建后到「用户组」里绑定默认套餐与可充值范围</TableCell></TableRow>
               )}
               {err && (
-                <TableRow><TableCell colSpan={9} className="py-10 text-center text-sm text-destructive">
+                <TableRow><TableCell colSpan={11} className="py-10 text-center text-sm text-destructive">
                   加载失败:{err} <Button size="sm" variant="outline" className="ml-2 h-7" onClick={load}>重试</Button>
                 </TableCell></TableRow>
               )}
@@ -1227,6 +1234,11 @@ function PlanDialog({ dlg, onClose, onSaved }: { dlg: { edit: PlanRow | null } |
   const [price, setPrice] = useState("");
   const [desc, setDesc] = useState("");
   const [enabled, setEnabled] = useState(true);
+  const [resetPeriod, setResetPeriod] = useState<ResetPeriod>("none");
+  const [purchaseLimit, setPurchaseLimit] = useState("");
+  const [upgradeGid, setUpgradeGid] = useState(0);
+  const [downgradeGid, setDowngradeGid] = useState(0);
+  const [userGroups, setUserGroups] = useState<UserGroupRow[]>([]);
   const [err, setErr] = useState("");
   useEffect(() => {
     if (open) {
@@ -1236,6 +1248,11 @@ function PlanDialog({ dlg, onClose, onSaved }: { dlg: { edit: PlanRow | null } |
       setPrice(edit && edit.price_cents > 0 ? (edit.price_cents / 100).toFixed(2) : "");
       setDesc(edit?.description ?? "");
       setEnabled(edit?.enabled ?? true);
+      setResetPeriod(edit?.reset_period ?? "none");
+      setPurchaseLimit(edit?.purchase_limit ? String(edit.purchase_limit) : "");
+      setUpgradeGid(edit?.upgrade_user_group_id ?? 0);
+      setDowngradeGid(edit?.downgrade_user_group_id ?? 0);
+      api.userGroups().then((r) => setUserGroups(r.data)).catch(() => setUserGroups([]));
     }
   }, [dlg]);
 
@@ -1247,7 +1264,15 @@ function PlanDialog({ dlg, onClose, onSaved }: { dlg: { edit: PlanRow | null } |
     if (!Number.isInteger(d) || d <= 0) { setErr("有效期需为正整数(天)"); return; }
     const pc = price.trim() === "" ? 0 : Math.round(Number(price) * 100);
     if (!Number.isFinite(pc) || pc < 0) { setErr("售价格式不正确"); return; }
-    const body = { name: name.trim(), token_quota: q, validity_days: d, price_cents: pc, description: desc.trim() };
+    const pl = purchaseLimit.trim() === "" ? 0 : Number(purchaseLimit);
+    if (!Number.isInteger(pl) || pl < 0) { setErr("购买上限需为非负整数(0 = 不限)"); return; }
+    if (downgradeGid > 0 && upgradeGid === 0) { setErr("配置了到期降级分组时,需先选择购买升级分组(降级仅在用户处于升级组时触发)"); return; }
+    const body: PlanBody = {
+      name: name.trim(), token_quota: q, validity_days: d, price_cents: pc, description: desc.trim(),
+      reset_period: resetPeriod, purchase_limit: pl,
+      upgrade_user_group_id: upgradeGid > 0 ? upgradeGid : null,
+      downgrade_user_group_id: downgradeGid > 0 ? downgradeGid : null,
+    };
     try {
       if (edit) await api.updatePlan(edit.id, { ...body, enabled });
       else await api.createPlan(body);
@@ -1272,6 +1297,36 @@ function PlanDialog({ dlg, onClose, onSaved }: { dlg: { edit: PlanRow | null } |
               <Input value={days} onChange={(e) => setDays(e.target.value)} /></div>
             <div><label className="mb-1 block text-xs text-muted-foreground">售价(元,预留)</label>
               <Input placeholder="如 9.90" value={price} onChange={(e) => setPrice(e.target.value)} /></div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="mb-1 block text-xs text-muted-foreground">额度重置周期</label>
+              <select value={resetPeriod} onChange={(e) => setResetPeriod(e.target.value as ResetPeriod)}
+                className="h-9 w-full rounded-lg border border-input bg-card px-2.5 text-sm shadow-card focus:border-brand-400 focus:outline-none focus:ring-4 focus:ring-brand-500/15">
+                <option value="none">不重置(一次性额度,用完即止)</option>
+                <option value="daily">每日重置</option>
+                <option value="weekly">每周重置</option>
+                <option value="monthly">每月重置(按 30 天)</option>
+              </select>
+              <p className="mt-1 text-[11px] text-muted-foreground">选了周期后,「含 tokens」= 每个周期的额度;到重置点自动补满,总有效期到即套餐终止。</p></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">购买上限(0 = 不限)</label>
+              <Input placeholder="同一用户最多可获取次数" value={purchaseLimit} onChange={(e) => setPurchaseLimit(e.target.value)} />
+              <p className="mt-1 text-[11px] text-muted-foreground">仅约束门户购买/自助充值;管理端手动发放不受限。统计含已过期的历史发放。</p></div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="mb-1 block text-xs text-muted-foreground">购买升级分组(可选)</label>
+              <select value={upgradeGid} onChange={(e) => { const v = Number(e.target.value); setUpgradeGid(v); if (v === 0) setDowngradeGid(0); }}
+                className="h-9 w-full rounded-lg border border-input bg-card px-2.5 text-sm shadow-card focus:border-brand-400 focus:outline-none focus:ring-4 focus:ring-brand-500/15">
+                <option value={0}>不变更</option>
+                {userGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+              </select>
+              <p className="mt-1 text-[11px] text-muted-foreground">购买/充值该套餐后,用户自动切换到该用户组(享受其模型组绑定与限额)。</p></div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">到期降级分组(可选)</label>
+              <select value={downgradeGid} onChange={(e) => setDowngradeGid(Number(e.target.value))} disabled={upgradeGid === 0}
+                className="h-9 w-full rounded-lg border border-input bg-card px-2.5 text-sm shadow-card focus:border-brand-400 focus:outline-none focus:ring-4 focus:ring-brand-500/15 disabled:opacity-50">
+                <option value={0}>不变更</option>
+                {userGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+              </select>
+              <p className="mt-1 text-[11px] text-muted-foreground">套餐全部到期且用户仍处于升级组时,自动降回该用户组(每小时检查一次)。</p></div>
           </div>
           <div><label className="mb-1 block text-xs text-muted-foreground">说明</label>
             <Input placeholder="套餐说明(展示给用户)" value={desc} maxLength={100} onChange={(e) => setDesc(e.target.value)} /></div>

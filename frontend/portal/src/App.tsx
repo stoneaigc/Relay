@@ -335,7 +335,9 @@ function PlanShop() {
               </div>
             </div>
             <div className="mt-1 text-xs text-muted-foreground">
-              {compactTokens(p.token_quota)} tokens · 有效期 {p.validity_days} 天
+              {compactTokens(p.token_quota)} tokens{p.reset_period && p.reset_period !== "none" ? "/周期" : ""}
+              {" · "}{p.reset_period === "daily" ? "每日重置" : p.reset_period === "weekly" ? "每周重置" : p.reset_period === "monthly" ? "每月重置" : `有效期 ${p.validity_days} 天`}
+              {p.reset_period && p.reset_period !== "none" ? `(总有效期 ${p.validity_days} 天)` : ""}
             </div>
             {p.description && <p className="mt-1.5 line-clamp-2 text-xs text-muted-foreground" title={p.description}>{p.description}</p>}
             <button
