@@ -3192,7 +3192,7 @@ pub async fn test_es_connection(
     if !username.is_empty() {
         req = req.basic_auth(&username, Some(&password));
     }
-    let latency_ms = started.elapsed().as_millis() as u64;
+    let _latency_ms = started.elapsed().as_millis() as u64;
     match req.send().await {
         Ok(resp) => {
             let status = resp.status();
@@ -4552,6 +4552,7 @@ pub async fn create_payment_order(
     }
     let cfg = state.config.load().payment.clone();
     let p = crate::payment::provider(&cfg);
+    let plan_id = body.plan_id.clone();
     let order = p
         .create_order(crate::payment::PaymentOrderRequest {
             user_id: body.user_id.trim().to_string(),
@@ -4562,11 +4563,163 @@ pub async fn create_payment_order(
         })
         .await
         .map_err(|e| ApiError::NotImplemented(e.to_string()))?;
+
+    // 与门户同理:落库必须先于把 pay_url 交给调用方,否则回调可能查不到订单。
+    let row = storage::PaymentOrderRow {
+        id: order.order_id.clone(),
+        provider: order.provider.clone(),
+        user_id: body.user_id.trim().to_string(),
+        plan_id: plan_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+        tokens: body.tokens,
+        amount_cents: body.amount_cents,
+        status: "pending".to_string(),
+        trade_no: None,
+        created_at: storage::now_secs(),
+        paid_at: None,
+    };
+    storage::create_payment_order(&state.db, &row)
+        .await
+        .map_err(|e| ApiError::Internal(format!("支付订单落库失败: {e}")))?;
+
     Ok(Json(serde_json::to_value(order).unwrap_or_else(|_| json!({}))))
 }
 
-/// POST /payments/notify/:provider —— 渠道异步回调入口(预留扩展点,公开路由)。
-/// 渠道未接入或 provider 与配置不符时回 501;接入后先验签再确认订单到账。
+/// 支付订单查询参数。
+#[derive(Deserialize)]
+pub struct PaymentOrdersQuery {
+    /// 按状态过滤:pending(等待重投) / paid(已发货) / failed(待人工处理)。
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// GET /admin/api/payments/orders?status=&limit= —— 支付订单列表(倒序)。
+///
+/// 这个入口主要不是给"看流水"用的,而是给**对账兜底**用的:`pending`(发货失败等重投)
+/// 与 `failed`(业务性失败)两种状态都意味着**用户已经付过钱却没拿到额度**。
+/// 没有列表可查,这类单子只能等用户来投诉才会被发现。
+pub async fn list_payment_orders(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<PaymentOrdersQuery>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let rows = storage::list_payment_orders(&state.db, q.status.as_deref(), limit)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let data: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.id, "provider": r.provider, "user_id": r.user_id, "plan_id": r.plan_id,
+                "tokens": r.tokens, "amount_cents": r.amount_cents, "status": r.status,
+                "trade_no": r.trade_no, "created_at": r.created_at, "paid_at": r.paid_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "data": data, "total": data.len() })))
+}
+
+/// 碳基圈回调注册请求体。`url` 省略时回落到 `[payment] notify_url`。
+#[derive(Deserialize)]
+pub struct OpcpayWebhookBody {
+    pub url: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+/// GET /admin/api/payments/opcpay/webhook —— 查询碳基圈回调注册状态。
+///
+/// 用来排查"本地配了 notify_url,但服务端压根没登记"这类静默故障:
+/// 该通道只往已注册的地址推送,配置写错不会有任何报错,只会收不到回调。
+pub async fn get_opcpay_webhook(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let cfg = state.config.load().payment.clone();
+    let api_key = cfg
+        .read_opcpay_api_key()
+        .map_err(|e| ApiError::BadRequest(format!("未配置碳基圈 API 密钥: {e}")))?;
+    let resp = state
+        .http
+        .get(format!("{}/webhook", cfg.opcpay_api_base()))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send()
+        .await
+        .map_err(|e| ApiError::Internal(format!("查询碳基圈回调配置失败: {e}")))?;
+    let text = resp.text().await.unwrap_or_default();
+    let v: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!({ "raw": text }));
+    Ok(Json(v))
+}
+
+/// POST /admin/api/payments/opcpay/webhook —— 注册或停用回调地址。
+///
+/// 返回的 `secret` 是验签密钥,**仅此一次**;必须立刻写入
+/// `RELAY_PAYMENT__OPCPAY_WEBHOOK_SECRET` 并重启,否则收得到回调也验不了签。
+pub async fn save_opcpay_webhook(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<OpcpayWebhookBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let cfg = state.config.load().payment.clone();
+    let api_key = cfg
+        .read_opcpay_api_key()
+        .map_err(|e| ApiError::BadRequest(format!("未配置碳基圈 API 密钥: {e}")))?;
+    // 优先级:请求体 > 官网地址推导出的回调路径 > notify_url。
+    // 境外部署时只要填了 opcpay_site_url,这里就能直接算出全站唯一的合规回调地址,
+    // 不必手工拼字符串——拼错一个端口就会拿到 400 INVALID_WEBHOOK_URL。
+    let url = body
+        .url
+        .filter(|u| !u.trim().is_empty())
+        .or_else(|| cfg.opcpay_webhook_url())
+        .or_else(|| {
+            let u = cfg.notify_url.trim().to_string();
+            (!u.is_empty()).then_some(u)
+        })
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "请提供回调地址,或在 [payment] 中配置 opcpay_site_url / notify_url".into(),
+            )
+        })?;
+    // 本地先按服务端规则校验一遍:HTTPS、443、同域、无私网地址、无账号/参数/片段。
+    cfg.validate_opcpay_public_url(&url)
+        .map_err(|e| ApiError::BadRequest(format!("回调地址不合规: {e}")))?;
+    let enabled = body.enabled.unwrap_or(true);
+    let resp = state
+        .http
+        .put(format!("{}/webhook", cfg.opcpay_api_base()))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&json!({ "url": url, "enabled": enabled }))
+        .send()
+        .await
+        .map_err(|e| ApiError::Internal(format!("注册碳基圈回调失败: {e}")))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    let v: Value = serde_json::from_str(&text).unwrap_or_else(|_| json!({ "raw": text }));
+    if !status.is_success() {
+        return Err(ApiError::BadRequest(format!(
+            "碳基圈拒绝该回调地址({status}): {}",
+            v.get("error").and_then(|e| e.as_str()).unwrap_or(&text)
+        )));
+    }
+    // secret 只在保存时返回一次,这里必须让运维看见,否则会永久丢失。
+    if v.get("secret").and_then(|s| s.as_str()).is_some() {
+        tracing::warn!(
+            "[payment] 碳基圈回调已注册 url={url};返回了通知签名密钥,请立即写入 \
+             RELAY_PAYMENT__OPCPAY_WEBHOOK_SECRET 并重启服务"
+        );
+    }
+    Ok(Json(v))
+}
+
+/// POST /payments/notify/:provider —— 渠道异步回调入口(公开路由,可信性完全依赖验签)。
+///
+/// 完整链路:**验签 → 定位订单 → 核对金额 → 幂等闸门 → 发货**。少了中间任何一步都会出事故:
+/// 不核对金额,则"下单 199 元、实付 1 分"也能发货;不过幂等闸门,则渠道的重复投递
+/// (支付宝 25 小时内最多 8 次)会把一笔付款重复发放成多份额度。
 pub async fn payment_notify(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(provider): axum::extract::Path<String>,
@@ -4574,20 +4727,176 @@ pub async fn payment_notify(
     body: String,
 ) -> Result<Json<Value>, ApiError> {
     let cfg = state.config.load().payment.clone();
-    if !cfg.enabled || cfg.provider != provider {
+    // 两边都归一化后再比:配置里写 yirenfu、回调路径走 opcpay 也应视为同一渠道,
+    // 否则合法回调会被当成"渠道未启用"拒收,表现为用户付了钱却不到账。
+    if !cfg.enabled
+        || crate::payment::normalize_provider(&cfg.provider)
+            != crate::payment::normalize_provider(&provider)
+    {
         return Err(ApiError::NotImplemented(format!(
             "支付渠道 `{provider}` 未接入或未启用"
         )));
     }
     let p = crate::payment::provider(&cfg);
-    let (order_id, paid) = p
+    let res = p
         .verify_notify(&headers, &body)
         .await
         .map_err(|e| ApiError::BadRequest(format!("回调验签失败: {e}")))?;
-    // TODO(支付接入): 验签通过后按 order_id 幂等确认订单,执行套餐发放/余额充值。
-    // 套餐发放必须走 storage::grant_plan_quota(..., enforce_limit=true)(购买上限兜底),
-    // 并按返回的 upgraded_group_id 同步内存用户组;发放失败需走退款/人工对账。
-    Ok(Json(json!({ "ok": true, "order_id": order_id, "paid": paid })))
+
+    tracing::info!(
+        "[payment] 收到 {provider} 回调 order_id={} paid={} trade_no={:?}",
+        res.order_id, res.paid, res.trade_no
+    );
+
+    // 未确认支付(如待付款/已关闭/退款):应答成功但不发货,让渠道停止重投。
+    if !res.paid {
+        return Ok(Json(json!({
+            "ok": true, "order_id": res.order_id, "paid": false, "credited": false
+        })));
+    }
+
+    // 定位订单。一人付这类"以用户为主体"的回调可能不带单号,退化为按用户找最近待支付单。
+    let mut order = if !res.order_id.is_empty() {
+        storage::get_payment_order(&state.db, &res.order_id)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+    } else {
+        None
+    };
+    if order.is_none() {
+        if let Some(uid) = res.channel_user_id.as_deref() {
+            order = storage::latest_pending_payment_order(&state.db, uid)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
+    }
+    let Some(order) = order else {
+        // 查不到时返回错误而不是 200:下单落库与回调之间理论上存在竞态,
+        // 让渠道重投远比直接丢弃一笔已付款安全。
+        tracing::warn!(
+            "[payment] 回调查不到待发货订单,等待重投: order_id={} user={:?}",
+            res.order_id, res.channel_user_id
+        );
+        return Err(ApiError::BadRequest(format!(
+            "找不到待发货的支付订单({}),将等待渠道重投", res.order_id
+        )));
+    };
+
+    // 金额核对。验签只证明"消息确实来自渠道",不证明金额没被动过。
+    if let Some(paid_cents) = res.paid_amount_cents {
+        if paid_cents != order.amount_cents {
+            tracing::error!(
+                "[payment] 回调金额与订单不符,拒绝发货: order_id={} 订单={} 回调={}",
+                order.id, order.amount_cents, paid_cents
+            );
+            let _ = storage::mark_payment_order_failed(&state.db, &order.id, res.trade_no.as_deref())
+                .await;
+            return Err(ApiError::BadRequest(format!(
+                "回调金额({paid_cents} 分)与订单金额({} 分)不一致,已拒绝发货",
+                order.amount_cents
+            )));
+        }
+    }
+
+    // 幂等闸门:并发或重复投递下,只有抢到 pending -> paid 迁移的那个请求才发货。
+    let first = storage::mark_payment_order_paid(&state.db, &order.id, res.trade_no.as_deref())
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if !first {
+        tracing::info!("[payment] 订单 {} 已发货过,本次回调跳过", order.id);
+        return Ok(Json(json!({
+            "ok": true, "order_id": order.id, "paid": true, "credited": false, "duplicate": true
+        })));
+    }
+
+    // 发货。
+    let user_id = Uuid::parse_str(&order.user_id).map_err(|_| {
+        ApiError::Internal(format!("订单 {} 的 user_id 非法: {}", order.id, order.user_id))
+    })?;
+    match credit_payment_order(&state, &order, &user_id).await {
+        Ok(detail) => {
+            tracing::info!("[payment] 订单 {} 发货成功: {detail}", order.id);
+            Ok(Json(json!({ "ok": true, "order_id": order.id, "paid": true, "credited": true })))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if is_permanent_credit_failure(&msg) {
+                // 业务性失败(套餐下架、超出购买上限):重投也必然失败,置终态留待人工处理。
+                let _ = storage::mark_payment_order_failed(
+                    &state.db, &order.id, res.trade_no.as_deref(),
+                ).await;
+                tracing::error!(
+                    "[payment] 订单 {} 发货失败(业务性,已置终态待人工处理): {msg}", order.id
+                );
+                return Err(ApiError::BadRequest(format!("发货失败: {msg}")));
+            }
+            // 临时故障:退回 pending 并回 5xx,让渠道重投时重新发货,避免"已付款未到账"。
+            let _ = storage::revert_payment_order_to_pending(&state.db, &order.id).await;
+            tracing::error!("[payment] 订单 {} 发货失败(已退回 pending 等待重投): {msg}", order.id);
+            Err(ApiError::Internal(format!("发货失败,已安排重试: {msg}")))
+        }
+    }
+}
+
+/// 按订单内容发货:充值到套餐时发放额度桶,充主余额时累加 `token_balance`。
+///
+/// 三处调用点共用同一套发货逻辑:管理端手动发放、渠道异步回调、门户主动确认
+/// (爱猹收这类没有回调的渠道)。发货口径必须唯一,否则会出现"回调发了、手动确认
+/// 又发一份"这类重复发放。
+pub(crate) async fn credit_payment_order(
+    state: &Arc<AppState>,
+    order: &storage::PaymentOrderRow,
+    user_id: &Uuid,
+) -> anyhow::Result<String> {
+    match order.plan_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(plan_id) => {
+            // enforce_limit=true:回调发货同样要受购买上限约束,不能因为走了支付就绕过。
+            let bucket =
+                storage::grant_plan_quota(&state.db, *user_id, plan_id, "payment", true).await?;
+            // 同步内存(与管理端手动发放 grant_user_plan 完全一致的写法)。
+            if let Some(u) = state.users.get(user_id) {
+                let mut buckets = u.buckets();
+                buckets.push(crate::state::PlanBucket {
+                    id: bucket["id"].as_str().unwrap_or_default().to_string(),
+                    plan_id: plan_id.to_string(),
+                    plan_name: bucket["plan_name"].as_str().unwrap_or_default().to_string(),
+                    remaining_tokens: bucket["remaining_tokens"].as_i64().unwrap_or(0),
+                    expires_at: bucket["expires_at"].as_i64().unwrap_or(0),
+                    plan_quota: bucket["plan_quota"].as_i64().unwrap_or(0),
+                    next_reset_at: bucket["next_reset_at"].as_i64().unwrap_or(0),
+                    period_secs: bucket["period_secs"].as_i64().unwrap_or(0),
+                    dirty: false,
+                });
+                buckets.sort_by_key(|b| b.expires_at);
+                if let Some(gid) = bucket["upgraded_group_id"].as_i64() {
+                    u.user_group_id.store(gid, Ordering::Relaxed);
+                }
+            }
+            Ok(format!(
+                "套餐 {plan_id} 已发放 {} tokens",
+                bucket["remaining_tokens"].as_i64().unwrap_or(0)
+            ))
+        }
+        None => {
+            storage::add_tokens(&state.db, *user_id, order.tokens).await?;
+            if let Some(u) = state.user(user_id) {
+                u.token_balance.fetch_add(order.tokens, Ordering::Relaxed);
+            }
+            Ok(format!("主余额已充值 {} tokens", order.tokens))
+        }
+    }
+}
+
+/// 判断发货失败是否属于"重投也没用"的业务性失败。
+///
+/// 区分这两类的意义:临时故障(数据库抖一下)必须退回待支付等重试,否则用户付了钱拿不到额度;
+/// 而业务性失败若也退回重试,会白白耗尽渠道的重投次数(支付宝 25 小时内 8 次),
+/// 最终无声无息地丢单。后者置终态并打 error,交给人工对账更合适。
+pub(crate) fn is_permanent_credit_failure(msg: &str) -> bool {
+    msg.contains("套餐已停用")
+        || msg.contains("套餐不存在")
+        || msg.contains("plan not found")
+        || msg.contains("购买上限")
 }
 
 // ======================== 管理操作审计 ========================

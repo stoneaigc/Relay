@@ -75,6 +75,112 @@ store = "sqlite"
 # elasticsearch_username = ""
 # elasticsearch_password = ""
 
+# ============ 支付渠道 ============
+# 三套实现都已内置,切换只改这一个配置段,业务代码(套餐、额度、扣费)无需改动。
+#
+# 费率口径说明(先说结论,避免比错方向):
+#   支付宝侧的费率是**固定的**,三家都一样 —— JSAPI 支付 0.6%~1% + 即刻收商品经营
+#   0.4%,合计约 1.0%~1.4%。所以"选最便宜的平台"这个问题,真正的答案不在明面费率,
+#   而在两件事:①平台自己是否**额外抽成**;②**限制条件**(有没有沙箱、要不要
+#   公网回调、单档金额上限)。下面各家已按这两项标出差异。
+#
+# provider 取值:
+#   "none"   —— 未接入(默认)。支付端点返回 501 的明确错误。
+#   "alipay" —— 支付宝「电脑网站支付」(alipay.trade.page.pay)。
+#               个人账号可开通;有沙箱;资金直达自己的支付宝账户;费率约 0.6%(最低)。
+#               前提:域名完成 ICP 备案,且备案主体与签约账号主体一致。
+#               当前域名未备案,留给备案完成后的切换通道。
+#   "opcpay" —— 碳基圈(一人付),别名 yirenfu / carbon 同样识别。
+#               它是支付宝 Vibe Pay「智能收款套件(即刻收)」的官方合作平台之一
+#               (aipay.alipay.com/products/vibe-pay 的合作平台名单已列出碳基圈)。
+#               官方对这条形态的定义:用户账户 → 创作者收款账户,资金**直接进入
+#               创作者(你)签约的支付宝余额账户,不经过平台账户,平台不代收、不结算、
+#               不分账**;因此不构成「二清」。这也解释了它为何不要求 ICP 备案 ——
+#               收款主体是你自己的支付宝账号,而不是一家替你收钱的中间商户。
+#               费率:JSAPI 支付 0.6%~1% + 即刻收商品经营 0.4%(合计约 1.0%~1.4%)。
+#               首签未满 90 日或连续交易未满 30 日时,资金次日结算,之后实时。
+#               代价是:**无沙箱**(联调即真实交易)、退款/对账/交易查询接口尚未开放、
+#               商品与价格须先在即刻收侧建好(本地套餐按 sku_id 映射),
+#               且回调地址必须与官网同域、公网 HTTPS、仅 443 端口。
+#   "watcha" —— 爱猹收(观猹旗下,pay.watcha.cn),别名 aichashou / 爱猹收 / 观猹。
+#               **当前推荐**:同样走即刻收、同样资金直达,费率也与上面完全一致,
+#               但工程侧三项都更友好 ——
+#               ① **有真正的沙箱**,沙箱下单不真实扣款(这是相对 opcpay 最大的优势);
+#               ② **没有异步回调**,不需要注册回调地址、不需要同域 HTTPS 443、不验签,
+#                  境外自托管应用不用为此准备任何东西。到账改由门户主动确认:
+#                  POST /portal/payments/orders/:order_id/confirm;
+#               ③ Agent 接入文档公开可读,控制台 API 与运行时 API 分离。
+#               已知限制:商品档位金额**默认上限 ¥1000**(更高需提额申请);
+#               签约初期有**每日收款限额**(通常 T+1 解除,且接口查不到状态)。
+#               注意:沙箱与正式的 API Key、entitlement_id **不通用**,必须分别配置。
+#
+# 凭据一律走环境变量(RELAY_PAYMENT__*),不要写进本文件;下面这些字段保持为空即可。
+[payment]
+enabled = false
+provider = "none"
+# 渠道把支付结果 POST 到这个地址,必须公网可达(https):
+#   支付宝: https://<域名>/payments/notify/alipay
+#   碳基圈: https://<域名>/payments/notify/opcpay
+notify_url = ""
+
+# ---- 支付宝 ----
+app_id = ""
+# true = 沙箱(默认)。配错凭据时不会真实扣款,联调期间务必保持 true。
+sandbox = true
+# 私钥与公钥留空,改由环境变量注入:
+#   RELAY_PAYMENT__PRIVATE_KEY="-----BEGIN PRIVATE KEY-----..."
+#   RELAY_PAYMENT__ALIPAY_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----..."
+# 也可以填 private_key_file / alipay_public_key_file 指向仓库外的文件。
+
+# ---- 碳基圈(一人付)----
+# 同样留空,由环境变量注入:
+#   RELAY_PAYMENT__OPCPAY_API_KEY=...
+#   RELAY_PAYMENT__OPCPAY_WEBHOOK_SECRET=...
+#
+# 项目官网地址:**必须与服务商控制台登记的官网域名一致**。
+# 服务端硬性要求回调地址与页面返回地址都与该域名同域、公网 HTTPS、仅 443 端口。
+# 服务器与域名都在境外同样满足——判定只看公网可达,不看 ICP 备案。
+# 填了它之后,回调地址与返回地址会自动推导,无需手工拼字符串:
+#   回调:  {opcpay_site_url}/admin/api/payments/opcpay/webhook
+#   返回:  {opcpay_site_url}/portal   (可用 opcpay_return_url 覆盖)
+# opcpay_site_url = "https://你的域名"
+# opcpay_return_url = ""
+#
+# 该通道的套餐与价格配置在服务商侧,每个本地套餐必须映射到收费档位,
+# 建议直接写在这里(map 类型的环境变量支持有限):
+#   [payment.opcpay_skus]
+#   plan-basic = "sku_xxxxxxxx"
+#   plan-pro   = "sku_yyyyyyyy"
+# 映射缺失时对应套餐会拒绝下单——宁可下单失败,也不能让用户按错误的价格付款。
+
+# ---- 爱猹收(watcha)----
+# 凭据同样走环境变量注入。注意**沙箱与正式的 Key 不通用**:
+#   RELAY_PAYMENT__WATCHA_SANDBOX_API_KEY=...   # 沙箱环境用(默认 watcha_sandbox = true)
+#   RELAY_PAYMENT__WATCHA_API_KEY=...           # 正式环境用
+# watcha_api_base = "https://pay.watcha.cn"
+# watcha_sandbox = true
+# 付款完成后跳回门户的地址(可选,不配也能支付,只是用户付完不会自动跳回):
+# watcha_return_url = "https://你的域名/portal"
+# watcha_timeout_secs = 15
+#
+# 单档金额上限(分),与官方「每个档位默认最高 ¥1,000」一致。
+# 它限制的是**单个档位的标价**——不是一天的总收款额,也不是某个买家累计买了多少,
+# 并且**不会随时间自动解除**,必须单独提交「档位额度提升」反馈申请。
+# 超额订单会在本地下单前就被拒绝,而不是等到用户付款那一步才暴露;
+# 提额获批后,把它改成实际获批金额即可放行更高的套餐:
+# watcha_tier_cap_cents = 100000
+# 套餐 -> 权益 ID 映射(map 类型建议直接写在这里)。
+# 注意 entitlement_id 取自创建商品时响应的 entitlement.id,**不是商品 ID**;
+# 沙箱与正式的商品要建立两次,两边的权益 ID 也不一样:
+#   [payment.watcha_sandbox_entitlements]
+#   plan-basic = "ent_xxxxxxxx"
+#   [payment.watcha_entitlements]
+#   plan-basic = "ent_zzzzzzzz"
+#
+# 上线前必须完成的两笔确认:
+#   1. 沙箱内跑完「查权益 -> 模拟购买 -> 重查权益」闭环,再切正式环境;
+#   2. 单档金额若超过 ¥1000,先向平台提交提额反馈,否则用户付不了高价档。
+
 # 注:奖励任务(star / issue / 提建议 等)以及 供应商 / 模型 / 模型组 / 路由,
 # 全部由管理后台维护并持久化到数据库,不在此配置;首次启动会自动播种 3 个示例奖励任务。
 # 这里只放全局默认、鉴权、邮箱、缓存等。

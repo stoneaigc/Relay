@@ -23,6 +23,15 @@ frontend/*/dist/
 # 本地敏感配置(如把密钥写进了 default.toml,改用环境变量或本地覆盖文件)
 config/local.toml
 
+# 支付渠道凭据:一律走环境变量 RELAY_PAYMENT__*,或仓库外的文件路径。
+# 私钥泄漏等于别人可以冒充你代收款,绝不允许入库。
+*.pem
+*.key
+*.p12
+.env
+.env.*
+!.env.example
+
 # macOS
 .DS_Store
 

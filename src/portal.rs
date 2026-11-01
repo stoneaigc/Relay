@@ -972,6 +972,39 @@ pub async fn create_payment_order(
     }
     let tokens = plan.get("token_quota").and_then(|v| v.as_i64()).unwrap_or(0);
     let amount = plan.get("price_cents").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    // 免费套餐(price_cents = 0)直接发放,不进支付渠道:渠道侧硬性要求金额 > 0,
+    // 硬走只会让用户收到一句看不懂的「下单金额必须大于 0」,还不如当场发放。
+    // note:购买上限在上面已预检,grant_plan_quota 的 enforce_limit 再兜一次底。
+    if amount <= 0 {
+        let bucket = storage::grant_plan_quota(&state.db, uid, body.plan_id.trim(), "free", true)
+            .await
+            .map_err(|e| ApiError::BadRequest(format!("免费套餐发放失败:{e}")))?;
+        if let Some(u) = state.users.get(&uid) {
+            let mut buckets = u.buckets();
+            buckets.push(crate::state::PlanBucket {
+                id: bucket["id"].as_str().unwrap_or_default().to_string(),
+                plan_id: body.plan_id.trim().to_string(),
+                plan_name: bucket["plan_name"].as_str().unwrap_or_default().to_string(),
+                remaining_tokens: bucket["remaining_tokens"].as_i64().unwrap_or(0),
+                expires_at: bucket["expires_at"].as_i64().unwrap_or(0),
+                plan_quota: bucket["plan_quota"].as_i64().unwrap_or(0),
+                next_reset_at: bucket["next_reset_at"].as_i64().unwrap_or(0),
+                period_secs: bucket["period_secs"].as_i64().unwrap_or(0),
+                dirty: false,
+            });
+            buckets.sort_by_key(|b| b.expires_at);
+            if let Some(gid) = bucket["upgraded_group_id"].as_i64() {
+                u.user_group_id.store(gid, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        return Ok(Json(json!({
+            "free": true,
+            "plan_id": body.plan_id.trim(),
+            "bucket": bucket,
+        })));
+    }
+
     let cfg = state.config.load().payment.clone();
     let p = crate::payment::provider(&cfg);
     let order = p
@@ -984,5 +1017,112 @@ pub async fn create_payment_order(
         })
         .await
         .map_err(|e| ApiError::NotImplemented(e.to_string()))?;
+
+    // 下单落库**必须在把 pay_url 返回给前端之前**完成:用户付款后渠道回调可能先于
+    // 任何前端请求到达,少了这条记录,验签通过也查不到该给谁发货。
+    let row = storage::PaymentOrderRow {
+        id: order.order_id.clone(),
+        provider: order.provider.clone(),
+        user_id: uid.to_string(),
+        plan_id: Some(body.plan_id.trim().to_string()),
+        tokens,
+        amount_cents: amount,
+        status: "pending".to_string(),
+        trade_no: None,
+        created_at: now_secs(),
+        paid_at: None,
+    };
+    storage::create_payment_order(&state.db, &row)
+        .await
+        .map_err(|e| ApiError::Internal(format!("支付订单落库失败: {e}")))?;
+
     Ok(Json(serde_json::to_value(order).unwrap_or_else(|_| json!({}))))
+}
+
+/// POST /portal/payments/orders/:id/confirm —— 主动确认订单是否已付款并发货。
+///
+/// 存在的理由:**不是所有渠道都有异步回调**。爱猹收这类权益式支付根本不推送支付
+/// 结果,用户付款后由前端带着本地单号回来问一句"这笔到账了吗"。因此这条链路走的是
+/// "渠道付款页 → 回到我们的门户 → 服务端向渠道查权益 → 发货",而不是"等回调"。
+///
+/// 三个不能省的点:
+/// 1. **归属校验**:只能确认自己的订单,否则任何人拿别人的单号都能触发发货。
+/// 2. **幂等**:并发/重试下靠 `mark_payment_order_paid` 的原子迁移做闸门,
+///    与回调发货共用同一把锁,不会重复发额度。
+/// 3. **金额以本地订单为准**:渠道侧只回答"有没有权益",不回金额,任何情况下
+///    都不采信渠道报文里的数额。
+pub async fn confirm_payment_order(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(order_id): axum::extract::Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let uid = portal_user(&state, &headers)?;
+    let cfg = state.config.load().payment.clone();
+    if !cfg.enabled {
+        return Err(ApiError::NotImplemented("支付渠道未启用".into()));
+    }
+    let order = storage::get_payment_order(&state.db, &order_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        // 归属不符与不存在返回同一文案:不透露某个单号是否真实存在。
+        .filter(|o| o.user_id == uid.to_string())
+        .ok_or_else(|| ApiError::NotFound("订单不存在".into()))?;
+
+    // 已发货的订单直接返回成功(幂等):前端可能轮询多次,也可能用户重复点确认。
+    if order.status == "paid" {
+        return Ok(Json(json!({
+            "ok": true, "order_id": order.id, "paid": true, "credited": false, "duplicate": true
+        })));
+    }
+    if order.status != "pending" {
+        return Ok(Json(json!({
+            "ok": false, "order_id": order.id, "paid": false, "status": order.status
+        })));
+    }
+
+    let p = crate::payment::provider(&cfg);
+    let paid = p
+        .check_paid(crate::payment::PaymentCheck {
+            order_id: order.id.clone(),
+            user_id: order.user_id.clone(),
+            plan_id: order.plan_id.clone(),
+            amount_cents: order.amount_cents,
+        })
+        .await
+        .map_err(|e| ApiError::BadRequest(format!("支付结果确认失败: {e}")))?;
+    if !paid {
+        // 用户跳收银台但没付完是最常见情况,不是错误:如实回 false 让前端继续展示购买入口。
+        return Ok(Json(json!({
+            "ok": true, "order_id": order.id, "paid": false, "credited": false
+        })));
+    }
+
+    let first = storage::mark_payment_order_paid(&state.db, &order.id, None)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    if !first {
+        return Ok(Json(json!({
+            "ok": true, "order_id": order.id, "paid": true, "credited": false, "duplicate": true
+        })));
+    }
+
+    match crate::admin::credit_payment_order(&state, &order, &uid).await {
+        Ok(detail) => {
+            tracing::info!("[payment] 门户确认订单 {} 发货成功: {detail}", order.id);
+            Ok(Json(json!({ "ok": true, "order_id": order.id, "paid": true, "credited": true })))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if crate::admin::is_permanent_credit_failure(&msg) {
+                let _ = storage::mark_payment_order_failed(&state.db, &order.id, None).await;
+                tracing::error!("[payment] 门户确认发货失败(业务性,已置终态待人工处理): {msg}");
+                return Err(ApiError::BadRequest(format!("发货失败: {msg}")));
+            }
+            // 主动确认没有"渠道重投"可用,退回 pending 让用户下次点確認还能拿到额度,
+            // 否则这笔已付款就彻底丢了。
+            let _ = storage::revert_payment_order_to_pending(&state.db, &order.id).await;
+            tracing::error!("[payment] 门户确认发货失败(已退回 pending): {msg}");
+            Err(ApiError::Internal(format!("发货失败,请重试: {msg}")))
+        }
+    }
 }

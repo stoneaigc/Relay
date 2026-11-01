@@ -372,6 +372,7 @@ async fn main() -> anyhow::Result<()> {
         upstream_breakers: DashMap::new(),
         round_robin: DashMap::new(),
         latency_p50: DashMap::new(),
+        provider_err: DashMap::new(),
         tz_offset_secs,
         audit_failures: AsyncMutex::new(VecDeque::with_capacity(AUDIT_FAILURE_CAP)),
         metrics: crate::state::MetricsStore::default(),
@@ -390,7 +391,7 @@ async fn main() -> anyhow::Result<()> {
         audit_rx,
     ));
 
-    // 后台:延迟优先策略的 P50 快照周期刷新(独立于落盘任务,15s 一次,只读内存桶)。
+    // 后台:延迟优先策略的 P50 快照周期刷新(独立于落盘任务,15s 一次,只读内存桶:延迟 P50 与失败率)。
     tokio::spawn({
         let state = Arc::clone(&state);
         async move {
@@ -398,7 +399,7 @@ async fn main() -> anyhow::Result<()> {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tick.tick().await;
-                state.refresh_latency_p50().await;
+                state.refresh_provider_stats().await;
             }
         }
     });
@@ -442,6 +443,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/quota", get(portal::quota))
         .route("/plans", get(portal::portal_plans))
         .route("/payments/orders", post(portal::create_payment_order))
+        // 无异步回调的渠道(爱猹收)靠它主动确认到账,见 portal::confirm_payment_order。
+        .route(
+            "/payments/orders/:order_id/confirm",
+            post(portal::confirm_payment_order),
+        )
         .route("/keys", get(portal::list_keys).post(portal::create_key))
         .route("/keys/rotate", post(portal::rotate_key))
         .route("/models", get(portal::models))
@@ -563,8 +569,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/request-logs", get(admin::list_request_logs))
         // 调用趋势聚合(数据源 = 请求日志全量历史,窗口可跨天)
         .route("/usage/trend", get(admin::usage_trend))
-        // 支付对接(预留扩展点:未接入渠道时返回 501 语义错误)
-        .route("/payments/orders", post(admin::create_payment_order))
+        // 支付对接(未接入渠道时下单回 501 语义错误);列表用于对账兜底,
+        // 重点排查 pending(发货失败等重投)与 failed(业务性失败待人工处理)两类已付款订单。
+        .route(
+            "/payments/orders",
+            post(admin::create_payment_order).get(admin::list_payment_orders),
+        )
+        // 碳基圈回调需向渠道服务端注册才会投递;这两个端点用于查看与注册,
+        // 避免"本地配了 notify_url 却收不到任何回调"的静默故障。
+        .route(
+            "/payments/opcpay/webhook",
+            post(admin::save_opcpay_webhook).get(admin::get_opcpay_webhook),
+        )
         // 管理操作审计
         .route("/audit-logs", get(admin::list_audit_logs))
         // 审计中间件:包裹全部 admin 路由,仅变更方法落库。

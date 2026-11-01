@@ -427,7 +427,48 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {    let is_pg = backe
         let _ = q!("ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS bill_multiplier DOUBLE PRECISION")
             .execute(pool)
             .await;
+        // 支付订单(渠道无关):下单即落库,回调据此幂等发货。
+        // id 用渠道侧单号(支付宝 out_trade_no / 一人付 idempotency_key),便于回调直接反查。
+        let _ = q!(
+            "CREATE TABLE IF NOT EXISTS payment_orders (
+                id            TEXT PRIMARY KEY,
+                provider      TEXT NOT NULL,
+                user_id       TEXT NOT NULL,
+                plan_id       TEXT,
+                tokens        BIGINT NOT NULL DEFAULT 0,
+                amount_cents  BIGINT NOT NULL DEFAULT 0,
+                status        TEXT NOT NULL DEFAULT 'pending',
+                trade_no      TEXT,
+                created_at    BIGINT NOT NULL,
+                paid_at       BIGINT
+            )"
+        )
+        .execute(pool)
+        .await;
+        let _ = q!("CREATE INDEX IF NOT EXISTS idx_payment_orders_user ON payment_orders(user_id)")
+            .execute(pool)
+            .await;
     } else {
+        // 支付订单(渠道无关):下单即落库,回调据此幂等发货。id 用渠道侧单号。
+        let _ = q!(
+            "CREATE TABLE IF NOT EXISTS payment_orders (
+                id            TEXT PRIMARY KEY,
+                provider      TEXT NOT NULL,
+                user_id       TEXT NOT NULL,
+                plan_id       TEXT,
+                tokens        INTEGER NOT NULL DEFAULT 0,
+                amount_cents  INTEGER NOT NULL DEFAULT 0,
+                status        TEXT NOT NULL DEFAULT 'pending',
+                trade_no      TEXT,
+                created_at    INTEGER NOT NULL,
+                paid_at       INTEGER
+            )"
+        )
+        .execute(pool)
+        .await;
+        let _ = q!("CREATE INDEX IF NOT EXISTS idx_payment_orders_user ON payment_orders(user_id)")
+            .execute(pool)
+            .await;
         let _ = q!("ALTER TABLE reward_claims ADD COLUMN task_id INTEGER").execute(pool).await;
         // 用户显示名(中文昵称):SQLite 不支持 ADD COLUMN IF NOT EXISTS,用 PRAGMA 判存在后补列。
         ensure_sqlite_column(pool, "users", "display_name", "TEXT").await;
@@ -1215,8 +1256,9 @@ pub async fn list_model_names_by_provider(pool: &Db, provider_name: &str) -> any
 }
 
 pub async fn add_group(pool: &Db, name: &str, max_concurrency: i64) -> anyhow::Result<i64> {
-    // 新组默认「智能自适应」:无延迟/成本数据时中性随机,有数据后自动偏向快且便宜的候选。
-    let r = q!("INSERT INTO model_groups (name, max_concurrency, strategy, created_at) VALUES (?, ?, 'auto', ?) RETURNING id")
+    // 新组默认「加权随机」(与列默认值、运行时兜底一致):业界通行的「简单分流 + failover」组合,
+    // 行为可预测;需要按上游实际表现挑路时,再在组内路由面板切到「智能自适应」。
+    let r = q!("INSERT INTO model_groups (name, max_concurrency, strategy, created_at) VALUES (?, ?, 'weighted_random', ?) RETURNING id")
         .bind(name).bind(max_concurrency).bind(now_iso()).fetch_one(pool).await?;
     Ok(r.get::<i64, _>("id"))
 }
@@ -2343,6 +2385,200 @@ pub async fn grant_plan_quota(pool: &Db, user_id: Uuid, plan_id: &str, source: &
         "plan_quota": quota, "next_reset_at": next_reset_at, "period_secs": period_secs,
         "upgraded_group_id": upgraded_group,
     }))
+}
+
+// ======================== 支付订单(渠道无关) ========================
+
+/// 一条支付订单。
+///
+/// `id` 直接用渠道侧单号(支付宝 `out_trade_no`、一人付 `idempotency_key`),
+/// 回调到达时可以免映射直接反查。金额与额度在下单时由套餐快照写入,回调侧只信任库里的值,
+/// 不信任回调报文中携带的金额。
+#[derive(Debug, Clone)]
+pub struct PaymentOrderRow {
+    pub id: String,
+    pub provider: String,
+    pub user_id: String,
+    pub plan_id: Option<String>,
+    pub tokens: i64,
+    pub amount_cents: i64,
+    /// pending = 待支付;paid = 已发货;failed = 终态失败。
+    pub status: String,
+    pub trade_no: Option<String>,
+    pub created_at: i64,
+    pub paid_at: Option<i64>,
+}
+
+/// 下单落库。**必须在返回 pay_url 给前端之前完成**,
+/// 否则回调可能先于订单记录到达,导致验签通过却查不到订单、用户付了钱拿不到额度。
+pub async fn create_payment_order(pool: &Db, row: &PaymentOrderRow) -> anyhow::Result<()> {
+    q!("INSERT INTO payment_orders \
+        (id, provider, user_id, plan_id, tokens, amount_cents, status, trade_no, created_at, paid_at) \
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(&row.id)
+        .bind(&row.provider)
+        .bind(&row.user_id)
+        .bind(&row.plan_id)
+        .bind(row.tokens)
+        .bind(row.amount_cents)
+        .bind(&row.status)
+        .bind(&row.trade_no)
+        .bind(row.created_at)
+        .bind(row.paid_at)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 按渠道单号查订单。
+pub async fn get_payment_order(pool: &Db, id: &str) -> anyhow::Result<Option<PaymentOrderRow>> {
+    let row = q!(
+        "SELECT id, provider, user_id, plan_id, tokens, amount_cents, status, trade_no, created_at, paid_at \
+         FROM payment_orders WHERE id = ?"
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| PaymentOrderRow {
+        id: r.get::<String, _>("id"),
+        provider: r.get::<String, _>("provider"),
+        user_id: r.get::<String, _>("user_id"),
+        plan_id: r.try_get::<Option<String>, _>("plan_id").ok().flatten(),
+        tokens: r.try_get("tokens").unwrap_or(0),
+        amount_cents: r.try_get("amount_cents").unwrap_or(0),
+        status: r.get::<String, _>("status"),
+        trade_no: r.try_get::<Option<String>, _>("trade_no").ok().flatten(),
+        created_at: r.try_get("created_at").unwrap_or(0),
+        paid_at: r.try_get::<Option<i64>, _>("paid_at").ok().flatten(),
+    }))
+}
+
+/// 原子地把 pending 订单置为 paid。
+///
+/// 返回 `true` 表示**本次调用**完成了状态迁移,调用方才允许发货;`false` 表示订单不存在、
+/// 或已不是 pending(重复投递、或已发过货)。
+///
+/// 这是整套支付链路的**幂等闸门**:渠道回调必然重复投递(支付宝 25 小时内最多 8 次),
+/// 没有它,一次付款会被重复发放额度。做法是带 status 条件的 UPDATE + 影响行数判断,
+/// 由数据库保证并发下只有一个调用方能拿到 true。
+pub async fn mark_payment_order_paid(
+    pool: &Db,
+    id: &str,
+    trade_no: Option<&str>,
+) -> anyhow::Result<bool> {
+    let now = now_secs();
+    let res = q!(
+        "UPDATE payment_orders SET status = 'paid', trade_no = ?, paid_at = ? \
+         WHERE id = ? AND status = 'pending'"
+    )
+    .bind(trade_no)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected() == 1)
+}
+
+/// 列出支付订单(倒序)。`status` 为空则不过滤。
+///
+/// 存在的意义是可观测性:回调发货失败时订单会被留在 `pending`(等重投)或 `failed`
+/// (业务性失败),**这些都是"用户已经付了钱"的状态**。没有列表入口,运维就看不见它们,
+/// 只能等用户来投诉。
+pub async fn list_payment_orders(
+    pool: &Db,
+    status: Option<&str>,
+    limit: i64,
+) -> anyhow::Result<Vec<PaymentOrderRow>> {
+    let limit = limit.clamp(1, 500);
+    let rows = match status.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(st) => {
+            q!("SELECT id, provider, user_id, plan_id, tokens, amount_cents, status, trade_no, \
+                created_at, paid_at FROM payment_orders WHERE status = ? \
+                ORDER BY created_at DESC LIMIT ?")
+            .bind(st)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            q!("SELECT id, provider, user_id, plan_id, tokens, amount_cents, status, trade_no, \
+                created_at, paid_at FROM payment_orders ORDER BY created_at DESC LIMIT ?")
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+    Ok(rows
+        .iter()
+        .map(|r| PaymentOrderRow {
+            id: r.get::<String, _>("id"),
+            provider: r.get::<String, _>("provider"),
+            user_id: r.get::<String, _>("user_id"),
+            plan_id: r.try_get::<Option<String>, _>("plan_id").ok().flatten(),
+            tokens: r.try_get("tokens").unwrap_or(0),
+            amount_cents: r.try_get("amount_cents").unwrap_or(0),
+            status: r.get::<String, _>("status"),
+            trade_no: r.try_get::<Option<String>, _>("trade_no").ok().flatten(),
+            created_at: r.try_get("created_at").unwrap_or(0),
+            paid_at: r.try_get::<Option<i64>, _>("paid_at").ok().flatten(),
+        })
+        .collect())
+}
+
+/// 取该用户最近一条待支付订单。
+///
+/// 用于渠道回调**只带用户、不带单号**的情形(一人付的权益事件主体是用户而非订单)。
+/// 取最近一条而非任意一条:用户连续下单时,先付的通常是最后一单。
+pub async fn latest_pending_payment_order(
+    pool: &Db,
+    user_id: &str,
+) -> anyhow::Result<Option<PaymentOrderRow>> {
+    let row = q!(
+        "SELECT id, provider, user_id, plan_id, tokens, amount_cents, status, trade_no, created_at, paid_at \
+         FROM payment_orders WHERE user_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1"
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(r) = row else {
+        return Ok(None);
+    };
+    Ok(Some(PaymentOrderRow {
+        id: r.get::<String, _>("id"),
+        provider: r.get::<String, _>("provider"),
+        user_id: r.get::<String, _>("user_id"),
+        plan_id: r.try_get::<Option<String>, _>("plan_id").ok().flatten(),
+        tokens: r.try_get("tokens").unwrap_or(0),
+        amount_cents: r.try_get("amount_cents").unwrap_or(0),
+        status: r.get::<String, _>("status"),
+        trade_no: r.try_get::<Option<String>, _>("trade_no").ok().flatten(),
+        created_at: r.try_get("created_at").unwrap_or(0),
+        paid_at: r.try_get::<Option<i64>, _>("paid_at").ok().flatten(),
+    }))
+}
+
+/// 把订单置为终态失败(如套餐下架、发放失败),避免悬挂的 pending 订单被后续回调误发货。
+pub async fn mark_payment_order_failed(pool: &Db, id: &str, trade_no: Option<&str>) -> anyhow::Result<()> {
+    q!("UPDATE payment_orders SET status = 'failed', trade_no = ? WHERE id = ? AND status = 'pending'")
+        .bind(trade_no)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 发货失败时把订单**退回 pending**,让渠道重投时重新发货。
+///
+/// 存在的理由:发货前必须先把订单置为 paid(否则并发回调会重复发货),但置位后
+/// 若发放失败,订单就卡在"已付款未到账"。退回 pending 能把这种订单重新暴露给
+/// 下一次重试,而不是永久丢失。仅用于**可重试的临时故障**;业务性失败
+/// (套餐下架、超出购买上限)应走 [`mark_payment_order_failed`],避免无限重投。
+pub async fn revert_payment_order_to_pending(pool: &Db, id: &str) -> anyhow::Result<()> {
+    q!("UPDATE payment_orders SET status = 'pending', paid_at = NULL, trade_no = NULL WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// 套餐到期降级:扫描已过期桶,若套餐配置了降级组、用户当前组 == 该套餐的升级组
@@ -3979,6 +4215,131 @@ mod tests {
     }
 
     // ---- find_or_create_provider ----
+
+    // ---- 支付订单(幂等发货闸门) ----
+
+    fn order_row(id: &str, user_id: &str, plan_id: Option<&str>, cents: i64, created_at: i64) -> PaymentOrderRow {
+        PaymentOrderRow {
+            id: id.to_string(),
+            provider: "alipay".to_string(),
+            user_id: user_id.to_string(),
+            plan_id: plan_id.map(|s| s.to_string()),
+            tokens: 1_000_000,
+            amount_cents: cents,
+            status: "pending".to_string(),
+            trade_no: None,
+            created_at,
+            paid_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn payment_order_roundtrip_and_idempotent_credit_gate() {
+        let db = test_db().await;
+        create_payment_order(&db, &order_row("RLY-1", "u-1", Some("plan-basic"), 1990, 1000))
+            .await
+            .unwrap();
+
+        let got = get_payment_order(&db, "RLY-1").await.unwrap().expect("订单应已落库");
+        assert_eq!(got.user_id, "u-1");
+        assert_eq!(got.plan_id.as_deref(), Some("plan-basic"));
+        assert_eq!(got.amount_cents, 1990);
+        assert_eq!(got.status, "pending");
+
+        // 第一次置位成功 = 允许发货。
+        assert!(mark_payment_order_paid(&db, "RLY-1", Some("trade-9")).await.unwrap());
+        // 渠道重投:第二次拿不到闸门,必须拒绝重复发货。
+        assert!(!mark_payment_order_paid(&db, "RLY-1", Some("trade-9")).await.unwrap());
+
+        let paid = get_payment_order(&db, "RLY-1").await.unwrap().unwrap();
+        assert_eq!(paid.status, "paid");
+        assert_eq!(paid.trade_no.as_deref(), Some("trade-9"));
+        assert!(paid.paid_at.is_some());
+        // 已发货的订单不再出现在待支付里。
+        assert!(latest_pending_payment_order(&db, "u-1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn latest_pending_payment_order_prefers_newest() {
+        let db = test_db().await;
+        create_payment_order(&db, &order_row("RLY-old", "u-1", None, 100, 1000))
+            .await
+            .unwrap();
+        create_payment_order(&db, &order_row("RLY-new", "u-1", None, 200, 2000))
+            .await
+            .unwrap();
+        let got = latest_pending_payment_order(&db, "u-1").await.unwrap().unwrap();
+        assert_eq!(got.id, "RLY-new", "应取最近的一条待支付订单");
+        // 按用户隔离:不能串到别的用户头上。
+        assert!(latest_pending_payment_order(&db, "u-2").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn reverted_order_can_be_credited_again_after_transient_failure() {
+        let db = test_db().await;
+        create_payment_order(&db, &order_row("RLY-2", "u-1", None, 100, 1000))
+            .await
+            .unwrap();
+
+        // 抢到闸门后发货失败(临时故障)-> 退回 pending。
+        assert!(mark_payment_order_paid(&db, "RLY-2", None).await.unwrap());
+        revert_payment_order_to_pending(&db, "RLY-2").await.unwrap();
+
+        let back = get_payment_order(&db, "RLY-2").await.unwrap().unwrap();
+        assert_eq!(back.status, "pending");
+        assert!(back.paid_at.is_none(), "退回后不应残留发货时间");
+
+        // 渠道重投时应当能再次拿到闸门,否则用户付了钱永远拿不到额度。
+        assert!(mark_payment_order_paid(&db, "RLY-2", None).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn failed_order_stops_retrying_and_blocks_credit() {
+        let db = test_db().await;
+        create_payment_order(&db, &order_row("RLY-3", "u-1", None, 100, 1000))
+            .await
+            .unwrap();
+        // 业务性失败(如套餐下架):置终态,避免渠道无意义地重投。
+        mark_payment_order_failed(&db, "RLY-3", None).await.unwrap();
+        assert!(!mark_payment_order_paid(&db, "RLY-3", None).await.unwrap());
+        assert_eq!(
+            get_payment_order(&db, "RLY-3").await.unwrap().unwrap().status,
+            "failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_payment_orders_filters_by_status_and_orders_newest_first() {
+        let db = test_db().await;
+        create_payment_order(&db, &order_row("RLY-a", "u-1", None, 100, 1000))
+            .await
+            .unwrap();
+        create_payment_order(&db, &order_row("RLY-b", "u-2", None, 200, 2000))
+            .await
+            .unwrap();
+        create_payment_order(&db, &order_row("RLY-c", "u-1", None, 300, 3000))
+            .await
+            .unwrap();
+        mark_payment_order_paid(&db, "RLY-b", None).await.unwrap();
+
+        let all = list_payment_orders(&db, None, 50).await.unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].id, "RLY-c", "应按创建时间倒序");
+
+        let pending = list_payment_orders(&db, Some("pending"), 50).await.unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().all(|o| o.status == "pending"));
+
+        // 对账最关心的就是这两类:都已付款但没拿到额度。
+        let paid = list_payment_orders(&db, Some("paid"), 50).await.unwrap();
+        assert_eq!(paid.len(), 1);
+        assert_eq!(paid[0].id, "RLY-b");
+        assert!(list_payment_orders(&db, Some("failed"), 50).await.unwrap().is_empty());
+
+        assert_eq!(list_payment_orders(&db, None, 2).await.unwrap().len(), 2, "limit 应生效");
+        // 空状态串等价于不过滤,避免前端传空值查不到东西。
+        assert_eq!(list_payment_orders(&db, Some("  "), 50).await.unwrap().len(), 3);
+    }
 
     // ---- 模型组导入/导出 ----
 
