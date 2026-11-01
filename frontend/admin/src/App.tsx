@@ -413,6 +413,7 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
   const open = !!dlg;
   const edit = dlg?.edit ?? null;
   const [username, setUsername] = useState("");
+  const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
   const [groupId, setGroupId] = useState(0);
   const [userGroupId, setUserGroupId] = useState(0);
@@ -437,6 +438,7 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
       api.plans().then((r) => setChargePlans(r.data)).catch(() => { /* 套餐加载失败不阻塞编辑 */ });
       setChargeTarget("balance");
       setUsername(edit?.username ?? ""); setPassword("");
+      setDisplayName(edit?.display_name ?? "");
       setGroupId(edit ? (edit.group_id ?? 0) : (groups.find((g) => g.is_active)?.id ?? 0));
       setUserGroupId(edit ? (edit.user_group_id ?? 0) : (userGroups.find((g) => g.name === "default")?.id ?? 0));
       setEmail(edit?.email ?? ""); setPhone(edit?.phone ?? "");
@@ -471,6 +473,7 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
         // 语义:留空 = 清除显式限额(发 -1 哨兵,后端 bind NULL 回落继承);0 = 显式不限;正数 = 该值。
         const body: any = {
           email: email.trim(), phone: phone.trim(),
+          display_name: displayName.trim(),
           group_id: groupId, user_group_id: userGroupId,
           concurrency_limit: cl === undefined ? -1 : cl,
           rpm_limit: rr === undefined ? -1 : rr,
@@ -488,7 +491,7 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
         await api.patchUser(edit.id, body);
       } else {
         const r: any = await api.createUser({
-          username: username.trim(), password,
+          username: username.trim(), display_name: displayName.trim() || undefined, password,
           email: email.trim() || undefined, phone: phone.trim() || undefined,
           group_id: groupId, user_group_id: userGroupId, grant_tokens: Number(amount) || 0,
           concurrency_limit: cl, rpm_limit: rr, tpm_limit: tr,
@@ -540,12 +543,16 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
               <div className="grid grid-cols-2 gap-3.5">
                 <div><label className={lbl}>用户名{edit ? "(不可改)" : " *"}</label>
                   <Input placeholder="登录用户名" value={username} onChange={(e) => setUsername(e.target.value)} disabled={!!edit} autoFocus={!edit} /></div>
-                <div><label className={lbl}>{edit ? "密码(留空不改)" : "密码(留空自动生成)"}</label>
-                  <Input type="password" placeholder={edit ? "留空保持不变" : "自动生成 16 位"} value={password} onChange={(e) => setPassword(e.target.value)} /></div>
+                <div><label className={lbl}>显示名(中文,可选)</label>
+                  <Input placeholder="如:张三 / 市场部-李四" value={displayName} onChange={(e) => setDisplayName(e.target.value)} /></div>
               </div>
               <div className="grid grid-cols-2 gap-3.5">
+                <div><label className={lbl}>{edit ? "密码(留空不改)" : "密码(留空自动生成)"}</label>
+                  <Input type="password" placeholder={edit ? "留空保持不变" : "自动生成 16 位"} value={password} onChange={(e) => setPassword(e.target.value)} /></div>
                 <div><label className={lbl}>邮箱(可选)</label>
                   <Input placeholder="name@example.com" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
+              </div>
+              <div className="grid grid-cols-2 gap-3.5">
                 <div><label className={lbl}>手机号(可选)</label>
                   <Input placeholder="13800000000" value={phone} onChange={(e) => setPhone(e.target.value)} /></div>
               </div>
@@ -990,9 +997,11 @@ function UsersPanel({ onAuthErr }: { onAuthErr: () => void }) {
                 <TableRow key={u.id}>
                   <TableCell>
                     <div className="flex items-center gap-2.5">
-                      <Avatar name={u.username || u.phone || "?"} />
+                      <Avatar name={u.display_name || u.username || u.phone || "?"} />
                       <div className="leading-tight">
-                        <div>{u.username || <span className="text-muted-foreground">—</span>}</div>
+                        <div>{u.display_name
+                          ? <span>{u.display_name} <span className="text-xs text-muted-foreground">({u.username || "—"})</span></span>
+                          : (u.username || <span className="text-muted-foreground">—</span>)}</div>
                         {u.phone && <div className="text-xs text-muted-foreground">{u.phone}</div>}
                       </div>
                     </div>
@@ -4319,7 +4328,7 @@ function UsageChartsBody() {
   const [provMap, setProvMap] = useState<Record<string, string>>({});
   const [userMap, setUserMap] = useState<Record<string, string>>({});
   useEffect(() => { api.providers(1, 200).then((r) => setProvMap(Object.fromEntries(r.data.map((p) => [p.name, providerDisplayName(p)])))).catch(() => { /* 静默 */ }); }, []);
-  useEffect(() => { api.users(1, 200).then((r) => setUserMap(Object.fromEntries(r.data.map((u) => [u.id, u.username ?? u.id.slice(0, 8)])))).catch(() => { /* 静默 */ }); }, []);
+  useEffect(() => { api.users(1, 200).then((r) => setUserMap(Object.fromEntries(r.data.map((u) => [u.id, u.display_name || u.username || u.id.slice(0, 8)])))).catch(() => { /* 静默 */ }); }, []);
   const unpricedCount = allModels.filter((m) => m.input_price == null || m.output_price == null).length;
   return (
     <div className="space-y-5">
@@ -4596,6 +4605,13 @@ function SettingsPanel() {
   const [fbSaving, setFbSaving] = useState(false);
   const [fbNote, setFbNote] = useState("");
   const [fbErr, setFbErr] = useState("");
+  // 上游熔断
+  const [brFails, setBrFails] = useState(3);
+  const [brWindow, setBrWindow] = useState(30);
+  const [brProbe, setBrProbe] = useState(30);
+  const [brSaving, setBrSaving] = useState(false);
+  const [brNote, setBrNote] = useState("");
+  const [brErr, setBrErr] = useState("");
   // 语义缓存
   const [cacheEnabled, setCacheEnabled] = useState(true);
   const [cacheTtl, setCacheTtl] = useState(3600);
@@ -4726,6 +4742,9 @@ function SettingsPanel() {
     api.fallbackSettings()
       .then((r) => { setFbEnabled(r.fallback_enabled); setFbMaxRetries(r.max_retries); setFbErr(""); markLoaded("fallback", true); })
       .catch((e: any) => { setFbErr(e?.message || "加载失败"); markLoaded("fallback", false); });
+    api.breakerSettings()
+      .then((r) => { setBrFails(r.fail_threshold); setBrWindow(r.open_window_secs); setBrProbe(r.probe_window_secs); setBrErr(""); markLoaded("breaker", true); })
+      .catch((e: any) => { setBrErr(e?.message || "加载失败"); markLoaded("breaker", false); });
     api.cacheSettings()
       .then((r) => {
         setCacheEnabled(r.enabled); setCacheTtl(r.ttl_secs);
@@ -4821,6 +4840,19 @@ function SettingsPanel() {
     } catch (e: any) {
       setFbErr(e.message);
     } finally { setFbSaving(false); }
+  };
+
+  const saveBreaker = async () => {
+    setBrErr(""); setBrNote("");
+    if (brFails < 1 || brFails > 50) { setBrErr("熔断阈值须在 1-50 之间"); return; }
+    if (brWindow < 1 || brWindow > 3600 || brProbe < 1 || brProbe > 3600) { setBrErr("熔断窗/探活超时须在 1-3600 秒之间"); return; }
+    setBrSaving(true);
+    try {
+      await api.saveBreakerSettings({ fail_threshold: brFails, open_window_secs: brWindow, probe_window_secs: brProbe });
+      setBrNote("已保存,下一次请求即生效(熔断器计数保留)。");
+    } catch (e: any) {
+      setBrErr(e.message);
+    } finally { setBrSaving(false); }
   };
 
   const saveCache = async () => {
@@ -5023,7 +5055,7 @@ function SettingsPanel() {
   // 加载失败的设置卡清单:展示提示并禁用对应「保存」,避免默认值回写。
   const failedCards = Object.entries(loaded).filter(([, ok]) => !ok).map(([k]) => k);
   const cardLabel: Record<string, string> = {
-    email: "邮箱配置", fallback: "降级配置", cache: "语义缓存", embedding: "向量嵌入",
+    email: "邮箱配置", fallback: "降级配置", breaker: "熔断配置", cache: "语义缓存", embedding: "向量嵌入",
     logging: "日志策略", portal: "门户设置", admKeys: "管理员密钥", sms: "短信网关",
     defaults: "全局默认限额", billing: "费用显示",
   };
@@ -5195,6 +5227,43 @@ function SettingsPanel() {
             <Button onClick={saveFallback} disabled={fbSaving || !loaded.fallback}>{fbSaving ? "保存中…" : "保存配置"}</Button>
             {fbNote && <span className="text-xs text-success">{fbNote}</span>}
             {fbErr && <span className="text-xs text-destructive">{fbErr}</span>}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className={tabCls("engine")}>
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <CardTitle className="text-base">上游熔断</CardTitle>
+            <Badge variant="muted">连续 {brFails} 次失败熔断 {brWindow}s</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-xs text-muted-foreground">
+            同一上游连续 N 次「不可用级」失败(5xx/网络错误/超时)即熔断:窗内新请求直接跳过该上游走下一候选(调用方无感,不计 429);
+            窗口结束后自动半开,放 1 个请求探活——成功则恢复,失败立即重新熔断。熔断是上游级状态,与模型组负载策略独立。
+          </p>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div>
+              <label className="mb-1 block text-xs text-muted-foreground">熔断阈值(连续失败次数,1-50)</label>
+              <Input type="number" min={1} max={50} value={brFails}
+                onChange={(e) => setBrFails(Math.max(1, Math.floor(Number(e.target.value) || 1)))} />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-muted-foreground">熔断窗时长(秒,1-3600)</label>
+              <Input type="number" min={1} max={3600} value={brWindow}
+                onChange={(e) => setBrWindow(Math.max(1, Math.floor(Number(e.target.value) || 1)))} />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-muted-foreground">探活超时(秒,1-3600)</label>
+              <Input type="number" min={1} max={3600} value={brProbe}
+                onChange={(e) => setBrProbe(Math.max(1, Math.floor(Number(e.target.value) || 1)))} />
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 border-t pt-4">
+            <Button onClick={saveBreaker} disabled={brSaving || !loaded.breaker}>{brSaving ? "保存中…" : "保存配置"}</Button>
+            {brNote && <span className="text-xs text-success">{brNote}</span>}
+            {brErr && <span className="text-xs text-destructive">{brErr}</span>}
           </div>
         </CardContent>
       </Card>
@@ -7303,11 +7372,16 @@ function RequestLogPanel() {
     const p = (n: number) => String(n).padStart(2, "0");
     return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${d.toLocaleTimeString("zh-CN", { hour12: false })}.${String(d.getMilliseconds()).padStart(3, "0")}`;
   };
-  // user_id → 展示名(用户名 > 邮箱 > 手机号 > ID 前缀)
+  // user_id → 展示名(中文名/显示名 > 用户名 > 邮箱 > 手机号 > ID 前缀)
   const nameOf = (uid: string) => {
     const u = userRows.find((x) => x.id === uid);
-    return u?.username || u?.email || u?.phone || `${uid.slice(0, 8)}…`;
+    return u?.display_name || u?.username || u?.email || u?.phone || `${uid.slice(0, 8)}…`;
   };
+  // provider 名(prov-xxx) → 可读名(显示名/中文/域名):调用链路展示用
+  const [provNames, setProvNames] = useState<Record<string, string>>({});
+  useEffect(() => {
+    api.providers(1, 200).then((r) => setProvNames(Object.fromEntries(r.data.map((p) => [p.name, providerDisplayName(p)])))).catch(() => { /* 静默 */ });
+  }, []);
   // 每秒输出 token:流式 = 输出 ÷ 生成耗时(总耗时-首块);非流式 = 输出 ÷ 总耗时;旧数据无首块为 null
   const tokensPerSec = (r: RequestLogRow): number | null => {
     if (r.output_tokens <= 0 || r.latency_ms <= 0) return null;
@@ -7495,7 +7569,7 @@ function RequestLogPanel() {
 
       {/* 右侧详情抽屉:手风琴分区展示完整链路 */}
       <Sheet open={detail != null} onOpenChange={(o) => { if (!o) setDetail(null); }}>
-        {detail && <RequestLogDetail row={detail} userName={nameOf(detail.user_id)} />}
+        {detail && <RequestLogDetail row={detail} userName={nameOf(detail.user_id)} provNames={provNames} />}
       </Sheet>
     </div>
   );
@@ -7532,7 +7606,7 @@ function CopyBtn({ text, title, className }: { text: string; title: string; clas
   );
 }
 
-function RequestLogDetail({ row, userName }: { row: RequestLogRow; userName: string }) {
+function RequestLogDetail({ row, userName, provNames }: { row: RequestLogRow; userName: string; provNames: Record<string, string> }) {
   const [open, setOpen] = useState<Record<string, boolean>>({ info: true, latency: true, chain: true, bodies: true });
   const toggleSec = (k: string) => setOpen((p) => ({ ...p, [k]: !p[k] }));
   const hitProvider = row.attempts.find((a) => a.status === 200)?.provider || row.final_kind || "";
@@ -7596,7 +7670,7 @@ function RequestLogDetail({ row, userName }: { row: RequestLogRow; userName: str
                 : <Badge variant="muted">非流式 JSON</Badge>}
             </span>
             <span className="text-muted-foreground">最终上游</span>
-            <span>{row.final_upstream_model ? <span className="inline-flex items-center gap-1"><span className="text-muted-foreground">{hitProvider}</span><span className="font-medium">{row.final_upstream_model}</span></span> : "—"}</span>
+            <span>{row.final_upstream_model ? <span className="inline-flex items-center gap-1"><span className="text-muted-foreground" title={`上游账号 ${hitProvider}`}>{provNames[hitProvider] || hitProvider || "—"}</span><span className="font-medium">{row.final_upstream_model}</span></span> : "—"}</span>
             <span className="text-muted-foreground">Tokens</span>
             <span className="mono">↑ {row.input_tokens.toLocaleString()} · ↓ {row.output_tokens.toLocaleString()} · 计费 {row.charged_tokens.toLocaleString()}</span>
           </div>
@@ -7621,7 +7695,7 @@ function RequestLogDetail({ row, userName }: { row: RequestLogRow; userName: str
                     <span className={cn("absolute -left-[21px] top-1.5 h-[9px] w-[9px] rounded-full ring-2 ring-background", dot)} />
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
                       <span className="mono text-[10px] text-muted-foreground">#{i + 1}</span>
-                      <span className="font-medium">{c.provider || "—"}</span>
+                      <span className="font-medium" title={`上游账号 ${c.provider || "—"}`}>{(c.provider && provNames[c.provider]) || c.provider || "—"}</span>
                       <span className="text-muted-foreground">{c.upstream_model}</span>
                       <span className="mono text-[10px] text-muted-foreground" title="负载权重">w{c.weight}</span>
                       {att ? (
@@ -7647,7 +7721,7 @@ function RequestLogDetail({ row, userName }: { row: RequestLogRow; userName: str
                   <span className={cn("absolute -left-[21px] top-1.5 h-[9px] w-[9px] rounded-full ring-2 ring-background", a.status === 200 ? "bg-emerald-500" : "bg-rose-500")} />
                   <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
                     <span className="mono text-[10px] text-muted-foreground">重试</span>
-                    <span className="font-medium">{a.provider || a.kind}</span>
+                    <span className="font-medium" title={`上游账号 ${a.provider || a.kind}`}>{provNames[a.provider || ""] || a.provider || a.kind}</span>
                     <span className="text-muted-foreground">{a.upstream_model}</span>
                     <span className={cn("inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset", attemptStatusColor(a.status))}>
                       {attemptStatusLabel(a.status)}

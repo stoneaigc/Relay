@@ -91,8 +91,17 @@ export interface QuotaInfo {
   };
 }
 
+/** 可购买套餐(门户「套餐充值」区) */
+export interface PlanCard {
+  id: string; name: string; token_quota: number; validity_days: number;
+  price_cents: number; description: string | null;
+}
+
 export const api = {
   me: () => req("/portal/api/me"),
+  plans: (): Promise<{ data: PlanCard[] }> => req("/portal/api/plans"),
+  createPaymentOrder: (plan_id: string): Promise<{ order_id: string; status: string; pay_url: string | null }> =>
+    req("/portal/api/payments/orders", { method: "POST", body: JSON.stringify({ plan_id }) }),
   balance: () => req("/portal/api/balance"),
   keys: (): Promise<{ data: KeyInfo[] }> => req("/portal/api/keys"),
   createKey: (interface_kind: string): Promise<KeyMutationResp> =>

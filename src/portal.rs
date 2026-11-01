@@ -239,6 +239,7 @@ pub async fn register(
                 "phone",
                 default_ug,
                 None,
+                None,
             )
             .await
             .map_err(|_| ApiError::BadRequest("该手机号已注册".into()))?;
@@ -262,6 +263,7 @@ pub async fn register(
                 active_group,
                 "email",
                 default_ug,
+                None,
                 None,
             )
             .await
@@ -328,7 +330,7 @@ pub async fn reset_password(
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or_else(|| ApiError::BadRequest("该邮箱未注册".into()))?;
     let pwhash = storage::hash_password(&body.password);
-    storage::update_user_fields(&state.db, id, None, None, None, Some(&pwhash))
+    storage::update_user_fields(&state.db, id, None, None, None, Some(&pwhash), None)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     // 自助重置 = 用户已知新密码,标记已改密(管理员端不再展示初始密码)。
@@ -371,7 +373,7 @@ pub async fn change_password(
         return Err(ApiError::InvalidCredentials);
     }
     let new_hash = storage::hash_password(&body.new_password);
-    storage::update_user_fields(&state.db, uid, None, None, None, Some(&new_hash))
+    storage::update_user_fields(&state.db, uid, None, None, None, Some(&new_hash), None)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     // 自助改密后管理员端不再展示初始密码。
@@ -908,4 +910,65 @@ pub async fn usage(
         "total": total,
         "total_pages": total_pages(total, page_size),
     })))
+}
+
+// ======================== 套餐购买(支付对接预留) ========================
+
+/// GET /portal/plans —— 可购买套餐列表(仅 enabled):门户「套餐充值」区展示用。
+pub async fn portal_plans(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    portal_user(&state, &headers)?;
+    let all = storage::list_plans(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let data: Vec<serde_json::Value> = all
+        .into_iter()
+        .filter(|p| p.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false))
+        .collect();
+    Ok(Json(json!({ "data": data })))
+}
+
+#[derive(serde::Deserialize)]
+pub struct PortalPaymentOrderBody {
+    /// 充值目标套餐(当前门户自助充值仅支持套餐;充主余额走管理员充值)。
+    pub plan_id: String,
+    #[serde(default)]
+    pub remark: String,
+}
+
+/// POST /portal/payments/orders —— 门户自助充值下单(支付对接预留扩展点)。
+/// 金额/额度以套餐定义为准,前端不可传金额,防篡改。未接入渠道时统一回 501 语义的明确错误;
+/// 接入后由 PaymentProvider 返回订单号与拉起支付凭据,套餐到账在渠道回调确认后执行。
+pub async fn create_payment_order(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<PortalPaymentOrderBody>,
+) -> Result<Json<Value>, ApiError> {
+    let uid = portal_user(&state, &headers)?;
+    let plan = storage::list_plans(&state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .into_iter()
+        .find(|p| p.get("id").and_then(|v| v.as_str()) == Some(body.plan_id.trim()))
+        .ok_or_else(|| ApiError::BadRequest("套餐不存在".into()))?;
+    if !plan.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err(ApiError::BadRequest("该套餐已下架".into()));
+    }
+    let tokens = plan.get("token_quota").and_then(|v| v.as_i64()).unwrap_or(0);
+    let amount = plan.get("price_cents").and_then(|v| v.as_i64()).unwrap_or(0);
+    let cfg = state.config.load().payment.clone();
+    let p = crate::payment::provider(&cfg);
+    let order = p
+        .create_order(crate::payment::PaymentOrderRequest {
+            user_id: uid.to_string(),
+            plan_id: Some(body.plan_id.trim().to_string()),
+            tokens,
+            amount_cents: amount,
+            remark: if body.remark.is_empty() { format!("门户自助充值套餐 {}", plan.get("name").and_then(|v| v.as_str()).unwrap_or("")) } else { body.remark },
+        })
+        .await
+        .map_err(|e| ApiError::NotImplemented(e.to_string()))?;
+    Ok(Json(serde_json::to_value(order).unwrap_or_else(|_| json!({}))))
 }

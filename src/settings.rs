@@ -206,9 +206,42 @@ pub fn apply_fallback_settings(cfg: &mut Config, kv: &HashMap<String, String>) {
     cfg.defaults = defaults;
 }
 
+/// settings 表里上游熔断相关 key 的前缀。
+pub const BREAKER_PREFIX: &str = "breaker.";
+pub const K_BR_FAILS: &str = "breaker.fail_threshold";
+pub const K_BR_WINDOW: &str = "breaker.open_window_secs";
+pub const K_BR_PROBE: &str = "breaker.probe_window_secs";
+
+/// 把 DB 里的 breaker.* 覆盖到内存 Config.defaults(DB 优先于配置文件)。
+/// 解析失败/越界时静默保持原值,与 fallback.* 行为一致。
+pub fn apply_breaker_settings(cfg: &mut Config, kv: &HashMap<String, String>) {
+    let mut d = cfg.defaults.clone();
+    if let Some(v) = kv.get(K_BR_FAILS) {
+        if let Ok(n) = v.parse::<u8>() {
+            if (1..=50).contains(&n) {
+                d.breaker_fail_threshold = n;
+            }
+        }
+    }
+    if let Some(v) = kv.get(K_BR_WINDOW) {
+        if let Ok(n) = v.parse::<u64>() {
+            if (1..=3600).contains(&n) {
+                d.breaker_open_window_secs = n;
+            }
+        }
+    }
+    if let Some(v) = kv.get(K_BR_PROBE) {
+        if let Ok(n) = v.parse::<u64>() {
+            if (1..=3600).contains(&n) {
+                d.breaker_probe_window_secs = n;
+            }
+        }
+    }
+    cfg.defaults = d;
+}
+
 /// settings 表里语义缓存相关 key 的前缀。
-pub const CACHE_PREFIX: &str = "cache.";
-pub const K_CACHE_ENABLED: &str = "cache.enabled";
+pub const CACHE_PREFIX: &str = "cache.";pub const K_CACHE_ENABLED: &str = "cache.enabled";
 pub const K_CACHE_TTL: &str = "cache.ttl_secs";
 pub const K_CACHE_THRESHOLD: &str = "cache.similarity_threshold";
 pub const K_CACHE_MULTI_TURN: &str = "cache.multi_turn_max";

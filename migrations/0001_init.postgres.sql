@@ -6,6 +6,7 @@
 CREATE TABLE IF NOT EXISTS users (
   id                TEXT PRIMARY KEY,
   username          TEXT UNIQUE,
+  display_name      TEXT,                        -- 显示名(中文昵称),展示优先于登录用户名
   password_hash     TEXT,
   email             TEXT,
   phone             TEXT UNIQUE,

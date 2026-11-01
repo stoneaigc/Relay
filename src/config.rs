@@ -429,6 +429,15 @@ pub struct Defaults {
     /// 币种切换为 cny 时使用的美元→人民币汇率(展示换算用,默认 7.2)。
     #[serde(default = "default_cny_rate")]
     pub cny_rate: f64,
+    /// 上游熔断阈值:连续 N 次 Unavailable 级失败后熔断(默认 3)。
+    #[serde(default = "default_breaker_fails")]
+    pub breaker_fail_threshold: u8,
+    /// 熔断窗时长(秒):窗内直接跳过该上游,窗后半开探活(默认 30)。
+    #[serde(default = "default_breaker_window")]
+    pub breaker_open_window_secs: u64,
+    /// 半开探活在飞超时(秒):超过视为探活丢失,允许放新探活(默认 30)。
+    #[serde(default = "default_breaker_window")]
+    pub breaker_probe_window_secs: u64,
 }
 
 impl Defaults {
@@ -451,6 +460,8 @@ fn default_fallback_enabled() -> bool { true }
 fn default_max_retries() -> u32 { 5 }
 fn default_currency() -> String { "usd".to_string() }
 fn default_cny_rate() -> f64 { 7.2 }
+fn default_breaker_fails() -> u8 { 3 }
+fn default_breaker_window() -> u64 { 30 }
 
 impl Default for Defaults {
     fn default() -> Self {
@@ -467,6 +478,9 @@ impl Default for Defaults {
             max_retries: default_max_retries(),
             currency: default_currency(),
             cny_rate: default_cny_rate(),
+            breaker_fail_threshold: default_breaker_fails(),
+            breaker_open_window_secs: default_breaker_window(),
+            breaker_probe_window_secs: default_breaker_window(),
         }
     }
 }

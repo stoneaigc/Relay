@@ -4,9 +4,9 @@ import {
   KeyRound, Copy, RefreshCw, Plus, LogOut, Check,
   LayoutDashboard, Receipt, MessageSquare, Menu, X, SendHorizontal, Boxes,
   Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen,
-  Gauge, Zap, Timer, CalendarDays, KeySquare, Eye, EyeOff, ShieldCheck, Sparkles, Square, Trash2,
+  Gauge, Zap, Timer, CalendarDays, KeySquare, Eye, EyeOff, ShieldCheck, Sparkles, Square, Trash2, ShoppingCart,
 } from "lucide-react";
-import { api, getToken, clearToken, healthz, SITE_PREFIX, KeyInfo, ModelCard, QuotaInfo, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType, makeCostFormatter } from "./api";
+import { api, getToken, clearToken, healthz, SITE_PREFIX, KeyInfo, ModelCard, QuotaInfo, PlanCard, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType, makeCostFormatter } from "./api";
 import { copyText } from "./clipboard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -296,6 +296,67 @@ function LineChart({ points }: { points: { ts: number; tokens: number; calls: nu
 // token 数紧凑格式(预算条用):1.2M / 45K / 800。
 const compactTokens = (n: number) =>
   n >= 1_000_000 ? `${(n / 1_000_000).toFixed(n % 1_000_000 ? 1 : 0)}M` : n >= 1_000 ? `${(n / 1_000).toFixed(0)}K` : String(n);
+
+/** 套餐充值区:展示可购买套餐;支付渠道未接入时点击给出明确提示(下单链路已预留)。 */
+function PlanShop() {
+  const [plans, setPlans] = useState<PlanCard[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ plan: string; text: string; ok: boolean } | null>(null);
+  useEffect(() => { api.plans().then((r) => setPlans(r.data ?? [])).catch(() => { /* 静默 */ }); }, []);
+  if (plans.length === 0) return null;
+  const buy = async (p: PlanCard) => {
+    setBusy(p.id); setMsg(null);
+    try {
+      const order = await api.createPaymentOrder(p.id);
+      if (order.pay_url) {
+        window.open(order.pay_url, "_blank");
+        setMsg({ plan: p.name, text: "下单成功,正在拉起支付…", ok: true });
+      } else {
+        setMsg({ plan: p.name, text: `下单成功(订单 ${order.order_id}),请完成支付`, ok: true });
+      }
+    } catch (e: any) {
+      setMsg({ plan: p.name, text: e?.message ?? "下单失败,请稍后重试", ok: false });
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <div>
+      <div className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-foreground">
+        <ShoppingCart className="h-4 w-4 text-primary" /> 套餐充值
+      </div>
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {plans.map((p) => (
+          <div key={p.id} className="flex flex-col rounded-xl border bg-card p-4">
+            <div className="flex items-start justify-between gap-2">
+              <div className="text-sm font-semibold">{p.name}</div>
+              <div className="text-right">
+                <div className="text-lg font-bold tracking-tight">¥{(p.price_cents / 100).toFixed(p.price_cents % 100 ? 2 : 0)}</div>
+              </div>
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              {compactTokens(p.token_quota)} tokens · 有效期 {p.validity_days} 天
+            </div>
+            {p.description && <p className="mt-1.5 line-clamp-2 text-xs text-muted-foreground" title={p.description}>{p.description}</p>}
+            <button
+              onClick={() => void buy(p)}
+              disabled={busy === p.id}
+              className="mt-3 inline-flex h-8 items-center justify-center rounded-lg bg-primary px-3 text-xs font-medium text-primary-foreground transition hover:bg-primary/90 disabled:opacity-60"
+            >
+              {busy === p.id ? "下单中…" : "立即充值"}
+            </button>
+          </div>
+        ))}
+      </div>
+      {msg && (
+        <p className={cn("mt-2 rounded-lg border px-3 py-2 text-xs",
+          msg.ok ? "border-emerald-500/30 bg-emerald-500/5 text-emerald-700" : "border-amber-500/30 bg-amber-500/5 text-amber-700")}>
+          {msg.plan}:{msg.text}
+        </p>
+      )}
+    </div>
+  );
+}
 
 /** 我的套餐卡:品牌渐变底,展示套餐名 + 余额 + 消耗进度。 */
 function PlanHero({ quota, summary }: { quota: QuotaInfo | null; summary: { granted: number; used: number; balance: number } | null }) {
@@ -648,6 +709,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                     <QuotaCell icon={CalendarDays} label="日预算" limit={quota?.budget.daily.limit ?? null} used={quota?.budget.daily.used ?? 0} fmt={compactTokens} hint={quota?.budget.daily.source} />
                     <QuotaCell icon={KeySquare} label="月预算" limit={quota?.budget.monthly.limit ?? null} used={quota?.budget.monthly.used ?? 0} fmt={compactTokens} hint={quota?.budget.monthly.source} />
                   </div>
+                  <PlanShop />
                   <InterfaceCard baseUrl={`${window.location.origin}${SITE_PREFIX}/v1`} keys={keys} onReveal={setReveal} onChanged={refresh} />
                   <Card>
                     <CardHeader>

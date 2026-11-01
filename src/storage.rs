@@ -258,8 +258,26 @@ pub async fn init_pool(cfg: &crate::config::DatabaseConfig) -> anyhow::Result<Db
     Ok(pool)
 }
 
-pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
-    let is_pg = backend() == Backend::Postgres;
+/// SQLite 补列:列不存在时 ALTER TABLE ADD COLUMN(PG 走 IF NOT EXISTS,无需此辅助)。
+pub async fn ensure_sqlite_column(pool: &Db, table: &str, column: &str, decl: &str) {
+    let cols: Vec<String> = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(pool)
+        .await
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.try_get::<String, _>("name").ok())
+        .collect();
+    if !cols.iter().any(|c| c == column) {
+        if let Err(e) = sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))
+            .execute(pool)
+            .await
+        {
+            tracing::warn!("补列 {table}.{column} 失败: {e}");
+        }
+    }
+}
+
+pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {    let is_pg = backend() == Backend::Postgres;
     let raw = if is_pg {
         include_str!("../migrations/0001_init.postgres.sql")
     } else {
@@ -333,6 +351,10 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
         let _ = q!("ALTER TABLE users ADD COLUMN IF NOT EXISTS tpm_limit BIGINT")
             .execute(pool)
             .await;
+        // 用户显示名(中文昵称):平台展示优先它,空则回退登录用户名。
+        let _ = q!("ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT")
+            .execute(pool)
+            .await;
         // 奖励申领接入任务:补 task_id,并放开旧 kind 的 NOT NULL。
         let _ = q!("ALTER TABLE reward_claims ADD COLUMN IF NOT EXISTS task_id BIGINT")
             .execute(pool)
@@ -385,6 +407,8 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {
             .await;
     } else {
         let _ = q!("ALTER TABLE reward_claims ADD COLUMN task_id INTEGER").execute(pool).await;
+        // 用户显示名(中文昵称):SQLite 不支持 ADD COLUMN IF NOT EXISTS,用 PRAGMA 判存在后补列。
+        ensure_sqlite_column(pool, "users", "display_name", "TEXT").await;
         let _ = q!("ALTER TABLE users ADD COLUMN bill_multiplier REAL NOT NULL DEFAULT 1.0")
             .execute(pool)
             .await;
@@ -653,7 +677,7 @@ pub async fn load_into_memory(
     keys: &DashMap<String, KeyEntry>,
 ) -> anyhow::Result<()> {
     let rows = q!(
-        "SELECT u.id, u.status, u.token_balance, u.token_used_total, u.concurrency_limit, u.bill_multiplier, u.group_id, u.user_group_id, u.rpm_limit, u.tpm_limit, u.budget_daily_tokens, u.budget_monthly_tokens, \
+        "SELECT u.id, u.status, u.token_balance, u.token_used_total, u.concurrency_limit, u.bill_multiplier, u.group_id, u.user_group_id, u.rpm_limit, u.tpm_limit, u.budget_daily_tokens, u.budget_monthly_tokens, u.username, u.display_name, \
                 ug.max_concurrency AS ug_concurrency, ug.rpm_limit AS ug_rpm, ug.tpm_limit AS ug_tpm, \
                 ug.budget_daily_tokens AS ug_budget_daily, ug.budget_monthly_tokens AS ug_budget_monthly \
          FROM users u LEFT JOIN user_groups ug ON ug.id = u.user_group_id",
@@ -677,7 +701,14 @@ pub async fn load_into_memory(
         let limit = if cl_resolved == 0 { u32::MAX } else { cl_resolved };
         let rpm = cl_free_resolve(r.try_get::<Option<i64>, _>("rpm_limit").ok().flatten(), ug_rpm, cfg.defaults.rpm_limit);
         let tpm = cl_free_resolve(r.try_get::<Option<i64>, _>("tpm_limit").ok().flatten(), ug_tpm, cfg.defaults.tpm_limit);
-        let username: String = r.try_get("username").unwrap_or_else(|_| id.to_string());
+        // 监控展示名:显示名(中文昵称)优先,回退登录用户名,再回退 id。
+        let username: String = r.try_get::<Option<String>, _>("username").ok().flatten().unwrap_or_else(|| id.to_string());
+        let username = r
+            .try_get::<Option<String>, _>("display_name")
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(username);
         let us = Arc::new(UserState::new(id, &username, balance, used_total, limit, status as u8, mult, group_id, user_group_id));
         us.set_limits(rpm, tpm);
         let ug_bd = r.try_get::<Option<i64>, _>("ug_budget_daily").ok().flatten();
@@ -1140,7 +1171,8 @@ pub async fn list_model_names_by_provider(pool: &Db, provider_name: &str) -> any
 }
 
 pub async fn add_group(pool: &Db, name: &str, max_concurrency: i64) -> anyhow::Result<i64> {
-    let r = q!("INSERT INTO model_groups (name, max_concurrency, created_at) VALUES (?, ?, ?) RETURNING id")
+    // 新组默认「智能自适应」:无延迟/成本数据时中性随机,有数据后自动偏向快且便宜的候选。
+    let r = q!("INSERT INTO model_groups (name, max_concurrency, strategy, created_at) VALUES (?, ?, 'auto', ?) RETURNING id")
         .bind(name).bind(max_concurrency).bind(now_iso()).fetch_one(pool).await?;
     Ok(r.get::<i64, _>("id"))
 }
@@ -1563,6 +1595,8 @@ pub async fn backfill_used_total(pool: &Db) -> anyhow::Result<()> {
 pub struct UserRow {
     pub id: Uuid,
     pub username: Option<String>,
+    /// 显示名(中文昵称):展示优先级 display_name > username。
+    pub display_name: Option<String>,
     pub email: Option<String>,
     pub phone: Option<String>,
     pub status: i64,
@@ -1585,7 +1619,7 @@ pub struct UserRow {
 }
 
 /// 用户表全字段 SELECT(与 row_to_user 对应)。
-const USER_COLS: &str = "id, username, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens, user_group_id, password_changed, initial_password, source, created_at";
+const USER_COLS: &str = "id, username, display_name, email, phone, status, token_balance, token_used_total, concurrency_limit, bill_multiplier, group_id, rpm_limit, tpm_limit, budget_daily_tokens, budget_monthly_tokens, user_group_id, password_changed, initial_password, source, created_at";
 
 /// 管理端创建用户(用户名/密码/邮箱/手机号/模型组/用户组)。
 /// `initial_password_plain`:有值则加密存入 initial_password 并置 password_changed=0(管理员可查看);
@@ -1602,15 +1636,17 @@ pub async fn admin_create_user(
     source: &str,
     user_group_id: Option<i64>,
     initial_password_plain: Option<&str>,
+    display_name: Option<&str>,
 ) -> anyhow::Result<Uuid> {
     let id = Uuid::new_v4();
     let pw_changed: i64 = if initial_password_plain.is_some() { 0 } else { 1 };
     q!(
-        "INSERT INTO users (id, username, password_hash, email, phone, status, token_balance, group_id, source, user_group_id, password_changed, initial_password, created_at)
-         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO users (id, username, display_name, password_hash, email, phone, status, token_balance, group_id, source, user_group_id, password_changed, initial_password, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(id.to_string())
     .bind(username)
+    .bind(display_name.map(|s| s.trim()).filter(|s| !s.is_empty()))
     .bind(password_hash)
     .bind(email)
     .bind(phone)
@@ -1644,10 +1680,20 @@ pub async fn update_user_fields(
     email: Option<&str>,
     phone: Option<&str>,
     password_hash: Option<&str>,
+    display_name: Option<&str>,
 ) -> anyhow::Result<()> {
     let ids = id.to_string();
     if let Some(v) = username {
         q!("UPDATE users SET username = ? WHERE id = ?").bind(v).bind(&ids).execute(pool).await?;
+    }
+    if let Some(v) = display_name {
+        // 空串视为清除显示名(回退登录用户名)。
+        let v = v.trim();
+        q!("UPDATE users SET display_name = ? WHERE id = ?")
+            .bind(if v.is_empty() { None } else { Some(v) })
+            .bind(&ids)
+            .execute(pool)
+            .await?;
     }
     if let Some(v) = email {
         q!("UPDATE users SET email = ? WHERE id = ?").bind(v).bind(&ids).execute(pool).await?;
@@ -1661,9 +1707,19 @@ pub async fn update_user_fields(
     Ok(())
 }
 
+/// 查用户展示名:显示名(中文昵称)优先,回退登录用户名;用户不存在返回 None。
+pub async fn user_display_name(pool: &Db, id: &Uuid) -> Option<String> {
+    let row = q!("SELECT COALESCE(NULLIF(display_name,''), username) AS name FROM users WHERE id = ?")
+        .bind(id.to_string())
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()?;
+    row.try_get::<Option<String>, _>("name").ok().flatten().filter(|s| !s.is_empty())
+}
+
 /// 按邮箱查用户 id(忘记密码用)。
-pub async fn find_user_by_email(pool: &Db, email: &str) -> anyhow::Result<Option<Uuid>> {
-    let row = q!("SELECT id FROM users WHERE email = ?")
+pub async fn find_user_by_email(pool: &Db, email: &str) -> anyhow::Result<Option<Uuid>> {    let row = q!("SELECT id FROM users WHERE email = ?")
         .bind(email)
         .fetch_optional(pool)
         .await?;
@@ -1767,6 +1823,7 @@ fn row_to_user(r: &sqlx::any::AnyRow) -> anyhow::Result<UserRow> {
     Ok(UserRow {
         id: Uuid::parse_str(r.get::<String, _>("id").as_str())?,
         username: r.try_get("username").unwrap_or(None),
+        display_name: r.try_get("display_name").unwrap_or(None),
         email: r.try_get("email").unwrap_or(None),
         phone: r.get("phone"),
         status: r.get("status"),
@@ -3249,10 +3306,10 @@ pub async fn overview(pool: &Db, tz_offset_hours: i64) -> anyhow::Result<serde_j
     .await?;
 
     let top = q!(
-        "SELECT l.user_id AS uid, COALESCE(u.username, u.phone) AS name,
+        "SELECT l.user_id AS uid, COALESCE(NULLIF(u.display_name,''), u.username, u.phone) AS name,
                 CAST(COALESCE(SUM(l.charged_tokens),0) AS BIGINT) AS used, COUNT(*) AS calls
          FROM usage_logs l LEFT JOIN users u ON u.id = l.user_id
-         GROUP BY l.user_id, u.username, u.phone ORDER BY used DESC LIMIT 20")
+         GROUP BY l.user_id, u.display_name, u.username, u.phone ORDER BY used DESC LIMIT 20")
         .fetch_all(pool).await?;
     let top_users: Vec<serde_json::Value> = top.iter().map(|r| serde_json::json!({
         "user_id": r.get::<String,_>("uid"),
@@ -3309,14 +3366,14 @@ pub async fn usage_breakdown(pool: &Db) -> anyhow::Result<serde_json::Value> {
     .fetch_all(pool)
     .await?;
     let users = q!(
-        "SELECT COALESCE(u.username, u.phone, l.user_id) AS label,
+        "SELECT COALESCE(NULLIF(u.display_name,''), u.username, u.phone, l.user_id) AS label,
                 COUNT(*) AS calls,
                 CAST(COALESCE(SUM(l.input_tokens),0) AS BIGINT) AS input_tokens,
                 CAST(COALESCE(SUM(l.output_tokens),0) AS BIGINT) AS output_tokens,
                 CAST(COALESCE(SUM(l.charged_tokens),0) AS BIGINT) AS charged_tokens,
                 COALESCE(SUM(l.cost_usd),0.0) AS cost_usd
          FROM usage_logs l LEFT JOIN users u ON u.id = l.user_id
-         GROUP BY l.user_id, u.username, u.phone
+         GROUP BY l.user_id, u.display_name, u.username, u.phone
          ORDER BY cost_usd DESC
          LIMIT 10"
     )
@@ -4131,7 +4188,7 @@ mod tests {
     #[tokio::test]
     async fn user_budget_roundtrip() {
         let db = test_db().await;
-        let id = admin_create_user(&db, "budgeter", "x", None, None, 100, None, "admin", None, None)
+        let id = admin_create_user(&db, "budgeter", "x", None, None, 100, None, "admin", None, None, None)
             .await
             .unwrap();
 
@@ -4162,7 +4219,7 @@ mod tests {
     #[tokio::test]
     async fn list_users_page_search() {
         let db = test_db().await;
-        let id = admin_create_user(&db, "searcher", "x", None, Some("13900001111"), 0, None, "admin", None, None)
+        let id = admin_create_user(&db, "searcher", "x", None, Some("13900001111"), 0, None, "admin", None, None, None)
             .await
             .unwrap();
 
@@ -4304,5 +4361,39 @@ mod tests {
         // 空/空白关键字等价于全量。
         let (_, total) = list_providers(&db, None, None, Some("  ")).await.unwrap();
         assert_eq!(total, 11);
+    }
+}
+
+#[cfg(test)]
+mod tmp_probe_tests {
+    use super::*;
+    #[tokio::test]
+    async fn probe_ensure_column() {
+        sqlx::any::install_default_drivers();
+        let _ = BACKEND.set(Backend::Sqlite);
+        let pool = AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:?mode=rwc").await.unwrap();
+        init_schema(&pool).await.unwrap();
+        let r = ensure_sqlite_column_dbg(&pool, "users", "display_name", "TEXT").await;
+        println!("PROBE result: {r:?}");
+        let cols: Vec<String> = sqlx::query("PRAGMA table_info(users)").fetch_all(&pool).await.unwrap()
+            .iter().filter_map(|r| r.try_get::<String,_>("name").ok()).collect();
+        println!("PROBE cols has display_name: {}", cols.iter().any(|c| c == "display_name"));
+    }
+
+    async fn ensure_sqlite_column_dbg(pool: &Db, table: &str, column: &str, decl: &str) -> Result<(), String> {
+        let pr = sqlx::query(&format!("PRAGMA table_info({table})")).fetch_all(pool).await;
+        match pr {
+            Ok(rows) => {
+                let cols: Vec<String> = rows.iter().filter_map(|r| r.try_get::<String, _>("name").ok()).collect();
+                println!("PROBE existing cols: {cols:?}");
+                if !cols.iter().any(|c| c == column) {
+                    match sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}")).execute(pool).await {
+                        Ok(_) => Ok(()),
+                        Err(e) => Err(format!("alter err: {e}")),
+                    }
+                } else { Ok(()) }
+            }
+            Err(e) => Err(format!("pragma err: {e}")),
+        }
     }
 }

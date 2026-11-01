@@ -494,11 +494,22 @@ pub struct FailureRecord {
     pub triggered_break: bool,
 }
 
-/// 连续失败 N 次就熔断熔断窗这么久。
-const BREAKER_FAILS: u8 = 3;
-const BREAKER_WINDOW: Duration = Duration::from_secs(30);
-/// 半开探活在飞超时:超过则视为探活丢失,允许放新探活(兜底防标志卡死)。
-const BREAKER_PROBE_WINDOW: Duration = Duration::from_secs(30);
+/// 熔断参数(来自 config `[defaults]`,可在配置文件调整,运行时随配置热更新生效)。
+#[derive(Debug, Clone, Copy)]
+pub struct BreakerCfg {
+    /// 连续 N 次 Unavailable 级失败后熔断。
+    pub fails: u8,
+    /// 熔断窗时长:窗内直接跳过该上游,窗后半开探活。
+    pub open_window: Duration,
+    /// 半开探活在飞超时:超过则视为探活丢失,允许放新探活(兜底防标志卡死)。
+    pub probe_window: Duration,
+}
+
+impl Default for BreakerCfg {
+    fn default() -> Self {
+        Self { fails: 3, open_window: Duration::from_secs(30), probe_window: Duration::from_secs(30) }
+    }
+}
 
 /// 每个上游的熔断器状态(内部可变,AsyncMutex 保护避免竞态)。
 #[derive(Debug, Default)]
@@ -514,7 +525,7 @@ impl Breaker {
     /// 是否应跳过该上游(熔断 open 或探活在飞)。
     /// 熔断窗到期自动转半开:只放行一个探活请求,其余请求继续跳过;
     /// 探活失败立即重新熔断(计数已放到阈值-1),探活超时则换新探活。
-    pub fn should_skip(&mut self) -> bool {
+    pub fn should_skip(&mut self, cfg: &BreakerCfg) -> bool {
         let now = Instant::now();
         if let Some(t) = self.recover_at {
             if now < t {
@@ -522,17 +533,17 @@ impl Breaker {
             }
             // 窗口到期 → 半开:本次调用即探活请求,直接放行;
             // 失败计数放到阈值-1,探活一失败立即重新熔断
-            self.fail_count = BREAKER_FAILS - 1;
+            self.fail_count = cfg.fails.saturating_sub(1);
             self.recover_at = None;
             self.probing_since = Some(now);
             return false;
         }
         if let Some(ps) = self.probing_since {
-            if now.duration_since(ps) < BREAKER_PROBE_WINDOW {
+            if now.duration_since(ps) < cfg.probe_window {
                 return true; // 探活在飞,其余请求跳过
             }
             // 探活超时(如流式请求迟迟无响应):本次调用即新探活,直接放行
-            self.fail_count = BREAKER_FAILS - 1;
+            self.fail_count = cfg.fails.saturating_sub(1);
             self.probing_since = Some(now);
             return false;
         }
@@ -547,11 +558,11 @@ impl Breaker {
     }
 
     /// 遇到一次 Unavailable 级错误:计数+1,达到阈值就进入熔断窗。
-    pub fn record_unavailable(&mut self) {
+    pub fn record_unavailable(&mut self, cfg: &BreakerCfg) {
         self.probing_since = None; // 探活(若在飞)已结束
         self.fail_count = self.fail_count.saturating_add(1);
-        if self.fail_count >= BREAKER_FAILS {
-            self.recover_at = Some(Instant::now() + BREAKER_WINDOW);
+        if self.fail_count >= cfg.fails {
+            self.recover_at = Some(Instant::now() + cfg.open_window);
         }
     }
 
@@ -562,7 +573,7 @@ impl Breaker {
     }
 
     /// 给管理后台看的状态快照(纯数据)。
-    pub fn snapshot(&self) -> Value {
+    pub fn snapshot(&self, cfg: &BreakerCfg) -> Value {
         let now = Instant::now();
         let (broken, remaining_ms) = match self.recover_at {
             Some(t) if t > now => (true, t.saturating_duration_since(now).as_millis() as u64),
@@ -570,10 +581,10 @@ impl Breaker {
         };
         json!({
             "fail_count": self.fail_count,
-            "threshold": BREAKER_FAILS,
+            "threshold": cfg.fails,
             "is_broken": broken,
             "recover_remaining_ms": remaining_ms,
-            "window_secs": BREAKER_WINDOW.as_secs(),
+            "window_secs": cfg.open_window.as_secs(),
         })
     }
 }
@@ -685,16 +696,27 @@ impl AppState {
 
     // ======================== P2:上游熔断器 ========================
 
+    /// 从当前配置构建熔断参数(配置热更新后下次调用即生效)。
+    fn breaker_cfg(&self) -> BreakerCfg {
+        let d = &self.config.load().defaults;
+        BreakerCfg {
+            fails: d.breaker_fail_threshold.max(1),
+            open_window: Duration::from_secs(d.breaker_open_window_secs.max(1)),
+            probe_window: Duration::from_secs(d.breaker_probe_window_secs.max(1)),
+        }
+    }
+
     /// 检查一个上游是否被熔断(调用者在选候选前先问,熔断就跳过)。
     /// 若刚到熔断窗末尾,会自动进入「半开」状态(放一个请求探活)。
     pub async fn breaker_should_skip(&self, key: &UpstreamKey) -> bool {
+        let cfg = self.breaker_cfg();
         let breaker = self
             .upstream_breakers
             .entry(key.clone())
             .or_insert_with(|| Arc::new(AsyncMutex::new(Breaker::default())))
             .clone();
         let mut b = breaker.lock().await;
-        b.should_skip()
+        b.should_skip(&cfg)
     }
 
     /// 该上游调用成功:熔断器清零。
@@ -709,13 +731,14 @@ impl AppState {
 
     /// 该上游返回 Unavailable:累加熔断计数,返回「累加后的 fail_count」,供审计链路判断是否触发熔断。
     pub async fn breaker_unavailable(&self, key: &UpstreamKey) -> u8 {
+        let cfg = self.breaker_cfg();
         let breaker = self
             .upstream_breakers
             .entry(key.clone())
             .or_insert_with(|| Arc::new(AsyncMutex::new(Breaker::default())))
             .clone();
         let mut g = breaker.lock().await;
-        g.record_unavailable();
+        g.record_unavailable(&cfg);
         g.fail_count
     }
 
@@ -764,7 +787,7 @@ impl AppState {
                 .entry(key.clone())
                 .or_insert_with(|| Arc::new(AsyncMutex::new(Breaker::default())))
                 .clone();
-            let breaker_snap = breaker.lock().await.snapshot();
+            let breaker_snap = breaker.lock().await.snapshot(&self.breaker_cfg());
 
             // 并发槽状态
             let (permits_total, in_flight) = match self.upstream_slots.get(key) {
@@ -843,7 +866,8 @@ impl AppState {
         // 错误摘要最多 300 个 UTF-16 code unit,避免单个记录过长
         let summary_truncated: String = error_summary.chars().take(300).collect();
         let upstream_id = format!("{}|{}|{}", kind_s, key.base_url, fp_hex);
-        let triggered = fail_count_after >= BREAKER_FAILS;
+        let bcfg = self.breaker_cfg();
+        let triggered = fail_count_after >= bcfg.fails;
 
         let rec = FailureRecord {
             ts_ms,
@@ -855,7 +879,7 @@ impl AppState {
             path,
             error_summary: summary_truncated,
             fail_count_after,
-            threshold: BREAKER_FAILS,
+            threshold: bcfg.fails,
             triggered_break: triggered,
         };
 
@@ -1342,10 +1366,10 @@ impl AppState {
                 Some(e) => {
                     let b = e.value().clone();
                     drop(e);
-                    let snap = b.lock().await.snapshot();
+                    let snap = b.lock().await.snapshot(&self.breaker_cfg());
                     snap
                 }
-                None => Breaker::default().snapshot(),
+                None => Breaker::default().snapshot(&self.breaker_cfg()),
             };
             let is_broken = breaker_snap.pointer("/is_broken").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -1658,83 +1682,83 @@ mod tests {
     #[test]
     fn breaker_closed_by_default() {
         let mut b = Breaker::default();
-        assert!(!b.should_skip());
+        assert!(!b.should_skip(&BreakerCfg::default()));
     }
 
     #[test]
     fn breaker_trips_after_threshold() {
         let mut b = Breaker::default();
-        for _ in 0..BREAKER_FAILS {
-            b.record_unavailable();
+        for _ in 0..BreakerCfg::default().fails {
+            b.record_unavailable(&BreakerCfg::default());
         }
-        assert!(b.should_skip());
+        assert!(b.should_skip(&BreakerCfg::default()));
     }
 
     #[test]
     fn breaker_resets_on_success() {
         let mut b = Breaker::default();
-        for _ in 0..BREAKER_FAILS {
-            b.record_unavailable();
+        for _ in 0..BreakerCfg::default().fails {
+            b.record_unavailable(&BreakerCfg::default());
         }
-        assert!(b.should_skip());
+        assert!(b.should_skip(&BreakerCfg::default()));
         b.record_success();
-        assert!(!b.should_skip());
+        assert!(!b.should_skip(&BreakerCfg::default()));
     }
 
     #[test]
     fn breaker_half_open_single_probe() {
         let mut b = Breaker::default();
-        for _ in 0..BREAKER_FAILS {
-            b.record_unavailable();
+        for _ in 0..BreakerCfg::default().fails {
+            b.record_unavailable(&BreakerCfg::default());
         }
         // 窗口到期(把 recover_at 拨回过去)
         b.recover_at = Some(Instant::now() - std::time::Duration::from_secs(1));
         // 第一个调用获得探活资格,后续请求继续跳过(单探活,不再全量放行)
-        assert!(!b.should_skip());
-        assert!(b.should_skip());
-        assert!(b.should_skip());
+        assert!(!b.should_skip(&BreakerCfg::default()));
+        assert!(b.should_skip(&BreakerCfg::default()));
+        assert!(b.should_skip(&BreakerCfg::default()));
         // 探活成功 → closed
         b.record_success();
-        assert!(!b.should_skip());
+        assert!(!b.should_skip(&BreakerCfg::default()));
     }
 
     #[test]
     fn breaker_probe_failure_rearms() {
         let mut b = Breaker::default();
-        for _ in 0..BREAKER_FAILS {
-            b.record_unavailable();
+        for _ in 0..BreakerCfg::default().fails {
+            b.record_unavailable(&BreakerCfg::default());
         }
         b.recover_at = Some(Instant::now() - std::time::Duration::from_secs(1));
-        assert!(!b.should_skip()); // 探活放行
-        b.record_unavailable();    // 探活失败 → 立即重新熔断
-        assert!(b.should_skip());
+        assert!(!b.should_skip(&BreakerCfg::default())); // 探活放行
+        b.record_unavailable(&BreakerCfg::default());    // 探活失败 → 立即重新熔断
+        assert!(b.should_skip(&BreakerCfg::default()));
         assert!(b.recover_at.is_some());
     }
 
     #[test]
     fn breaker_probe_timeout_reprobes() {
         let mut b = Breaker::default();
-        for _ in 0..BREAKER_FAILS {
-            b.record_unavailable();
+        for _ in 0..BreakerCfg::default().fails {
+            b.record_unavailable(&BreakerCfg::default());
         }
         b.recover_at = Some(Instant::now() - std::time::Duration::from_secs(1));
-        assert!(!b.should_skip()); // 获得探活
+        assert!(!b.should_skip(&BreakerCfg::default())); // 获得探活
         // 探活标志卡死(模拟超时)→ 允许放新探活
-        b.probing_since = Some(Instant::now() - BREAKER_PROBE_WINDOW - std::time::Duration::from_secs(1));
-        assert!(!b.should_skip());
+        b.probing_since = Some(Instant::now() - BreakerCfg::default().probe_window - std::time::Duration::from_secs(1));
+        assert!(!b.should_skip(&BreakerCfg::default()));
     }
 
     #[test]
     fn breaker_neutral_clears_probe_flag() {
         let mut b = Breaker::default();
-        for _ in 0..BREAKER_FAILS {
-            b.record_unavailable();
+        for _ in 0..BreakerCfg::default().fails {
+            b.record_unavailable(&BreakerCfg::default());
         }
         b.recover_at = Some(Instant::now() - std::time::Duration::from_secs(1));
-        assert!(!b.should_skip()); // 探活放行
+        assert!(!b.should_skip(&BreakerCfg::default())); // 探活放行
         b.record_neutral();        // 探活以 4xx 结束:上游可达,不重新熔断,但清探活标志
-        assert_eq!(b.fail_count, BREAKER_FAILS - 1);
-        assert!(!b.should_skip()); // 下一个请求直接放行(fail_count 保留警戒)
+        assert_eq!(b.fail_count, BreakerCfg::default().fails - 1);
+        assert!(!b.should_skip(&BreakerCfg::default())); // 下一个请求直接放行(fail_count 保留警戒)
     }
 
     // ---- provider_health 状态机推导 + 排序 ----
@@ -1855,16 +1879,16 @@ mod tests {
             let breaker = e.value().clone();
             drop(e);
             let mut g = breaker.lock().await;
-            g.record_unavailable();
-            g.record_unavailable();
-            g.record_unavailable();
+            g.record_unavailable(&BreakerCfg::default());
+            g.record_unavailable(&BreakerCfg::default());
+            g.record_unavailable(&BreakerCfg::default());
         }
         let out = state.provider_health(Some(3600)).await;
         let items = out["items"].as_array().unwrap();
         assert_eq!(items[0]["provider"], "prov-b");
         assert_eq!(items[0]["status"], "broken");
         assert_eq!(items[0]["breaker"]["is_broken"], true);
-        assert_eq!(items[0]["breaker"]["fail_count"], BREAKER_FAILS);
+        assert_eq!(items[0]["breaker"]["fail_count"], BreakerCfg::default().fails);
         assert!(items[0]["breaker"]["recover_remaining_ms"].as_u64().unwrap() > 0);
         assert_eq!(items[1]["provider"], "prov-a");
         assert_eq!(items[1]["status"], "degraded");

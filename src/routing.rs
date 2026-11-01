@@ -313,7 +313,8 @@ impl Routing {
             weight_over.and_then(|m| m.get(&t.model_id)).copied().unwrap_or(t.weight).max(1)
         };
         // 按该组绑定的负载策略生成候选顺序(命中的排前,其后是 failover 次序)。
-        let strategy = self.group_strategy.get(&group_id).copied().unwrap_or(Strategy::WeightedRandom);
+        // 未显式设置策略的组默认智能自适应(延迟+成本综合评分)。
+        let strategy = self.group_strategy.get(&group_id).copied().unwrap_or(Strategy::Auto);
         // 时段覆盖权重时,不透传原权重给排序,单独构造一份带覆盖权重的 targets 快照。
         let weighted_targets: Option<Vec<Target>> = rule.as_ref().map(|_| {
             targets.iter().map(|t| Target { model_id: t.model_id, priority: t.priority, weight: eff_weight(t), multiplier: t.multiplier, cache_enabled: t.cache_enabled }).collect()

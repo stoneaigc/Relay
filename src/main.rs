@@ -262,6 +262,15 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     {
+        let kv = storage::load_settings(&db, settings::BREAKER_PREFIX)
+            .await
+            .map_err(|e| anyhow::anyhow!("load settings: {e}"))?;
+        if !kv.is_empty() {
+            settings::apply_breaker_settings(&mut cfg, &kv);
+            tracing::info!("loaded {} breaker settings from DB", kv.len());
+        }
+    }
+    {
         let kv = storage::load_settings(&db, settings::CACHE_PREFIX)
             .await
             .map_err(|e| anyhow::anyhow!("load settings: {e}"))?;
@@ -407,6 +416,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/balance", get(portal::balance))
         .route("/summary", get(portal::summary))
         .route("/quota", get(portal::quota))
+        .route("/plans", get(portal::portal_plans))
+        .route("/payments/orders", post(portal::create_payment_order))
         .route("/keys", get(portal::list_keys).post(portal::create_key))
         .route("/keys/rotate", post(portal::rotate_key))
         .route("/models", get(portal::models))
@@ -494,6 +505,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/settings/email", get(admin::get_email_settings).post(admin::save_email_settings))
         .route("/settings/email/test", post(admin::test_email_settings))
         .route("/settings/fallback", get(admin::get_fallback_settings).post(admin::save_fallback_settings))
+        .route("/settings/breaker", get(admin::get_breaker_settings).post(admin::save_breaker_settings))
         // ---- 语义缓存 ----
         .route("/settings/cache", get(admin::get_cache_settings).post(admin::save_cache_settings))
         .route("/cache/stats", get(admin::cache_stats))

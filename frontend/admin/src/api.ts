@@ -41,6 +41,8 @@ async function req(path: string, opts: RequestInit = {}) {
 export interface UserRow {
   id: string;
   username: string | null;
+  /** 显示名(中文昵称):平台展示优先它,空则回退登录用户名 */
+  display_name?: string | null;
   email: string | null;
   phone: string | null;
   status: number;
@@ -284,7 +286,7 @@ export const api = {
     const s = qs.toString();
     return req(`/admin/api/users${s ? "?" + s : ""}`);
   },
-  createUser: (body: { username: string; password: string; email?: string; phone?: string; group_id?: number; user_group_id?: number; grant_tokens?: number; concurrency_limit?: number; rpm_limit?: number; tpm_limit?: number; budget_daily_tokens?: number; budget_monthly_tokens?: number }) =>
+  createUser: (body: { username: string; display_name?: string; password: string; email?: string; phone?: string; group_id?: number; user_group_id?: number; grant_tokens?: number; concurrency_limit?: number; rpm_limit?: number; tpm_limit?: number; budget_daily_tokens?: number; budget_monthly_tokens?: number }) =>
     req("/admin/api/users", { method: "POST", body: JSON.stringify(body) }),
   patchUser: (id: string, body: any) =>
     req(`/admin/api/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
@@ -450,6 +452,10 @@ export const api = {
   fallbackSettings: (): Promise<FallbackSettingsResp> => req("/admin/api/settings/fallback"),
   saveFallbackSettings: (body: FallbackSettingsBody) =>
     req("/admin/api/settings/fallback", { method: "POST", body: JSON.stringify(body) }),
+
+  breakerSettings: (): Promise<BreakerSettingsResp> => req("/admin/api/settings/breaker"),
+  saveBreakerSettings: (body: BreakerSettingsBody) =>
+    req("/admin/api/settings/breaker", { method: "POST", body: JSON.stringify(body) }),
 
   // ---- 语义缓存 ----
   cacheStats: (): Promise<CacheStatsResp> => req("/admin/api/cache/stats"),
@@ -685,6 +691,17 @@ export interface FallbackSettingsResp {
 }
 
 export interface FallbackSettingsBody extends FallbackSettingsResp {}
+
+export interface BreakerSettingsResp {
+  /** 连续 N 次 Unavailable 级失败后熔断(1-50) */
+  fail_threshold: number;
+  /** 熔断窗时长(秒):窗内跳过该上游,窗后半开探活 */
+  open_window_secs: number;
+  /** 半开探活在飞超时(秒) */
+  probe_window_secs: number;
+}
+
+export interface BreakerSettingsBody extends BreakerSettingsResp {}
 
 // ============================================================
 // 语义缓存

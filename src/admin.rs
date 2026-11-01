@@ -249,6 +249,7 @@ pub async fn portal_sso(
                 "admin",
                 None,
                 None,
+                None,
             )
             .await
             .map_err(|e| ApiError::Internal(format!("自动创建门户账号失败: {e}")))?;
@@ -374,6 +375,7 @@ pub async fn list_users(
             json!({
                 "id": u.id,
                 "username": u.username,
+                "display_name": u.display_name,
                 "email": u.email,
                 "phone": u.phone,
                 "status": u.status,
@@ -413,6 +415,8 @@ pub async fn list_users(
 #[derive(Deserialize)]
 pub struct CreateUser {
     pub username: String,
+    /// 显示名(中文昵称):平台各处展示优先它,空则回退登录用户名。
+    pub display_name: Option<String>,
     /// 可空:留空则自动生成 16 位默认密码(加密存档,创建后可查看/复制)。
     pub password: Option<String>,
     pub email: Option<String>,
@@ -509,6 +513,7 @@ pub async fn create_user(
         "admin",
         ugid,
         Some(&initial_plain),
+        body.display_name.as_deref(),
     )
     .await
     .map_err(|_| ApiError::BadRequest("用户名或手机号已存在".into()))?;
@@ -543,7 +548,14 @@ pub async fn create_user(
         .or(ug.as_ref().and_then(|g| g.tpm_limit))
         .map(|v| v.max(0) as u32)
         .unwrap_or(default_tpm);
-    let us = Arc::new(UserState::new(id, &body.username, grant, 0, limit, 0, 1.0, gid.unwrap_or(0), ugid.unwrap_or(0)));
+    // 监控展示名:显示名(中文昵称)优先,回退登录用户名。
+    let display = body
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(body.username.trim());
+    let us = Arc::new(UserState::new(id, display, grant, 0, limit, 0, 1.0, gid.unwrap_or(0), ugid.unwrap_or(0)));
     us.set_limits(rpm, tpm);
     us.set_budgets(
         body.budget_daily_tokens
@@ -611,6 +623,8 @@ pub struct PatchUser {
     pub email: Option<String>,
     pub phone: Option<String>,
     pub password: Option<String>, // 留空不改
+    /// 显示名(中文昵称):传空串 = 清除,回退登录用户名。
+    pub display_name: Option<String>,
 }
 
 /// PATCH /admin/users/:id —— 设并发/状态/增减额度(同步内存 + DB)。
@@ -714,7 +728,12 @@ pub async fn patch_user(
         return Err(ApiError::BadRequest("密码至少 8 位".into()));
     }
     let pwhash = body.password.as_deref().filter(|p| !p.is_empty()).map(storage::hash_password);
-    if body.username.is_some() || body.email.is_some() || body.phone.is_some() || pwhash.is_some() {
+    if body.username.is_some()
+        || body.email.is_some()
+        || body.phone.is_some()
+        || body.display_name.is_some()
+        || pwhash.is_some()
+    {
         storage::update_user_fields(
             &state.db,
             id,
@@ -722,6 +741,7 @@ pub async fn patch_user(
             body.email.as_deref(),
             body.phone.as_deref(),
             pwhash.as_deref(),
+            body.display_name.as_deref(),
         )
         .await
         .map_err(|_| ApiError::BadRequest("用户名或手机号已被占用".into()))?;
@@ -2811,6 +2831,85 @@ pub async fn save_fallback_settings(
     Ok(Json(json!({ "ok": true })))
 }
 
+// ---- 系统配置:上游熔断 ----
+
+/// GET /admin/settings/breaker -- 回显熔断配置(DB 优先,否则配置文件值)。
+pub async fn get_breaker_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    let kv = storage::load_settings(&state.db, crate::settings::BREAKER_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let d = &state.config().defaults;
+    let fails = kv
+        .get(crate::settings::K_BR_FAILS)
+        .and_then(|v| v.parse::<u8>().ok())
+        .filter(|n| (1..=50).contains(n))
+        .unwrap_or(d.breaker_fail_threshold);
+    let window = kv
+        .get(crate::settings::K_BR_WINDOW)
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| (1..=3600).contains(n))
+        .unwrap_or(d.breaker_open_window_secs);
+    let probe = kv
+        .get(crate::settings::K_BR_PROBE)
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| (1..=3600).contains(n))
+        .unwrap_or(d.breaker_probe_window_secs);
+    Ok(Json(json!({
+        "fail_threshold": fails,
+        "open_window_secs": window,
+        "probe_window_secs": probe,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct BreakerSettingsBody {
+    /// 连续 N 次 Unavailable 级失败后熔断(1-50)。
+    pub fail_threshold: u8,
+    /// 熔断窗时长(秒,1-3600):窗内跳过该上游,窗后半开探活。
+    pub open_window_secs: u64,
+    /// 半开探活在飞超时(秒,1-3600)。
+    pub probe_window_secs: u64,
+}
+
+/// POST /admin/settings/breaker -- 保存熔断配置,刷新内存 Config(下一次请求即生效)。
+pub async fn save_breaker_settings(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<BreakerSettingsBody>,
+) -> Result<Json<Value>, ApiError> {
+    admin_guard(&state, &headers)?;
+    if !(1..=50).contains(&body.fail_threshold) {
+        return Err(ApiError::BadRequest("熔断阈值须在 1-50 之间".into()));
+    }
+    for (v, name) in [
+        (body.open_window_secs, "熔断窗时长"),
+        (body.probe_window_secs, "探活超时"),
+    ] {
+        if !(1..=3600).contains(&v) {
+            return Err(ApiError::BadRequest(format!("{}须在 1-3600 秒之间", name)));
+        }
+    }
+    let items: Vec<(String, String)> = vec![
+        (crate::settings::K_BR_FAILS.to_string(), body.fail_threshold.to_string()),
+        (crate::settings::K_BR_WINDOW.to_string(), body.open_window_secs.to_string()),
+        (crate::settings::K_BR_PROBE.to_string(), body.probe_window_secs.to_string()),
+    ];
+    storage::set_settings(&state.db, &items)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let kv = storage::load_settings(&state.db, crate::settings::BREAKER_PREFIX)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut new_cfg = (**state.config()).clone();
+    crate::settings::apply_breaker_settings(&mut new_cfg, &kv);
+    state.config.store(Arc::new(new_cfg));
+    Ok(Json(json!({ "ok": true })))
+}
+
 // ---- 系统配置:语义缓存 ----
 
 /// GET /admin/settings/cache -- 回显语义缓存配置(DB 优先,否则配置文件值)。
@@ -4550,9 +4649,14 @@ pub async fn metrics_realtime(State(state): State<Arc<AppState>>, headers: Heade
         waiting += w;
         if inflight > 0 || w > 0 {
             let limit = u.value().concurrency_limit.load(Ordering::Relaxed);
+            // 显示名解析:显示名(中文昵称)优先,回退登录用户名(内存里的 username 已按此规则加载)。
+            // PATCH 改名后内存态滞后,这里对活跃用户(通常个位数)补查 DB 校正。
+            let live_name = storage::user_display_name(&state.db, &u.value().id)
+                .await
+                .unwrap_or_else(|| u.value().username.clone());
             active_users.push(json!({
                 "id": u.value().id,
-                "username": u.value().username,
+                "username": live_name,
                 "in_flight": inflight,
                 "limit": if limit == u32::MAX { 0 } else { limit },
                 "waiting": w,
