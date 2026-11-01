@@ -82,7 +82,7 @@ fn resolve_with_counter(
     let mut r = routing.clone();
     r.group_strategy.insert(1, strategy);
     let lat = dashmap::DashMap::new();
-    let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
+    let _err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let result = r.resolve_all(1, requested, rr, &lat, &err, 28800, now).unwrap();
     result.into_iter().map(|r| (r.upstream_model, r.base_url, r.weight)).collect()
@@ -238,7 +238,7 @@ fn time_rule_overrides_weight() {
     let fixed_time = Utc.with_ymd_and_hms(2026, 8, 30, 2, 0, 0).unwrap();
     let rr = dashmap::DashMap::new();
     let lat = dashmap::DashMap::new();
-    let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
+    let _err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let result = rt.resolve_all(1, "chat", &rr, &lat, &err, 28800, Some(fixed_time)).unwrap();
     // 在时段覆盖下,OpenAI 权重变为 100,DeepSeek 变为 1
@@ -271,7 +271,7 @@ fn time_rule_disabled_ignored() {
     let fixed_time = Utc.with_ymd_and_hms(2026, 8, 30, 2, 0, 0).unwrap();
     let rr = dashmap::DashMap::new();
     let lat = dashmap::DashMap::new();
-    let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
+    let _err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let result = rt.resolve_all(1, "chat", &rr, &lat, &err, 28800, Some(fixed_time)).unwrap();
     // 停用的规则不应生效,倍率应该是 model 原始值(无时段倍率)
@@ -286,7 +286,7 @@ fn resolve_unknown_model_returns_error() {
     let rt = make_test_routing();
     let rr = dashmap::DashMap::new();
     let lat = dashmap::DashMap::new();
-    let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
+    let _err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let result = rt.resolve_all(1, "nonexistent", &rr, &lat, &err, 28800, None);
     assert!(result.is_err());
@@ -297,7 +297,7 @@ fn resolve_unknown_group_returns_error() {
     let rt = make_test_routing();
     let rr = dashmap::DashMap::new();
     let lat = dashmap::DashMap::new();
-    let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
+    let _err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let result = rt.resolve_all(999, "chat", &rr, &lat, &err, 28800, None);
     assert!(result.is_err());
@@ -322,7 +322,7 @@ fn multiplier_includes_time_multiplier() {
     let fixed_time = Utc.with_ymd_and_hms(2026, 8, 30, 2, 0, 0).unwrap();
     let rr = dashmap::DashMap::new();
     let lat = dashmap::DashMap::new();
-    let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
+    let _err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let result = rt.resolve_all(1, "chat", &rr, &lat, &err, 28800, Some(fixed_time)).unwrap();
     // OpenAI: multiplier=1.5 * time_multiplier=2.0 = 3.0
@@ -368,7 +368,7 @@ fn auto_orders_by_p50_when_cost_equal() {
         m.output_price = Some(1.0);
     }
     let lat = dashmap::DashMap::new();
-    let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
+    let _err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     // P50:deepseek(200) < anthropic(450) < openai(800)
     lat.insert("p-deepseek".to_string(), 200u64);
@@ -387,7 +387,7 @@ fn auto_orders_by_p50_when_cost_equal() {
 fn auto_cold_start_upstream_not_starved() {
     let rt = make_test_routing();
     let lat = dashmap::DashMap::new();
-    let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
+    let _err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     // 只给 deepseek 数据,openai/anthropic 无数据
     lat.insert("p-deepseek".to_string(), 300u64);
@@ -412,7 +412,7 @@ fn auto_dedup_still_applies() {
         .push(Target { model_id: 101, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false });
     rt.models.insert(101, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None });
     let lat = dashmap::DashMap::new();
-    let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
+    let _err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     lat.insert("p-openai".to_string(), 100u64);
     lat.insert("p-deepseek".to_string(), 500u64);

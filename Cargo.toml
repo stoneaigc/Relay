@@ -1,6 +1,6 @@
 [package]
 name = "relay"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 
 [dependencies]
@@ -35,6 +35,14 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 argon2 = "0.5"
 base64 = "0.22"
+# 支付渠道:支付宝 RSA2 签名(RSASSA-PKCS1-v1_5 + SHA256)与回调验签。
+# 支付宝无官方 Rust SDK,签名需自行实现;rsa/pkcs8 已在依赖树中,此处仅为扶正。
+rsa = { version = "0.9", features = ["sha2", "pem"] }
+percent-encoding = "2.3"
+# 支付渠道:碳基圈(一人付)Webhook 验签 HMAC-SHA256。
+hmac = "0.12"
+# 支付渠道:校验回调/返回地址(HTTPS、443、同域、无私网地址)。
+url = "2.5"
 
 [profile.release]
 lto = "thin"

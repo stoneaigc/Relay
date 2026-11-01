@@ -1846,7 +1846,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "relay"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1863,11 +1863,14 @@ dependencies = [
  "futures",
  "hex",
  "hkdf",
+ "hmac",
  "jsonwebtoken",
  "lettre",
+ "percent-encoding",
  "rand 0.8.6",
  "redis",
  "reqwest",
+ "rsa",
  "serde",
  "serde_json",
  "sha2",
@@ -1878,6 +1881,7 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 
@@ -1950,6 +1954,7 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
+ "sha2",
  "signature",
  "spki",
  "subtle",

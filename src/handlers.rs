@@ -1740,18 +1740,26 @@ async fn anth_charge(
     base_url: &str,
     api_key: Option<&str>,
     request_id: Option<String>,
+    // 客户端是否在流结束前断开。非流式路径恒为 false;流式路径为 true 时记 499:
+    // 已产出 tokens 照常计费,但不算成功(也不触发熔断——不是上游的错)。
+    client_gone: bool,
     trace: RunTrace,
 ) {
     let charged = ((input as f64 + output as f64) * multiplier * user.bill_multiplier()).round() as i64;
     user.deduct(charged);
     user.record_tokens(input.saturating_add(output));
     let tx = state.usage_tx.clone();
-    let ev = UsageEvent { user_id: user.id, key_id, cost_usd: 0.0, bill_multiplier: multiplier * user.bill_multiplier(), model, provider, upstream_model: upstream, input_tokens: input, output_tokens: output, charged_tokens: charged, status: 200, request_id };
+    let status = if client_gone { crate::state::METRIC_STATUS_CLIENT_CLOSED } else { 200 };
+    let ev = UsageEvent { user_id: user.id, key_id, cost_usd: 0.0, bill_multiplier: multiplier * user.bill_multiplier(), model, provider, upstream_model: upstream, input_tokens: input, output_tokens: output, charged_tokens: charged, status, request_id };
     tokio::spawn(async move { let _ = tx.send(ev).await; });
     // 补记 token 指标:上游分桶 + 全局
     let k = UpstreamKey::new(kind, base_url, api_key);
     state.record_metrics_tokens(Some(&k), input as u64, output as u64).await;
-    trace.emit_success(state, input, output, charged).await;
+    if client_gone {
+        trace.emit_error(state, crate::state::METRIC_STATUS_CLIENT_CLOSED as i32).await;
+    } else {
+        trace.emit_success(state, input, output, charged).await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1771,7 +1779,7 @@ async fn anthropic_passthrough_nonstream(
     payload["model"] = json!(model);
     let mut trace = trace;
     trace.resp_preview = resp_preview_of(state, &payload);
-    anth_charge(state, &user, key_id, input, output, multiplier, model, provider_name, upstream_model, ProviderKind::Anthropic, base_url, api_key, Some(trace.request_id.clone()), trace).await;
+    anth_charge(state, &user, key_id, input, output, multiplier, model, provider_name, upstream_model, ProviderKind::Anthropic, base_url, api_key, Some(trace.request_id.clone()), false, trace).await;
     let mut out = Json(payload).into_response();
     apply_relay_headers(&mut out, &hdrs);
     Ok(out)
@@ -1897,7 +1905,7 @@ async fn messages_openai_nonstream(
     let payload = crate::translate::openai_to_anthropic_response(&oai, &model);
     let mut trace = trace;
     trace.resp_preview = resp_preview_of(state, &payload);
-    anth_charge(state, &user, key_id, input, output, multiplier, model, provider_name, upstream_model, kind, base_url, api_key, Some(trace.request_id.clone()), trace).await;
+    anth_charge(state, &user, key_id, input, output, multiplier, model, provider_name, upstream_model, kind, base_url, api_key, Some(trace.request_id.clone()), false, trace).await;
     let mut out = Json(payload).into_response();
     apply_relay_headers(&mut out, &hdrs);
     Ok(out)
@@ -1943,13 +1951,12 @@ fn messages_openai_stream(
         let mut preview = StreamPreview::new(&state);
 
         // 下发一个 Anthropic SSE 事件;客户端已断开时置位标志(外层循环检查后退出)。
+        // 用 |= 而非 = :一轮内可能有多个事件,断开一旦发生就应保持到循环退出。
         macro_rules! send {
             ($b:expr) => {{
                 let b = $b;
                 preview.push(b.as_ref());
-                if tx.send(Ok(b)).await.is_err() {
-                    client_gone = true;
-                }
+                client_gone |= tx.send(Ok(b)).await.is_err();
             }};
         }
 
@@ -2032,7 +2039,7 @@ fn messages_openai_stream(
             send!(a_event("message_stop", json!({"type":"message_stop"})));
         }
         trace.resp_preview = preview.finish();
-        anth_charge(&state, &user, key_id, input, output, multiplier, model, provider_name, upstream_model, kind, &base_url, api_key.as_deref(), Some(trace.request_id.clone()), trace).await;
+        anth_charge(&state, &user, key_id, input, output, multiplier, model, provider_name, upstream_model, kind, &base_url, api_key.as_deref(), Some(trace.request_id.clone()), client_gone, trace).await;
     });
     // 外层生成器只做 rx → Stream 的桥接,drop 无副作用。
     let s = async_stream::stream! {
