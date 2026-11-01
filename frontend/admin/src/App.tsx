@@ -3369,7 +3369,10 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
                 <select value={modelId} onChange={(e) => setModelId(Number(e.target.value))} className={sel}>
                   {modelGroups.map((g) => (
                     <optgroup key={g.label} label={g.label}>
-                      {g.items.map((m) => <option key={m.id} value={m.id}>{m.label || m.upstream_model} — {m.upstream_model}</option>)}
+                      {g.items.map((m) => {
+                        const disp = m.label || m.upstream_model;
+                        return <option key={m.id} value={m.id}>{disp === m.upstream_model ? disp : `${disp} — ${m.upstream_model}`}</option>;
+                      })}
                     </optgroup>
                   ))}
                 </select></div>
