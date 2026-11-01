@@ -3574,7 +3574,7 @@ function TimeRuleDialog({ dlg, groupId, onClose, onSaved }: {
       setStart(edit?.start_time ?? "09:00");
       setEnd(edit?.end_time ?? "17:00");
       setMult(String(edit?.multiplier ?? 1));
-      setWeightMap(edit?.weight_map ?? "");
+      setWeightMap(edit?.weight_map && edit.weight_map !== "{}" ? edit.weight_map : "");
       setActive(edit ? edit.active : true);
       // 解析 weekdays:"0-6" 或 "1-5" / "0,6" / "5"
       const bits = [false, false, false, false, false, false, false];
@@ -3604,10 +3604,10 @@ function TimeRuleDialog({ dlg, groupId, onClose, onSaved }: {
     const mRaw = mult.trim();
     const mNum = mRaw === "" ? 1 : Number(mRaw);
     if (!Number.isFinite(mNum) || mNum < 0) { setErr("计费倍率需为非负数"); return; }
-    // 权重覆盖格式:[{"public_name":{"model_id": weight}}],权重须为非负整数。
+    // 权重覆盖格式:{"公开模型名":{"模型ID": 权重}},权重须为非负整数;{} 或留空 = 仅倍率生效。
     const wmRaw = weightMap.trim();
     let wm: string | null = null;
-    if (wmRaw !== "") {
+    if (wmRaw !== "" && wmRaw !== "{}") {
       try {
         const v = JSON.parse(wmRaw);
         if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error();
@@ -3670,8 +3670,13 @@ function TimeRuleDialog({ dlg, groupId, onClose, onSaved }: {
           <div>
             <label className="mb-1 block text-xs text-muted-foreground">路由权重覆盖(可选,JSON)</label>
             <textarea value={weightMap} onChange={(e) => setWeightMap(e.target.value)} rows={3}
-              placeholder={'{"deepseek-chat":{"1":30,"2":70}}\n对外名 -> {模型ID: 权重}。留空 = 仅适用倍率'}
+              placeholder={'{\n  "deepseek-chat": {"101": 30, "102": 70}\n}\n外层键 = 对外模型名,内层键 = 上游模型 ID: 权重'}
               className="w-full rounded-lg border border-input bg-card p-2 font-mono text-xs focus:outline-none focus:ring-2 focus:ring-ring" />
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+              命中时段时临时替换路由权重:外层键填<b>对外模型名</b>,内层键填<b>上游模型 ID</b>(「模型」页列表可见),值为非负整数权重。
+              只填想调整的模型,未提及的模型沿用组内原权重;整框留空或 {"{}"} 表示本时段<b>只改计费倍率、权重不动</b>。
+              加权随机/轮询直接按覆盖权重分流;智能自适应则把权重作为第三因子(占 0.2)参与打分。
+            </p>
           </div>
           {err && <p className="text-sm text-destructive">{err}</p>}
         </div>
