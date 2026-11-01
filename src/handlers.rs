@@ -1002,7 +1002,10 @@ fn anthropic_stream_response(
 ) -> Response {
     let user_id = user.id;
     let hdrs = relay_headers(&provider_name, &trace.request_id);
-    let s = async_stream::stream! {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
+    // 独立 task 承担上游读取 + Anthropic→OpenAI SSE 翻译 + 结算(与 stream_response 同理:
+    // task 内代码保证执行完毕,不受客户端断开影响;客户端断开时 tx.send 返回 Err)。
+    tokio::spawn(async move {
         let mut trace = trace;
         let _guard = guard;
         let _group_slots = group_slots;
@@ -1018,10 +1021,22 @@ fn anthropic_stream_response(
         let mut block_to_tool: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
         let mut next_tool = 0usize;
 
-        // 起始 chunk:role。
-        yield Ok::<Bytes, std::io::Error>(Bytes::from(oai_chunk(&id, &model, json!({"role":"assistant"}), None)));
+        // 起始 chunk:role。失败即客户端未消费,置位后跳过上游读取。
+        let first = Bytes::from(oai_chunk(&id, &model, json!({"role":"assistant"}), None));
+        let mut client_gone = tx.send(Ok(first)).await.is_err();
 
-        while let Some(item) = upstream.next().await {
+        // 下发一个 SSE chunk;客户端已断开时置位标志(外层循环检查后退出,
+        // 当前 chunk 内残余行的下发失败无害,只是对已关闭 channel 的快速 no-op)。
+        macro_rules! send {
+            ($b:expr) => {
+                if tx.send(Ok($b)).await.is_err() {
+                    client_gone = true;
+                }
+            };
+        }
+
+        while !client_gone {
+            let Some(item) = upstream.next().await else { break };
             match item {
                 Ok(bytes) => {
                     if trace.first_byte_ms.is_none() {
@@ -1048,23 +1063,23 @@ fn anthropic_stream_response(
                                     let tid = ev.pointer("/content_block/id").and_then(|v| v.as_str()).unwrap_or("");
                                     let name = ev.pointer("/content_block/name").and_then(|v| v.as_str()).unwrap_or("");
                                     let delta = json!({"tool_calls":[{"index":tidx,"id":tid,"type":"function","function":{"name":name,"arguments":""}}]});
-                                    yield Ok(Bytes::from(oai_chunk(&id, &model, delta, None)));
+                                    send!(Bytes::from(oai_chunk(&id, &model, delta, None)));
                                 }
                             }
                             Some("content_block_delta") => {
                                 match ev.pointer("/delta/type").and_then(|t| t.as_str()) {
                                     Some("text_delta") => {
                                         if let Some(text) = ev.pointer("/delta/thinking").and_then(|v| v.as_str()) {
-                                            yield Ok(Bytes::from(oai_chunk(&id, &model, json!({"reasoning_content": text}), None)));
+                                            send!(Bytes::from(oai_chunk(&id, &model, json!({"reasoning_content": text}), None)));
                                         }
                                         if let Some(text) = ev.pointer("/delta/text").and_then(|v| v.as_str()) {
-                                            yield Ok(Bytes::from(oai_chunk(&id, &model, json!({"content": text}), None)));
+                                            send!(Bytes::from(oai_chunk(&id, &model, json!({"content": text}), None)));
                                         }
                                     }
                                     // Anthropic 扩展思考 → OpenAI reasoning_content。
                                     Some("thinking_delta") => {
                                         if let Some(t) = ev.pointer("/delta/thinking").and_then(|v| v.as_str()) {
-                                            yield Ok(Bytes::from(oai_chunk(&id, &model, json!({"reasoning_content": t}), None)));
+                                            send!(Bytes::from(oai_chunk(&id, &model, json!({"reasoning_content": t}), None)));
                                         }
                                     }
                                     Some("input_json_delta") => {
@@ -1072,7 +1087,7 @@ fn anthropic_stream_response(
                                         let tidx = block_to_tool.get(&bidx).copied().unwrap_or(0);
                                         let pj = ev.pointer("/delta/partial_json").and_then(|v| v.as_str()).unwrap_or("");
                                         let delta = json!({"tool_calls":[{"index":tidx,"function":{"arguments":pj}}]});
-                                        yield Ok(Bytes::from(oai_chunk(&id, &model, delta, None)));
+                                        send!(Bytes::from(oai_chunk(&id, &model, delta, None)));
                                     }
                                     _ => {}
                                 }
@@ -1086,8 +1101,8 @@ fn anthropic_stream_response(
                                 }
                             }
                             Some("message_stop") => {
-                                yield Ok(Bytes::from(oai_chunk(&id, &model, json!({}), Some(finish))));
-                                yield Ok(Bytes::from(Bytes::from_static(b"data: [DONE]\n\n")));
+                                send!(Bytes::from(oai_chunk(&id, &model, json!({}), Some(finish))));
+                                send!(Bytes::from(Bytes::from_static(b"data: [DONE]\n\n")));
                             }
                             _ => {}
                         }
@@ -1095,16 +1110,28 @@ fn anthropic_stream_response(
                 }
                 Err(e) => {
                     stream_ok = false;
-                    yield Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                    let _ = tx
+                        .send(Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+                        .await;
                     break;
                 }
             }
         }
+        // 起始 chunk:role(放在循环前后不影响语义,挪到连接建立后第一发)。
+        // 尽早关闭上游连接(客户端已断开时不浪费上游流量)。
+        drop(upstream);
 
+        // ---- 结算(task 内,保证执行) ----
         let charged = ((input as f64 + output as f64) * multiplier * user.bill_multiplier()).round() as i64;
         user.deduct(charged);
         user.record_tokens(input.saturating_add(output));
-        let status = if stream_ok { 200u16 } else { crate::state::METRIC_STATUS_UNAVAILABLE };
+        let status = if client_gone {
+            crate::state::METRIC_STATUS_CLIENT_CLOSED
+        } else if stream_ok {
+            200u16
+        } else {
+            crate::state::METRIC_STATUS_UNAVAILABLE
+        };
         let _ = state.usage_tx.send(UsageEvent {
             user_id, key_id, cost_usd: 0.0, bill_multiplier: multiplier * user.bill_multiplier(),
             model, provider: provider_name, upstream_model,
@@ -1114,12 +1141,23 @@ fn anthropic_stream_response(
         // 补记指标 tokens(Anthropic stream → OpenAI SSE)
         let k = UpstreamKey::new(ProviderKind::Anthropic, &base_url, api_key.as_deref());
         state.record_metrics_tokens(Some(&k), input as u64, output as u64).await;
-        if stream_ok {
+        if client_gone {
+            // 客户端中途断开:已产出 tokens 照常计费,审计日志记 499,不算上游故障(不动熔断)。
+            trace.emit_error(&state, crate::state::METRIC_STATUS_CLIENT_CLOSED as i32).await;
+        } else if stream_ok {
             trace.emit_success(&state, input, output, charged).await;
         } else {
             // 中途断流:按失败收口并让熔断感知,不再虚记成功。
             state.breaker_unavailable(&k).await;
             trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
+        }
+    });
+    // 起始 chunk:role(task 发出,断流感知覆盖全链路)。
+    // 外层生成器只做 rx → Stream 的桥接,drop 无副作用。
+    let s = async_stream::stream! {
+        let mut rx = rx;
+        while let Some(item) = rx.recv().await {
+            yield item;
         }
     };
 
@@ -2096,8 +2134,14 @@ fn stream_response(
 ) -> Response {
     let user_id = user.id;
     let hdrs = relay_headers(&provider_name, &trace.request_id);
-    let s = async_stream::stream! {
-        // guard 在 stream 生命周期内持有,流结束(或客户端断开导致 drop)才释放并发名额。
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(16);
+    // 独立 task 承担上游读取 + SSE 改写 + 结算:task 内代码保证执行完毕,
+    // 不依赖客户端继续 poll 响应流(async_stream 方案的坑:客户端读毕 [DONE]
+    // 立即断开时 hyper 停止 poll,生成器停在 yield 点被整段 drop,yield 之后的
+    // 收尾代码永远不会执行,导致漏计费、漏日志)。客户端断开时 tx.send 返回
+    // Err,可精确感知断流点并按 499 结算。
+    tokio::spawn(async move {
+        // guard/slot 在 task 生命周期内持有,流结束才释放并发名额。
         let mut trace = trace;
         let _guard = guard;
         let _group_slots = group_slots;
@@ -2108,6 +2152,7 @@ fn stream_response(
         let mut input = 0u32;
         let mut output = 0u32;
         let mut stream_ok = true;
+        let mut client_gone = false;
 
         while let Some(item) = upstream.next().await {
             match item {
@@ -2116,13 +2161,16 @@ fn stream_response(
                         trace.first_byte_ms = Some(trace.started.elapsed().as_millis() as u32);
                     }
                     let out = rw.feed(&bytes, &model, &mut input, &mut output);
-                    if !out.is_empty() {
-                        yield Ok::<Bytes, std::io::Error>(Bytes::from(out));
+                    if !out.is_empty() && tx.send(Ok(Bytes::from(out))).await.is_err() {
+                        client_gone = true;
+                        break;
                     }
                 }
                 Err(e) => {
                     stream_ok = false;
-                    yield Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                    let _ = tx
+                        .send(Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))
+                        .await;
                     break;
                 }
             }
@@ -2130,15 +2178,24 @@ fn stream_response(
         if stream_ok {
             let tail = rw.finish();
             if !tail.is_empty() {
-                yield Ok(Bytes::from(tail));
+                let _ = tx.send(Ok(Bytes::from(tail))).await;
             }
         }
+        // 尽早关闭上游连接(客户端已断开时不浪费上游流量)。
+        drop(upstream);
 
+        // ---- 结算(task 内,保证执行) ----
         let charged =
-        ((input as f64 + output as f64) * multiplier * user.bill_multiplier()).round() as i64;
+            ((input as f64 + output as f64) * multiplier * user.bill_multiplier()).round() as i64;
         user.deduct(charged);
         user.record_tokens(input.saturating_add(output));
-        let status = if stream_ok { 200u16 } else { crate::state::METRIC_STATUS_UNAVAILABLE };
+        let status = if client_gone {
+            crate::state::METRIC_STATUS_CLIENT_CLOSED
+        } else if stream_ok {
+            200u16
+        } else {
+            crate::state::METRIC_STATUS_UNAVAILABLE
+        };
         let _ = state
             .usage_tx
             .send(UsageEvent {
@@ -2159,12 +2216,22 @@ fn stream_response(
         // 补记指标 tokens(OpenAI stream)
         let k = UpstreamKey::new(ProviderKind::Openai, &base_url, api_key.as_deref());
         state.record_metrics_tokens(Some(&k), input as u64, output as u64).await;
-        if stream_ok {
+        if client_gone {
+            // 客户端中途断开:已产出 tokens 照常计费,审计日志记 499,不算上游故障(不动熔断)。
+            trace.emit_error(&state, crate::state::METRIC_STATUS_CLIENT_CLOSED as i32).await;
+        } else if stream_ok {
             trace.emit_success(&state, input, output, charged).await;
         } else {
-            // 中途断流:按失败收口并让熔断感知,不再虚记成功。
+            // 上游中途断流:按失败收口并让熔断感知,不再虚记成功。
             state.breaker_unavailable(&k).await;
             trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
+        }
+    });
+    // 外层生成器只做 rx → Stream 的桥接,真实工作全在上面的 task 里,drop 无副作用。
+    let s = async_stream::stream! {
+        let mut rx = rx;
+        while let Some(item) = rx.recv().await {
+            yield item;
         }
     };
 

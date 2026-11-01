@@ -942,6 +942,9 @@ pub const METRIC_STATUS_OK: u16 = 200;
 pub const METRIC_STATUS_UNAVAILABLE: u16 = 503;
 /// 网关对外最终失败(AllFailed/NoTarget):链路日志 final_status 与对外响应状态码口径一致。
 pub const METRIC_STATUS_BAD_GATEWAY: u16 = 502;
+/// 流式请求被客户端中途断开(沿用 nginx 499 CLIENT_CLOSED_REQUEST 惯例):
+/// 不算服务失败、不计入上游熔断,但已产出的 tokens 照常计费,审计日志标记 499。
+pub const METRIC_STATUS_CLIENT_CLOSED: u16 = 499;
 
 /// 单桶单组聚合。所有字段都按「追加」语义更新。
 #[derive(Clone, Debug, Default)]

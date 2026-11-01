@@ -7210,6 +7210,7 @@ function MetricsPanel() {
 function attemptStatusColor(status: number): string {
   if (status === 200) return "text-emerald-600 bg-emerald-50 ring-emerald-200";
   if (status === -1) return "text-amber-600 bg-amber-50 ring-amber-200";
+  if (status === 499) return "text-sky-600 bg-sky-50 ring-sky-200";
   if (status >= 500) return "text-rose-600 bg-rose-50 ring-rose-200";
   if (status > 0) return "text-orange-600 bg-orange-50 ring-orange-200";
   return "text-muted-foreground bg-muted";
@@ -7218,6 +7219,7 @@ function attemptStatusColor(status: number): string {
 function attemptStatusLabel(status: number): string {
   if (status === 200) return "200 OK";
   if (status === -1) return "熔断跳过";
+  if (status === 499) return "499 客户端中断";
   if (status === 503) return "503 不可用";
   if (status === 0) return "未尝试";
   return `${status}`;
