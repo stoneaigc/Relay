@@ -856,7 +856,8 @@ function OverviewPanel() {
       {/* 今日运营 KPI:调用 / tokens(输入·输出) / 费用 / 缓存 */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <OverviewKpi tone="sky" icon={<Activity className="h-4 w-4" />} label="今日调用" value={`${fmt(t?.calls)} 次`} sub={`计费 ${fmt(t?.tokens)} tokens`} />
-        <OverviewKpi tone="indigo" icon={<Zap className="h-4 w-4" />} label="今日 tokens" value={fmt(t?.tokens)} sub={`输入 ${fmt(t?.input_tokens)} · 输出 ${fmt(t?.output_tokens)}`} />
+        {/* 主值用原始 tokens(输入+输出),与副标题口径一致;计费 tokens 是乘过倍率的折算值,单列在尾部避免"加起来对不上"。 */}
+        <OverviewKpi tone="indigo" icon={<Zap className="h-4 w-4" />} label="今日 tokens" value={fmt((t?.input_tokens ?? 0) + (t?.output_tokens ?? 0))} sub={`输入 ${fmt(t?.input_tokens)} · 输出 ${fmt(t?.output_tokens)} · 计费 ${fmt(t?.tokens)}`} />
         <OverviewKpi tone="amber" icon={<DollarSign className="h-4 w-4" />} label="今日费用" value={money(t?.cost_usd)} sub={`累计 ${money(d?.total_cost_usd)}`} />
         <OverviewKpi tone="emerald" icon={<Database className="h-4 w-4" />} label="缓存命中率" value={cs ? `${(cs.hit_rate * 100).toFixed(1)}%` : "…"} sub={cs ? `命中 ${fmt(cs.hits)} 次 · 节省 ${fmt(cs.tokens_saved)} tokens` : "语义缓存统计"} />
       </div>
@@ -866,7 +867,7 @@ function OverviewPanel() {
         <CardContent className="grid grid-cols-2 gap-4 py-4 sm:grid-cols-4">
           <MiniStat label="用户数" value={fmt(d?.total_users)} sub={`活跃 ${fmt(d?.active_users)}`} />
           <MiniStat label="总调用" value={`${fmt(d?.total_requests)} 次`} />
-          <MiniStat label="总消耗 tokens" value={fmt(d?.total_used)} sub={`输入 ${fmt(d?.total_input_tokens)} · 输出 ${fmt(d?.total_output_tokens)}`} />
+          <MiniStat label="总消耗 tokens" value={fmt((d?.total_input_tokens ?? 0) + (d?.total_output_tokens ?? 0))} sub={`输入 ${fmt(d?.total_input_tokens)} · 输出 ${fmt(d?.total_output_tokens)} · 计费 ${fmt(d?.total_used)}`} />
           <MiniStat label="总余额 tokens" value={fmt(d?.total_balance)} />
         </CardContent>
       </Card>
@@ -6718,13 +6719,15 @@ function RealtimeCards() {
     return () => { cancelled = true; clearInterval(t); };
   }, [live]);
 
-  const srColor = !d ? "#64748b" : d.success_rate >= 0.99 ? "#10b981" : d.success_rate >= 0.9 ? "#f59e0b" : "#f43f5e";
+  // 窗口内没有请求时 success_rate 没有意义(后端除零兜底为 0),不能当成"全部失败"报警。
+  const noTraffic = !!d && d.requests_5m === 0;
+  const srColor = !d ? "#64748b" : noTraffic ? "#94a3b8" : d.success_rate >= 0.99 ? "#10b981" : d.success_rate >= 0.9 ? "#f59e0b" : "#f43f5e";
   const waiting = d?.queue?.waiting ?? 0;
   const cards: { label: string; value: string; sub: string; color: string; spark: number[]; title: string }[] = d ? [
     { label: "在途并发", value: String(d.active), sub: "此刻处理中", color: "#6366f1", spark: hist.map((h) => h.active), title: "此刻正在处理中的请求数(含流式)" },
     { label: "排队中", value: String(waiting), sub: waiting > 0 ? "并发满员排队等待" : "无排队", color: waiting > 0 ? "#f59e0b" : "#94a3b8", spark: hist.map((h) => h.queue?.waiting ?? 0), title: "因用户并发满员而排队等待的请求数(排队上限 defaults.user_queue_wait_ms)" },
     { label: "QPS", value: d.qps.toFixed(2), sub: "近 5 分钟均值", color: "#0ea5e9", spark: hist.map((h) => h.qps), title: "近 5 分钟平均每秒请求数" },
-    { label: "成功率", value: `${(d.success_rate * 100).toFixed(1)}%`, sub: d.success_rate < 0.9 ? "低于 90% 阈值" : "近 5 分钟", color: srColor, spark: hist.map((h) => h.success_rate * 100), title: "近 5 分钟成功请求占比" },
+    { label: "成功率", value: noTraffic ? "—" : `${(d.success_rate * 100).toFixed(1)}%`, sub: noTraffic ? "近 5 分钟无请求" : d.success_rate < 0.9 ? "低于 90% 阈值" : "近 5 分钟", color: srColor, spark: hist.map((h) => h.success_rate * 100), title: "近 5 分钟成功请求占比" },
     { label: "Token/s", value: Math.round(d.tokens_per_sec).toLocaleString(), sub: `TPM ${Math.round(d.tpm).toLocaleString()}`, color: "#8b5cf6", spark: hist.map((h) => h.tokens_per_sec), title: "近 5 分钟平均每秒 token 吞吐" },
     { label: "请求数", value: d.requests_5m.toLocaleString(), sub: "近 5 分钟累计", color: "#64748b", spark: hist.map((h) => h.requests_5m), title: "近 5 分钟总请求数" },
   ] : [];
@@ -6750,8 +6753,8 @@ function RealtimeCards() {
           {live ? "暂停刷新" : "恢复刷新(5s)"}
         </button>
       </div>
-      {/* 异常横幅:成功率跌破 90% 时提示 */}
-      {d && d.success_rate < 0.9 && (
+      {/* 异常横幅:成功率跌破 90% 时提示。窗口内没有请求时不报(0% 只是除零兜底)。 */}
+      {d && !noTraffic && d.success_rate < 0.9 && (
         <div className="flex items-center gap-2 rounded-lg border border-rose-300/50 bg-rose-500/10 px-3 py-2 text-sm text-rose-700 dark:border-rose-500/30 dark:text-rose-400">
           <AlertTriangle className="h-4 w-4 shrink-0" />
           近 5 分钟成功率 {(d.success_rate * 100).toFixed(1)}%,低于 90% 阈值 —— 请到「上游监控」查看熔断 / 失败详情

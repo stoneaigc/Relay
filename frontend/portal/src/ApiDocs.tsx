@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { copyText } from "./clipboard";
-import { SITE_PREFIX } from "./api";
+import { SITE_PREFIX, api } from "./api";
 
 // 网关地址由当前页面地址推导(同源),避免硬编码 :9000 导致非默认端口/子路径部署时示例不可用。
 const BASE = typeof window !== "undefined"
@@ -232,6 +232,26 @@ function Section({ id, title, desc, children }: { id: string; title: string; des
 }
 
 export default function DocsView() {
+  // 示例里的模型名默认用平台的第一个可用模型:照抄示例即可跑通,不用先回模型广场改名。
+  // 取不到(未登录/无可用模型)时退回通用占位 chat。
+  const [modelName, setModelName] = useState("chat");
+  useEffect(() => {
+    let cancelled = false;
+    api.models()
+      .then((r) => {
+        const n = r.data?.[0]?.name;
+        if (!cancelled && n) setModelName(n);
+      })
+      .catch(() => { /* 示例保留占位名即可 */ });
+    return () => { cancelled = true; };
+  }, []);
+  // 只替换作为模型名出现的 chat,避免误伤文案里的普通单词。
+  const M = (s: string) =>
+    s
+      .replace(/"model": "chat"/g, `"model": "${modelName}"`)
+      .replace(/model="chat"/g, `model="${modelName}"`)
+      .replace(/model: "chat"/g, `model: "${modelName}"`)
+      .replace(/"id": "chat"/g, `"id": "${modelName}"`);
   // 左侧目录滚动高亮:观察各章节进入视口的情况,最近进入者高亮。
   const [active, setActive] = useState(NAV_SECTIONS[0].id);
   useEffect(() => {
@@ -289,20 +309,20 @@ export default function DocsView() {
           <span className="text-xs text-muted-foreground">（OpenAI SDK 追加 <K>/v1</K>，Anthropic SDK 直接使用根地址）</span>
         </div>
         <LangTabs tabs={[
-          { label: "curl", code: OPENAI_CURL },
-          { label: "Python", code: OPENAI_PY },
-          { label: "Node", code: OPENAI_NODE },
+          { label: "curl", code: M(OPENAI_CURL) },
+          { label: "Python", code: M(OPENAI_PY) },
+          { label: "Node", code: M(OPENAI_NODE) },
         ]} />
         <div className="text-sm font-medium text-muted-foreground">Anthropic 协议同样可用:</div>
         <LangTabs tabs={[
-          { label: "curl", code: ANTHROPIC_CURL },
-          { label: "Python", code: ANTHROPIC_PY },
+          { label: "curl", code: M(ANTHROPIC_CURL) },
+          { label: "Python", code: M(ANTHROPIC_PY) },
         ]} />
         <div className="text-sm font-medium text-muted-foreground">OpenAI Responses 协议同样可用(GPT-5 / o 系列新一代接口):</div>
-        <CodeBlock title="POST /v1/responses" code={`curl ${BASE}/v1/responses \\
+        <CodeBlock title="POST /v1/responses" code={M(`curl ${BASE}/v1/responses \\
   -H "Authorization: Bearer rk_live_xxx" \\
   -H "Content-Type: application/json" \\
-  -d '{"model": "chat", "input": "你好，介绍一下你自己"}'`} />
+  -d '{"model": "chat", "input": "你好，介绍一下你自己"}'`)} />
         <p className="text-sm text-muted-foreground">
           <K>model</K> 填平台上线的<b>对外模型名</b>(即 <K>/v1/models</K> 返回的 <K>id</K>);同名多条通道按权重自动分流,无需关心背后接入的是哪家供应商。
         </p>
@@ -359,7 +379,7 @@ export default function DocsView() {
             </TableRow>
           </TableBody>
         </Table>
-        <CodeBlock title="GET /v1/models 响应" code={MODELS_RESP} />
+        <CodeBlock title="GET /v1/models 响应" code={M(MODELS_RESP)} />
         <CodeBlock title="POST /v1/chat/completions 响应(非流式)" code={CHAT_RESP} />
         <p className="text-sm text-muted-foreground">
           计费按实际 token 用量结算,余额与明细在「概览」和「对话日志」实时可见。
@@ -368,8 +388,8 @@ export default function DocsView() {
 
       <Section id="streaming" title="流式" desc="标准 SSE:请求体加 stream: true,SDK 原生流式接口直接可用。">
         <LangTabs tabs={[
-          { label: "Python", code: STREAM_PY },
-          { label: "Node", code: STREAM_NODE },
+          { label: "Python", code: M(STREAM_PY) },
+          { label: "Node", code: M(STREAM_NODE) },
         ]} />
         <CodeBlock title="SSE 线格式" code={STREAM_SSE} />
       </Section>
