@@ -41,6 +41,9 @@ config/local.toml
 .ai-memory/
 .playwright-cli/
 .workbuddy/
+# playwright-cli 走查快照(命令在仓库根目录落盘,曾误提交过)
+/*.yaml
+/*.png
 
 # TS 增量构建缓存
 *.tsbuildinfo
