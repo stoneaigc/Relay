@@ -1183,6 +1183,11 @@ fn anthropic_stream_response(
         } else {
             // 中途断流:按失败收口并让熔断感知,不再虚记成功。
             state.breaker_unavailable(&k).await;
+            // 失败也要进指标桶:失败率快照(provider_err)的数据源,否则智能策略看不到「爱中途断流」的上游。
+            // 与重试尝试失败同口径:只写上游分桶(全局仍按一次请求计),失败延迟不进 P50 样本。
+            state
+                .record_metrics_upstream_attempt(&k, crate::state::METRIC_STATUS_UNAVAILABLE, trace.started.elapsed())
+                .await;
             trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
         }
     });
@@ -1872,6 +1877,10 @@ fn anthropic_passthrough_stream(
             trace.emit_success(&state, input, output, charged).await;
         } else {
             state.breaker_unavailable(&k).await;
+            // 失败也进指标桶(上游分桶,口径同重试尝试失败):失败率快照要能看到中途断流。
+            state
+                .record_metrics_upstream_attempt(&k, crate::state::METRIC_STATUS_UNAVAILABLE, trace.started.elapsed())
+                .await;
             trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
         }
     });
@@ -2343,6 +2352,10 @@ fn stream_response(
         } else {
             // 上游中途断流:按失败收口并让熔断感知,不再虚记成功。
             state.breaker_unavailable(&k).await;
+            // 失败也进指标桶(上游分桶,口径同重试尝试失败):失败率快照要能看到中途断流。
+            state
+                .record_metrics_upstream_attempt(&k, crate::state::METRIC_STATUS_UNAVAILABLE, trace.started.elapsed())
+                .await;
             trace.emit_error(&state, crate::state::METRIC_STATUS_UNAVAILABLE as i32).await;
         }
     });

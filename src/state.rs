@@ -1488,8 +1488,10 @@ impl AppState {
 
     /// 刷新智能自适应/延迟优先策略用的上游表现快照:按内存路由表逐个供应商聚合近 1h 指标。
     /// - 延迟:成功请求的 P50(ms),失败样本不参与(避免超时把均值带偏)。
-    /// - 失败率:(req - success) / req,含 5xx、超时、限流与上游不可用;这是「避开爱故障的上游」的主要信号。
-    /// 由 main.rs 后台任务周期调用;窗口内无请求的供应商保留上次快照(新供应商冷启动随机分摊)。
+    /// - 失败率:(req - success) / req,含 5xx、超时、限流、上游不可用与中途断流;这是「避开爱故障的上游」的主要信号。
+    /// 由 main.rs 后台任务周期调用;窗口内无请求的供应商:P50 保留(延迟是稳定属性,旧值仍可参考),
+    /// 失败率条目移除(失败率是时效信号,旧故障滑出窗口后就该回「未知」,否则故障过的上游
+    /// 被智能策略避开 → 无流量 → 快照冻结在高位 → 恢复后永远无法翻身)。
     pub async fn refresh_provider_stats(&self) {
         use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -1505,6 +1507,9 @@ impl AppState {
             )
             .await;
             if total.req == 0 {
+                // 近 1h 无流量:失败率条目过期移除(auto 视为未知,以中位数占位 + 冷启动探索接管);
+                // 延迟 P50 不移除(见函数注释)。移除而非保留,避免故障恢复后的上游被冻结的旧失败率永久压制。
+                self.provider_err.remove(name);
                 continue;
             }
             if total.success > 0 {
@@ -2013,6 +2018,101 @@ mod tests {
         assert!(items[0]["breaker"]["recover_remaining_ms"].as_u64().unwrap() > 0);
         assert_eq!(items[1]["provider"], "prov-a");
         assert_eq!(items[1]["status"], "degraded");
+    }
+
+    // ---- refresh_provider_stats:失败率快照的时效性 ----
+
+    #[tokio::test]
+    async fn refresh_provider_stats_err_expires_when_idle() {
+        use std::collections::HashMap;
+        use std::sync::Mutex as StdMutex;
+
+        use crate::cache::Cache;
+        use crate::reqlog::SqliteRequestLogStore;
+        use crate::routing::{ProviderConn, Routing};
+
+        sqlx::any::install_default_drivers();
+        let db = crate::storage::Db::connect("sqlite::memory:").await.unwrap();
+        let db2 = db.clone();
+        let cfg: crate::config::Config = serde_json::from_str(
+            r#"{"server":{"bind":"127.0.0.1:0"},"database":{}}"#,
+        )
+        .unwrap();
+        let conn = |kind, base_url: &str, api_key: Option<&str>| ProviderConn {
+            kind,
+            base_url: base_url.to_string(),
+            api_key: api_key.map(|s| s.to_string()),
+            concurrency: None,
+            headers: Vec::new(),
+        };
+        let routing = Routing {
+            providers: HashMap::from([(
+                "prov-a".to_string(),
+                conn(ProviderKind::Openai, "http://a", Some("ka")),
+            )]),
+            models: HashMap::new(),
+            group_names: HashMap::new(),
+            group_strategy: HashMap::new(),
+            group_concurrency: HashMap::new(),
+            time_rules: HashMap::new(),
+            groups: HashMap::new(),
+            user_group_models: HashMap::new(),
+        };
+        let (usage_tx, _usage_rx) = mpsc::channel(16);
+        let (log_tx, _log_rx) = mpsc::channel(16);
+        let (audit_tx, _audit_rx) = mpsc::channel(16);
+        let state = Arc::new(AppState {
+            config: ArcSwap::from_pointee(cfg),
+            routing: ArcSwap::from_pointee(routing),
+            keys: DashMap::new(),
+            users: DashMap::new(),
+            http: reqwest::Client::new(),
+            db,
+            usage_tx,
+            cache: Cache::Memory(StdMutex::new(HashMap::new())),
+            semantic_cache: crate::semantic_cache::SemanticCache::new(),
+            upstream_slots: DashMap::new(),
+            group_slots: DashMap::new(),
+            upstream_breakers: DashMap::new(),
+            round_robin: DashMap::new(),
+            latency_p50: DashMap::new(),
+            provider_err: DashMap::new(),
+            tz_offset_secs: 28800,
+            audit_failures: AsyncMutex::new(VecDeque::new()),
+            metrics: MetricsStore::default(),
+            request_log: Arc::new(SqliteRequestLogStore::new(db2.clone())),
+            request_log_tx: log_tx,
+            audit_log: Arc::new(crate::audit::SqliteAuditStore::new(db2)),
+            audit_tx,
+            login_guard: Arc::new(crate::guard::LoginGuard::default()),
+        });
+        let key_a = UpstreamKey::new(ProviderKind::Openai, "http://a", Some("ka"));
+
+        // 1) 无任何请求:刷新后 P50 与失败率都不产生条目(延迟只在 success>0 时写)。
+        state.refresh_provider_stats().await;
+        assert!(state.provider_err.get("prov-a").is_none());
+        assert!(state.latency_p50.get("prov-a").is_none());
+
+        // 2) prov-a 出现高失败(2 失败 0 成功)→ 失败率 1.0。
+        state.record_metrics(Some(&key_a), 500, Duration::ZERO, 0, 0).await;
+        state.record_metrics(Some(&key_a), METRIC_STATUS_UNAVAILABLE, Duration::ZERO, 0, 0).await;
+        state.refresh_provider_stats().await;
+        assert_eq!(state.provider_err.get("prov-a").map(|e| *e.value()), Some(1.0));
+
+        // 3) 模拟「被避开后 1h 无流量」:指标桶清空(窗口滑走),旧失败率必须过期移除,
+        //    否则故障恢复后的上游被冻结的 1.0 失败率永久压制(auto 永远不选它)。
+        {
+            let b = state.metrics.get_bucket(Some(key_a.clone()));
+            b.lock().await.mins.clear();
+        }
+        state.refresh_provider_stats().await;
+        assert!(state.provider_err.get("prov-a").is_none(), "空闲供应商的失败率快照应过期移除");
+
+        // 4) 有成功请求后:延迟 P50 与失败率恢复写入。
+        state.record_metrics(Some(&key_a), 200, Duration::from_millis(120), 0, 0).await;
+        state.refresh_provider_stats().await;
+        assert_eq!(state.provider_err.get("prov-a").map(|e| *e.value()), Some(0.0));
+        assert_eq!(state.latency_p50.get("prov-a").map(|e| *e.value()), Some(120));
     }
 
     #[tokio::test]
