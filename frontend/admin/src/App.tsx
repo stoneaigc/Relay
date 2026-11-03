@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
-import { Users as UsersIcon, UsersRound, KeyRound, Copy, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen, SlidersHorizontal, Undo2, Ban, ChevronRight, ArrowUp, ArrowDown, Inbox } from "lucide-react";
+import { Users as UsersIcon, UsersRound, KeyRound, Copy, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen, SlidersHorizontal, Undo2, Ban, ChevronRight, ArrowUp, ArrowDown, Inbox, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, UserGroupRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, PlanBody, ResetPeriod, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint, AdminKeyRow, AdminApiKeyRow, PlanRow, PlanQuotaRow, UsageTrendPoint } from "./api";
 import { Button } from "@/components/ui/button";
 import { RowActions } from "@/components/ui/row-actions";
@@ -145,9 +145,16 @@ const NAV = NAV_GROUPS.flatMap((g) => g.items);
 
 function Console({ onLogout }: { onLogout: () => void }) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  // 桌面侧边栏收起态:收起后只显示图标竖条,偏好记入 localStorage 跨会话保留。
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("relay_sidebar_collapsed") === "1");
   const [version, setVersion] = useState("");
   const loc = useLocation();
   useEffect(() => { healthz().then((h) => setVersion(h.version)).catch(() => {}); }, []);
+  const toggleCollapsed = () =>
+    setCollapsed((c) => {
+      localStorage.setItem("relay_sidebar_collapsed", c ? "0" : "1");
+      return !c;
+    });
   // 取匹配最深的导航项,避免 /user-groups 误命中 /users。
   const activeNav = NAV.filter((n) => loc.pathname === n.path || loc.pathname.startsWith(n.path + "/")).sort(
     (a, b) => b.path.length - a.path.length
@@ -156,10 +163,12 @@ function Console({ onLogout }: { onLogout: () => void }) {
   const groupTitle = activeNav ? NAV_GROUPS.find((g) => g.items.includes(activeNav))?.title ?? "" : "";
   const isGroups = loc.pathname.startsWith("/groups");
 
-  const sidebar = (
+  // 侧边栏内容:collapsed=true 时为图标竖条(分组标题换成细分隔线,文字项转为 title 提示);
+  // 移动端抽屉恒为展开态。整体沿用浮动卡片的设计语言(圆角 / 边框 / 阴影 / brand 高亮)。
+  const renderSidebar = (collapsed: boolean) => (
     <>
-      <div className="flex items-center justify-between px-4 pb-3 pt-4">
-        <div className="flex items-center gap-2.5">
+      <div className={cn("flex items-center pb-3 pt-4", collapsed ? "justify-center px-2" : "justify-between px-4")}>
+        <div className={cn("flex items-center", collapsed ? "" : "gap-2.5")}>
           <svg viewBox="0 0 64 64" className="h-9 w-9 shrink-0 drop-shadow-[0_4px_10px_rgba(99,102,241,0.35)]">
             <defs><linearGradient id="ag" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style={{stopColor:'#6366f1'}}/><stop offset="100%" style={{stopColor:'#8b5cf6'}}/></linearGradient></defs>
             <rect width="64" height="64" rx="14" fill="url(#ag)"/>
@@ -170,29 +179,39 @@ function Console({ onLogout }: { onLogout: () => void }) {
             <path d="M40 32 L54 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
             <path d="M46 25 L54 32 L46 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
           </svg>
-          <div className="flex flex-col leading-none">
-            <span className="text-[17px] font-bold tracking-tight text-foreground">Relay</span>
-            <span className="mt-1 text-[0.75rem] font-medium tracking-[0.14em] text-subtle-foreground">ADMIN CONSOLE</span>
-          </div>
+          {!collapsed && (
+            <div className="flex flex-col leading-none">
+              <span className="text-[17px] font-bold tracking-tight text-foreground">Relay</span>
+              <span className="mt-1 text-[0.75rem] font-medium tracking-[0.14em] text-subtle-foreground">ADMIN CONSOLE</span>
+            </div>
+          )}
         </div>
-        <button className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted md:hidden" onClick={() => setMobileOpen(false)}><X className="h-5 w-5" /></button>
+        {!collapsed && (
+          <button className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted md:hidden" onClick={() => setMobileOpen(false)}><X className="h-5 w-5" /></button>
+        )}
       </div>
-      <nav className="flex-1 space-y-0.5 overflow-y-auto px-2.5 pb-2 pt-1">
+      <nav className={cn("flex-1 space-y-0.5 overflow-y-auto pb-2 pt-1", collapsed ? "px-2" : "px-2.5")}>
         {NAV_GROUPS.map((g, gi) => (
-          <div key={gi} className={cn(gi > 0 && "mt-4")}>
-            {g.title && (
-              <div className="px-3 pb-1.5 pt-1 text-[0.8rem] font-semibold tracking-wide text-subtle-foreground">{g.title}</div>
-            )}
+          <div key={gi} className={cn(gi > 0 && (collapsed ? "mt-3" : "mt-4"))}>
+            {g.title ? (
+              collapsed ? (
+                // 收起态:分组标题换成分隔线,保留分组节奏。
+                <div className="mx-1.5 my-2 border-t border-border" />
+              ) : (
+                <div className="px-3 pb-1.5 pt-1 text-[0.8rem] font-semibold tracking-wide text-subtle-foreground">{g.title}</div>
+              )
+            ) : null}
             {g.items.map((n) => (
-              <NavLink key={n.path} to={n.path} onClick={() => setMobileOpen(false)}
-                className={({ isActive }) => cn("relative flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors duration-150",
+              <NavLink key={n.path} to={n.path} onClick={() => setMobileOpen(false)} title={collapsed ? n.label : undefined}
+                className={({ isActive }) => cn("relative flex w-full items-center rounded-lg text-sm transition-colors duration-150",
+                  collapsed ? "justify-center px-0 py-2.5" : "gap-3 px-3 py-2",
                   isActive
                     ? "bg-brand-50 font-semibold text-brand-700 before:absolute before:left-0 before:top-1/2 before:h-4 before:w-[3px] before:-translate-y-1/2 before:rounded-r-full before:bg-primary before:content-['']"
                     : "text-muted-foreground hover:bg-muted hover:text-foreground")}>
                 {({ isActive }) => (
                   <>
-                    <n.icon className={cn("h-4 w-4 shrink-0", isActive ? "text-brand-600" : "text-subtle-foreground")} />
-                    {n.label}
+                    <n.icon className={cn("shrink-0", collapsed ? "h-[18px] w-[18px]" : "h-4 w-4", isActive ? "text-brand-600" : "text-subtle-foreground")} />
+                    {!collapsed && n.label}
                   </>
                 )}
               </NavLink>
@@ -200,9 +219,10 @@ function Console({ onLogout }: { onLogout: () => void }) {
           </div>
         ))}
       </nav>
-      <div className="space-y-0.5 border-t border-border px-2.5 py-3">
+      <div className={cn("space-y-0.5 border-t border-border py-3", collapsed ? "px-2" : "px-2.5")}>
         {/* 一键切换门户:首次自动创建同名门户账号,成功后带独立 portal 令牌直达。 */}
-        <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground"
+        <Button variant="ghost" size="sm" title={collapsed ? "进入用户门户" : undefined}
+          className={cn("w-full justify-start gap-3 text-muted-foreground", collapsed && "justify-center px-0")}
           onClick={async () => {
             try {
               const r = await api.portalSso();
@@ -213,28 +233,41 @@ function Console({ onLogout }: { onLogout: () => void }) {
               }
             } catch (e: any) { toast.error(e.message || "进入用户门户失败"); }
           }}>
-          <ExternalLink className="h-4 w-4" />进入用户门户
+          <ExternalLink className={cn("shrink-0", collapsed ? "h-[18px] w-[18px]" : "h-4 w-4")} />{!collapsed && "进入用户门户"}
         </Button>
-        <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground hover:text-destructive" onClick={onLogout}>
-          <LogOut className="h-4 w-4" />退出登录
+        <Button variant="ghost" size="sm" title={collapsed ? "退出登录" : undefined}
+          className={cn("w-full justify-start gap-3 text-muted-foreground hover:text-destructive", collapsed && "justify-center px-0")} onClick={onLogout}>
+          <LogOut className={cn("shrink-0", collapsed ? "h-[18px] w-[18px]" : "h-4 w-4")} />{!collapsed && "退出登录"}
         </Button>
-        {version && <div className="px-3 pt-2 text-[0.75rem] tracking-wide text-subtle-foreground">Relay v{version}</div>}
+        {version && (
+          collapsed
+            ? <div className="pt-1.5 text-center text-[0.65rem] tracking-wide text-subtle-foreground">v{version}</div>
+            : <div className="px-3 pt-2 text-[0.75rem] tracking-wide text-subtle-foreground">Relay v{version}</div>
+        )}
       </div>
     </>
   );
+  const sidebar = renderSidebar(collapsed);
 
   return (
-    <div className="flex h-screen gap-2 overflow-hidden bg-background p-2 md:gap-3 md:p-3">
-      <aside className="hidden w-56 shrink-0 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-panel md:flex">{sidebar}</aside>
+    // 桌面态侧边栏贴合左缘(无左内边距,只保留右侧圆角);内容区维持浮动卡片风格。
+    <div className="flex h-screen gap-2 overflow-hidden bg-background p-2 md:gap-3 md:py-3 md:pr-3 md:pl-0">
+      <aside className={cn("hidden shrink-0 flex-col overflow-hidden rounded-r-2xl border-y border-r border-border bg-card shadow-panel transition-[width] duration-200 ease-in-out md:flex", collapsed ? "w-[68px]" : "w-56")}>
+        {sidebar}
+      </aside>
       {mobileOpen && (
         <div className="fixed inset-0 z-40 md:hidden">
           <div className="absolute inset-0 bg-[#0b0d18]/40 backdrop-blur-[3px]" onClick={() => setMobileOpen(false)} />
-          <aside className="absolute inset-y-0 left-0 flex w-64 flex-col overflow-hidden rounded-r-2xl border-r border-border bg-card shadow-drawer animate-[relay-sheet-in_0.34s_var(--ease-spring)_both]">{sidebar}</aside>
+          <aside className="absolute inset-y-0 left-0 flex w-64 flex-col overflow-hidden rounded-r-2xl border-r border-border bg-card shadow-drawer animate-[relay-sheet-in_0.34s_var(--ease-spring)_both]">{renderSidebar(false)}</aside>
         </div>
       )}
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-panel">
         <header className="flex h-16 shrink-0 items-center gap-3 border-b border-border px-4 md:px-6">
           <button className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted md:hidden" onClick={() => setMobileOpen(true)}><Menu className="h-5 w-5" /></button>
+          {/* 桌面侧边栏收起/展开开关:收起后侧边栏变纯图标竖条,偏好记 localStorage。 */}
+          <button className="hidden rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted md:block" title={collapsed ? "展开菜单" : "收起菜单"} onClick={toggleCollapsed}>
+            {collapsed ? <PanelLeftOpen className="h-5 w-5" /> : <PanelLeftClose className="h-5 w-5" />}
+          </button>
           <div className="flex min-w-0 items-center gap-2">
             {groupTitle && (
               <>
