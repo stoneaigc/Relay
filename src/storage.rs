@@ -4100,7 +4100,9 @@ pub async fn user_daily_series(
     let start = today0 - (days - 1).max(0) * 86400;
 
     let rows = q!(
-        "SELECT ((ts + ?) / 86400) AS d, CAST(COALESCE(SUM(charged_tokens),0) AS BIGINT) AS tok, COUNT(*) AS c
+        "SELECT ((ts + ?) / 86400) AS d, CAST(COALESCE(SUM(charged_tokens),0) AS BIGINT) AS tok, \
+                CAST(COALESCE(SUM(input_tokens),0) AS BIGINT) AS inp, CAST(COALESCE(SUM(output_tokens),0) AS BIGINT) AS outp, \
+                COALESCE(SUM(cost_usd),0.0) AS cost, COUNT(*) AS c
          FROM usage_logs WHERE user_id = ? AND ts >= ? GROUP BY d",
     )
     .bind(offset)
@@ -4109,9 +4111,18 @@ pub async fn user_daily_series(
     .fetch_all(pool)
     .await?;
 
-    let mut map: std::collections::HashMap<i64, (i64, i64)> = std::collections::HashMap::new();
+    let mut map: std::collections::HashMap<i64, (i64, i64, i64, f64, i64)> = std::collections::HashMap::new();
     for r in rows {
-        map.insert(r.get::<i64, _>("d"), (r.get::<i64, _>("tok"), r.get::<i64, _>("c")));
+        map.insert(
+            r.get::<i64, _>("d"),
+            (
+                r.get::<i64, _>("tok"),
+                r.get::<i64, _>("inp"),
+                r.get::<i64, _>("outp"),
+                r.get::<f64, _>("cost"),
+                r.get::<i64, _>("c"),
+            ),
+        );
     }
 
     let start_d = (start + offset) / 86400;
@@ -4119,8 +4130,15 @@ pub async fn user_daily_series(
     let mut out = Vec::new();
     let mut d = start_d;
     while d <= today_d {
-        let (tok, c) = map.get(&d).copied().unwrap_or((0, 0));
-        out.push(serde_json::json!({ "ts": d * 86400 - offset, "tokens": tok, "calls": c }));
+        let (tok, inp, outp, cost, c) = map.get(&d).copied().unwrap_or((0, 0, 0, 0.0, 0));
+        out.push(serde_json::json!({
+            "ts": d * 86400 - offset,
+            "tokens": tok,
+            "input_tokens": inp,
+            "output_tokens": outp,
+            "cost_usd": (cost * 10000.0).round() / 10000.0,
+            "calls": c,
+        }));
         d += 1;
     }
     Ok(out)

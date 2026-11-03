@@ -121,15 +121,30 @@ function ModelCardView({ m, onDetail }: { m: ModelCard; onDetail: (m: ModelCard)
   );
 }
 
-/// 模型详情弹窗:上下文/倍率/单价/上游部署数/缓存 + 协议兼容入口 + 复制模型名。
-function ModelDetailDialog({ m, onClose }: { m: ModelCard | null; onClose: () => void }) {
-  const navigate = useNavigate();
+/// 手风琴分区:标题行点击开合,指示箭头随状态旋转。
+function AccSection({ title, defaultOpen, children }: { title: string; defaultOpen?: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(!!defaultOpen);
+  return (
+    <div className="border-b border-border last:border-b-0">
+      <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
+        className="flex w-full items-center justify-between gap-2 px-4 py-3 text-left text-[0.9rem] font-medium text-foreground transition-colors hover:bg-muted/50">
+        {title}
+        <svg viewBox="0 0 24 24" className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-200", open && "rotate-180")}
+          fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+      </button>
+      {open && <div className="px-4 pb-4">{children}</div>}
+    </div>
+  );
+}
+
+/// 模型详情右侧抽屉:点击卡片从右侧滑出,内容按手风琴分区(介绍 / 规格与计费 / 连接方式 / 调用示例)。
+function ModelDetailSheet({ m, onClose }: { m: ModelCard | null; onClose: () => void }) {
+  const baseUrl = `${window.location.origin}${SITE_PREFIX}/v1`;
   const ctx = m?.context_length != null && m.context_length > 0
     ? (m.context_length >= 1_000_000
         ? `${(m.context_length / 1_000_000).toFixed(m.context_length % 1_000_000 ? 1 : 0)}M`
         : `${Math.round(m.context_length / 1000)}K`) + " tokens"
     : "—";
-  // 网关内置协议互转:按模型能力提供入口——对话/多模态模型走三大对话端点,向量模型走 Embeddings。
   const unsupported = m ? isUnsupportedModel(m) : false;
   const isEmbedding = m ? isEmbeddingModel(m) : false;
   const protos: [string, string][] = unsupported
@@ -144,68 +159,143 @@ function ModelDetailDialog({ m, onClose }: { m: ModelCard | null; onClose: () =>
   // 实际计费单价 = 模型单价 × 路由倍率。
   const effIn = m?.input_price != null ? m.input_price * m.multiplier : null;
   const effOut = m?.output_price != null ? m.output_price * m.multiplier : null;
+  const apiBase = baseUrl.replace(/\/v1$/, "");
+  // curl 示例:按模型能力给对话 / 向量两种,Anthropic 兼容端点一并列出。
+  const curlOpenai = `curl ${baseUrl}/chat/completions \\
+  -H "Authorization: Bearer $RELAY_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${m?.name ?? "model-name"}",
+    "messages": [{ "role": "user", "content": "你好" }],
+    "stream": true
+  }'`;
+  const curlClaude = `curl ${baseUrl}/messages \\
+  -H "x-api-key: $RELAY_API_KEY" \\
+  -H "anthropic-version: 2023-06-01" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "${m?.name ?? "model-name"}",
+    "max_tokens": 1024,
+    "messages": [{ "role": "user", "content": "你好" }]
+  }'`;
+  const curlEmbed = `curl ${baseUrl}/embeddings \\
+  -H "Authorization: Bearer $RELAY_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{ "model": "${m?.name ?? "model-name"}", "input": "文本内容" }'`;
   return (
-    <Dialog open={!!m} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <span className="mono">{m?.name}</span>
-            {m && <CopyButton value={m.name} label="复制模型名" />}
-          </DialogTitle>
-          <DialogDescription>{unsupported ? "该模型暂不支持网关转发，仅用于上游连通性探测。" : "按模型能力提供兼容的调用入口，网关自动完成协议互转；实际计费以下方「实际计费单价」为准。"}</DialogDescription>
-        </DialogHeader>
+    <>
+      {/* 遮罩:点击空白处关闭。 */}
+      {m && <div className="fixed inset-0 z-40 bg-[#0b0d18]/25" onClick={onClose} />}
+      <aside className={cn(
+        "fixed inset-y-0 right-0 z-50 flex w-full max-w-md flex-col overflow-hidden border-l border-border bg-card shadow-drawer transition-transform duration-300 ease-out",
+        m ? "translate-x-0" : "translate-x-full"
+      )}>
         {m && (
-          <div className="space-y-4">
-            {m.description && <p className="text-sm leading-relaxed text-muted-foreground">{m.description}</p>}
-            {(unsupported || m.labels.length > 0 || m.tags.length > 0) && (
-              <div className="flex flex-wrap gap-1">
-                {m.labels.map((l) => <Badge key={l}>{l}</Badge>)}
-                {m.tags.map((t) => <Badge key={t} variant="muted">{t}</Badge>)}
-                {unsupported && <Badge variant="default" className="border-destructive/30 bg-destructive/15 text-destructive">暂不转发</Badge>}
+          <>
+            <div className="flex shrink-0 items-start justify-between gap-2 border-b border-border px-4 py-3.5">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="mono truncate text-[1rem] font-semibold text-foreground" title={m.name}>{m.name}</span>
+                  <CopyButton value={m.name} label="复制模型名" />
+                </div>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {unsupported ? "暂不转发,仅用于上游连通性探测" : isEmbedding ? "向量模型 · 经 /v1/embeddings 调用" : "网关自动完成协议互转,实际计费以「规格与计费」为准"}
+                </p>
               </div>
-            )}
-            <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
-              <div><div className="text-xs text-muted-foreground">上下文窗口</div><div className="mono">{ctx}</div></div>
-              <div><div className="text-xs text-muted-foreground">计费倍率</div><div className="mono">×{m.multiplier}</div></div>
-              <div><div className="text-xs text-muted-foreground">模型单价(输入/输出)</div><div className="mono">{m.input_price != null && m.output_price != null ? `$${m.input_price.toFixed(2)} / $${m.output_price.toFixed(2)} · 1M tokens` : "未定价"}</div></div>
-              <div><div className="text-xs text-muted-foreground">上游部署数</div><div className="mono">{m.upstreams}</div></div>
-              <div><div className="text-xs text-muted-foreground">模型组总并发</div><div className="mono">{m.group_concurrency === 0 ? "不限" : m.group_concurrency}</div></div>
-              <div><div className="text-xs text-muted-foreground">上下文缓存</div><div>{m.cache ? <span className="text-success">支持(命中按折扣)</span> : <span className="text-muted-foreground">不支持</span>}</div></div>
+              <button className="shrink-0 rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted" onClick={onClose} title="关闭详情">
+                <X className="h-5 w-5" />
+              </button>
             </div>
-            <div className="rounded-lg bg-muted/40 px-3 py-2 text-xs leading-5">
-              {effIn != null && effOut != null ? (
-                <>实际计费单价（= 模型单价 × 倍率）：输入 <b className="mono">${effIn.toFixed(2)}</b> / 输出 <b className="mono">${effOut.toFixed(2)}</b> 每 1M tokens</>
-              ) : (
-                <>该模型未定价，调用按 $0 计。</>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <AccSection title="模型介绍" defaultOpen>
+                <p className="text-[0.85rem] leading-relaxed text-muted-foreground">
+                  {m.description || "暂无介绍。"}
+                </p>
+                {(m.labels.length > 0 || m.tags.length > 0) && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {m.labels.map((l) => <Badge key={l}>{l}</Badge>)}
+                    {m.tags.map((t) => <Badge key={t} variant="muted">{t}</Badge>)}
+                  </div>
+                )}
+                {unsupported && (
+                  <div className="mt-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive">
+                    当前网关不转发此类语音、搜索等模型,不承诺转发能力。
+                  </div>
+                )}
+              </AccSection>
+              <AccSection title="规格与计费" defaultOpen>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-3 text-[0.85rem]">
+                  <div><div className="text-xs text-muted-foreground">上下文窗口</div><div className="mono">{ctx}</div></div>
+                  <div><div className="text-xs text-muted-foreground">计费倍率</div><div className="mono">×{m.multiplier}</div></div>
+                  <div><div className="text-xs text-muted-foreground">模型单价(输入/输出)</div><div className="mono">{m.input_price != null && m.output_price != null ? `$${m.input_price.toFixed(2)} / $${m.output_price.toFixed(2)} · 1M` : "未定价"}</div></div>
+                  <div><div className="text-xs text-muted-foreground">上游部署数</div><div className="mono">{m.upstreams}</div></div>
+                  <div><div className="text-xs text-muted-foreground">模型组总并发</div><div className="mono">{m.group_concurrency === 0 ? "不限" : m.group_concurrency}</div></div>
+                  <div><div className="text-xs text-muted-foreground">上下文缓存</div><div>{m.cache ? <span className="text-success">支持(命中按折扣)</span> : <span className="text-muted-foreground">不支持</span>}</div></div>
+                </div>
+                <div className="mt-3 rounded-lg bg-muted/40 px-3 py-2 text-xs leading-5">
+                  {effIn != null && effOut != null ? (
+                    <>实际计费单价(= 模型单价 × 倍率):输入 <b className="mono">${effIn.toFixed(2)}</b> / 输出 <b className="mono">${effOut.toFixed(2)}</b> 每 1M tokens</>
+                  ) : (
+                    <>该模型未定价,调用按 $0 计。</>
+                  )}
+                </div>
+              </AccSection>
+              <AccSection title="连接方式">
+                <div className="space-y-2.5">
+                  <div>
+                    <div className="mb-1 text-xs text-muted-foreground">Base URL</div>
+                    <div className="flex items-center gap-2">
+                      <div className="mono flex-1 rounded-lg border bg-muted/50 px-2.5 py-1.5 text-xs break-all">{baseUrl}</div>
+                      <CopyButton value={baseUrl} label="复制 Base URL" />
+                    </div>
+                  </div>
+                  <div>
+                    <div className="mb-1 text-xs text-muted-foreground">兼容端点(同一把 Key 通用)</div>
+                    <div className="space-y-1">
+                      {protos.map(([p, d]) => (
+                        <div key={p} className="flex items-center justify-between gap-2 rounded-md bg-muted/40 px-2 py-1 text-xs">
+                          <span className="mono">{p}</span>
+                          <span className="text-muted-foreground">{d}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    认证方式:HTTP Header 携带 <span className="mono">Authorization: Bearer &lt;API Key&gt;</span>(Anthropic 端点用 <span className="mono">x-api-key</span>);API Key 在左侧「API 密钥」页创建与复制。
+                  </p>
+                </div>
+              </AccSection>
+              {!unsupported && (
+                <AccSection title="调用示例">
+                  <div className="space-y-3">
+                    {isEmbedding ? (
+                      <div>
+                        <div className="mb-1 text-xs font-medium text-muted-foreground">OpenAI 兼容 · Embeddings</div>
+                        <pre className="mono overflow-x-auto rounded-lg bg-muted/50 p-2.5 text-[0.72rem] leading-5">{curlEmbed}</pre>
+                      </div>
+                    ) : (
+                      <>
+                        <div>
+                          <div className="mb-1 text-xs font-medium text-muted-foreground">OpenAI 兼容 · Chat(流式)</div>
+                          <pre className="mono overflow-x-auto rounded-lg bg-muted/50 p-2.5 text-[0.72rem] leading-5">{curlOpenai}</pre>
+                        </div>
+                        <div>
+                          <div className="mb-1 text-xs font-medium text-muted-foreground">Anthropic 兼容 · Messages</div>
+                          <pre className="mono overflow-x-auto rounded-lg bg-muted/50 p-2.5 text-[0.72rem] leading-5">{curlClaude}</pre>
+                        </div>
+                      </>
+                    )}
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      将 <span className="mono">$RELAY_API_KEY</span> 替换为你的 API Key;非流式调用去掉 <span className="mono">"stream": true</span> 即可。完整参数说明见「API 文档」。
+                    </p>
+                  </div>
+                </AccSection>
               )}
             </div>
-            {unsupported ? (
-              <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs leading-5">
-                <div className="font-medium text-destructive">暂不转发</div>
-                <p className="mt-1 text-muted-foreground">当前网关不转发此类语音、搜索等模型，仅做上游连通性探测，不承诺转发能力。</p>
-              </div>
-            ) : (
-              <>
-                <div>
-                  <div className="mb-1 text-xs font-medium text-muted-foreground">兼容调用入口</div>
-                  <div className="space-y-1">
-                    {protos.map(([p, d]) => (
-                      <div key={p} className="flex items-center justify-between gap-2 rounded-md bg-muted/40 px-2 py-1 text-xs">
-                        <span className="mono">{p}</span>
-                        <span className="text-muted-foreground">{d}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <Button variant="outline" className="w-full" onClick={() => { onClose(); navigate("/docs"); }}>
-                  <BookOpen className="h-4 w-4" /> 查看调用示例(API 文档)
-                </Button>
-              </>
-            )}
-          </div>
+          </>
         )}
-      </DialogContent>
-    </Dialog>
+      </aside>
+    </>
   );
 }
 
@@ -272,18 +362,25 @@ function ModelsView({ models }: { models: ModelCard[] }) {
         </div>
       )}
       <p className="text-xs text-muted-foreground">点击卡片查看模型详情与兼容的调用入口;悬浮复制图标可直接复制模型名。单价已含路由倍率,实际计费以此为准。</p>
-      <ModelDetailDialog m={detail} onClose={() => setDetail(null)} />
+      <ModelDetailSheet m={detail} onClose={() => setDetail(null)} />
     </div>
   );
 }
 
-function LineChart({ points }: { points: { ts: number; tokens: number; calls: number }[] }) {
+type SeriesPoint = { ts: number; tokens: number; input_tokens: number; output_tokens: number; cost_usd: number; calls: number };
+
+/** 用量趋势图:输入/输出 tokens 堆叠柱(左轴)+ 调用次数折线(右轴隐藏,tooltip 里体现)。 */
+function UsageCharts({ points }: { points: SeriesPoint[] }) {
   const border = cssVar("--color-border", "#e4e4e7");
   const muted = cssVar("--color-muted-foreground", "#71717a");
   const fmtDay2 = (ts: number) => { const d = new Date(ts * 1000); return `${d.getMonth() + 1}/${d.getDate()}`; };
   const compact = (v: number) => (v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(0)}K` : String(v));
   const option: EChartsCoreOption = {
-    grid: { left: 8, right: 8, top: 30, bottom: 0, containLabel: true },
+    grid: { left: 8, right: 8, top: 34, bottom: 0, containLabel: true },
+    legend: {
+      top: 0, left: "center", itemWidth: 10, itemHeight: 10, textStyle: { color: muted, fontSize: 11 },
+      data: ["输入 tokens", "输出 tokens", "调用次数"],
+    },
     tooltip: {
       trigger: "axis",
       confine: true,
@@ -303,12 +400,13 @@ function LineChart({ points }: { points: { ts: number; tokens: number; calls: nu
       { type: "value", show: false },
     ],
     series: [
-      // 柱色用靛紫(数据可视化强调色),不用近黑的主色,避免整页灰黑观感。
-      { name: "tokens", type: "bar", data: points.map((p) => p.tokens), barMaxWidth: 18, itemStyle: { color: "#6366f1", borderRadius: [3, 3, 0, 0] } },
+      // 柱色用靛紫系(数据可视化强调色),输入深、输出浅,堆叠体现总量构成。
+      { name: "输入 tokens", type: "bar", stack: "tokens", data: points.map((p) => p.input_tokens ?? 0), barMaxWidth: 18, itemStyle: { color: "#6366f1" } },
+      { name: "输出 tokens", type: "bar", stack: "tokens", data: points.map((p) => p.output_tokens ?? 0), barMaxWidth: 18, itemStyle: { color: "#a5b4fc", borderRadius: [3, 3, 0, 0] } },
       { name: "调用次数", type: "line", yAxisIndex: 1, data: points.map((p) => p.calls), smooth: true, symbol: "circle", symbolSize: 5, itemStyle: { color: "#f59e0b" }, lineStyle: { width: 2, color: "#f59e0b" } },
     ],
   };
-  return <EChart option={option} height={190} />;
+  return <EChart option={option} height={220} />;
 }
 
 // token 数紧凑格式(预算条用):1.2M / 45K / 800。
@@ -530,9 +628,10 @@ export default function App() {
   );
 }
 
-type Section = "overview" | "models" | "chat" | "rewards" | "usage" | "docs";
+type Section = "overview" | "keys" | "models" | "chat" | "rewards" | "usage" | "docs";
 const NAV_ALL: { path: string; label: string; icon: any }[] = [
   { path: "/", label: "概览", icon: LayoutDashboard },
+  { path: "/keys", label: "API 密钥", icon: KeyRound },
   { path: "/models", label: "模型广场", icon: Boxes },
   { path: "/chat", label: "对话", icon: MessageSquare },
   { path: "/rewards", label: "奖励", icon: Gift },
@@ -553,7 +652,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [usagePage, setUsagePage] = useState(1);
   const [usagePageSize, setUsagePageSize] = useState(20);
   const [models, setModels] = useState<ModelCard[]>([]);
-  const [series, setSeries] = useState<{ ts: number; tokens: number; calls: number }[]>([]);
+  const [series, setSeries] = useState<SeriesPoint[]>([]);
   const [seriesDays, setSeriesDays] = useState(30);
   const [reveal, setReveal] = useState<{ kind: string; key: string; pending_approval?: boolean } | null>(null);
   const [rewardsEnabled, setRewardsEnabled] = useState(false);
@@ -569,6 +668,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const nav = NAV_ALL.filter((n) => n.path !== "/rewards" || rewardsEnabled);
   const section: Section = loc.pathname.startsWith("/chat") ? "chat"
     : loc.pathname.startsWith("/models") ? "models"
+    : loc.pathname.startsWith("/keys") ? "keys"
     : loc.pathname.startsWith("/rewards") ? "rewards"
     : loc.pathname.startsWith("/usage") ? "usage"
     : loc.pathname.startsWith("/docs") ? "docs" : "overview";
@@ -576,7 +676,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const effectiveSection = section === "rewards" && !rewardsEnabled ? "overview" as Section : section;
   // 标题与内容一致(按 effectiveSection 而非原始路径判断),避免奖励关闭时标题/内容不一致。
   const title = effectiveSection === "chat" ? "对话" : effectiveSection === "models" ? "模型广场" : effectiveSection === "rewards" ? "奖励"
-    : effectiveSection === "usage" ? "对话日志" : effectiveSection === "docs" ? "API 文档" : "概览";
+    : effectiveSection === "keys" ? "API 密钥" : effectiveSection === "usage" ? "对话日志" : effectiveSection === "docs" ? "API 文档" : "概览";
 
   const loadUsage = async () => {
     try {
@@ -593,7 +693,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     const all = [me, k, m, s, q];
     // 任一请求因鉴权失败 → 统一登出。
     if (all.some((r) => r.status === "rejected" && String((r as PromiseRejectedResult).reason?.message || "").includes("auth"))) { onLogout(); return; }
-    if (me.status === "fulfilled") { setPhone(me.value.phone || "—"); setIsAdmin(!!(me.value as any).is_admin); }
+    if (me.status === "fulfilled") { setPhone(me.value.phone || ""); setIsAdmin(!!(me.value as any).is_admin); }
     if (k.status === "fulfilled") setKeys(k.value.data);
     if (m.status === "fulfilled") setModels(m.value.data);
     if (s.status === "fulfilled") setSummary(s.value);
@@ -626,6 +726,10 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     api.series(seriesDays).then((ser) => setSeries(ser.data)).catch(() => {});
   }, [seriesDays]);
+  // 区间汇总统计(概览页用量趋势卡顶部展示)。
+  const sumIn = series.reduce((a, p) => a + (p.input_tokens ?? 0), 0);
+  const sumOut = series.reduce((a, p) => a + (p.output_tokens ?? 0), 0);
+  const sumCalls = series.reduce((a, p) => a + (p.calls ?? 0), 0);
 
   // 桌面侧边栏收起态:与管理端同款交互(顶栏开关 + localStorage 记忆)。
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem("relay_portal_sidebar_collapsed") === "1");
@@ -679,9 +783,12 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         ))}
       </nav>
       <div className="space-y-0.5 border-t border-border px-2.5 py-3">
-        <div className={cn("pb-2 text-xs text-muted-foreground", collapsed ? "px-0 text-center" : "px-3")} title={collapsed ? phone : undefined}>
-          {collapsed ? <span className="mx-auto block h-1.5 w-1.5 rounded-full bg-border-strong" /> : phone}
-        </div>
+        {/* 手机号:SSO/后台创建的账号可能没有,为空时整行不渲染(避免出现孤立占位符)。 */}
+        {phone && (
+          <div className={cn("pb-2 text-xs text-muted-foreground", collapsed ? "px-0 text-center" : "px-3")} title={collapsed ? phone : undefined}>
+            {collapsed ? <span className="mx-auto block h-1.5 w-1.5 rounded-full bg-border-strong" /> : phone}
+          </div>
+        )}
         {isAdmin && (
           <Button variant="ghost" size="sm" title={collapsed ? "返回管理端" : undefined}
             className={cn("text-[0.9rem] text-muted-foreground", collapsed ? "w-full justify-center" : "w-full justify-start gap-3")}
@@ -748,6 +855,12 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
               <ModelsView models={models} />
             </div>
           </div>
+        ) : effectiveSection === "keys" ? (
+          <div className="min-h-0 flex-1 overflow-auto">
+            <div className="p-4 md:p-6">
+              <InterfaceCard baseUrl={`${window.location.origin}${SITE_PREFIX}/v1`} keys={keys} onReveal={setReveal} onChanged={refresh} />
+            </div>
+          </div>
         ) : effectiveSection === "docs" ? (
           <div className="min-h-0 flex-1 overflow-auto">
             <div className="p-4 md:p-6">
@@ -773,7 +886,6 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                     <QuotaCell icon={KeySquare} label="月预算" limit={quota?.budget.monthly.limit ?? null} used={quota?.budget.monthly.used ?? 0} fmt={compactTokens} hint={quota?.budget.monthly.source} />
                   </div>
                   <PlanShop />
-                  <InterfaceCard baseUrl={`${window.location.origin}${SITE_PREFIX}/v1`} keys={keys} onReveal={setReveal} onChanged={refresh} />
                   <Card>
                     <CardHeader>
                       <div className="flex items-center justify-between gap-3">
@@ -792,7 +904,21 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                     <CardContent>
                       {series.length === 0 ? <p className="text-sm text-muted-foreground">暂无数据</p> : (
                         <>
-                          <LineChart points={series} />
+                          {/* 区间汇总:输入/输出/调用/费用一目了然。 */}
+                          <div className="mb-3 grid grid-cols-2 gap-3 md:grid-cols-4">
+                            {[
+                              { label: "总输入", value: `${compactTokens(sumIn)} tokens` },
+                              { label: "总输出", value: `${compactTokens(sumOut)} tokens` },
+                              { label: "总调用", value: `${sumCalls.toLocaleString()} 次` },
+                              { label: "总费用", value: fmtCost(series.reduce((a, p) => a + (p.cost_usd ?? 0), 0)) },
+                            ].map((s) => (
+                              <div key={s.label} className="rounded-lg border bg-muted/30 px-3 py-2">
+                                <div className="text-xs text-muted-foreground">{s.label}</div>
+                                <div className="mono mt-0.5 text-[0.95rem] font-semibold text-foreground">{s.value}</div>
+                              </div>
+                            ))}
+                          </div>
+                          <UsageCharts points={series} />
                           <div className="mt-1 flex justify-between text-xs text-muted-foreground">
                             <span>{fmtDay(series[0].ts)}</span>
                             <span>峰值 {Math.max(0, ...series.map((d) => d.tokens)).toLocaleString()} tokens / 天</span>

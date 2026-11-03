@@ -116,7 +116,7 @@ export const api = {
   quota: (): Promise<QuotaInfo> => req("/portal/api/quota"),
   changePassword: (old_password: string, new_password: string) =>
     req("/portal/api/auth/change_password", { method: "POST", body: JSON.stringify({ old_password, new_password }) }),
-  series: (days?: number): Promise<{ data: { ts: number; tokens: number; calls: number }[] }> =>
+  series: (days?: number): Promise<{ data: { ts: number; tokens: number; input_tokens: number; output_tokens: number; cost_usd: number; calls: number }[] }> =>
     req(`/portal/api/series${typeof days === "number" ? `?days=${days}` : ""}`),
   usage: (page?: number, pageSize?: number): Promise<{ data: any[]; total: number; page: number; page_size: number; total_pages: number }> => {
     const qs = new URLSearchParams();
