@@ -2069,6 +2069,8 @@ pub struct UpdateModel {
     pub context_length: Option<Option<i64>>,
     #[serde(default, deserialize_with = "deser_opt_string")]
     pub tags: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deser_opt_string")]
+    pub description: Option<Option<String>>,
 }
 
 /// PATCH /admin/models/:id —— 编辑模型。
@@ -2096,7 +2098,7 @@ pub async fn update_model(
             return Err(ApiError::BadRequest("context_length must be >= 0".into()));
         }
     }
-    storage::update_model(&state.db, id, &body.kind, &body.base_url, body.api_key.as_deref(), &body.upstream_model, body.label.as_deref(), body.input_price, body.output_price, body.context_length, body.tags.as_ref().map(|o| o.as_deref()))
+    storage::update_model(&state.db, id, &body.kind, &body.base_url, body.api_key.as_deref(), &body.upstream_model, body.label.as_deref(), body.input_price, body.output_price, body.context_length, body.tags.as_ref().map(|o| o.as_deref()), body.description.as_ref().map(|o| o.as_deref()))
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     rebuild_routing(&state).await?;

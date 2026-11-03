@@ -74,6 +74,7 @@ export interface ModelCard {
   group_concurrency: number;
   input_price: number | null;
   output_price: number | null;
+  description: string | null;
 }
 
 /** 我的套餐与实时用量(limit 为 null = 不限;source = 限额来源:用户/用户组/全局默认)。 */

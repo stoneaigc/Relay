@@ -603,17 +603,20 @@ function UserDialog({ dlg, groups, userGroups, defaults, onClose, onSaved }: { d
             </SheetSection>
             <SheetSection title="套餐" hint="决定能用什么 / 能用多少">
               <div className="grid grid-cols-2 gap-3.5">
-                <div><label className={lbl}>模型组</label>
+                <div><label className={lbl}>模型组(兜底)</label>
                   <select value={groupId} onChange={(e) => setGroupId(Number(e.target.value))} className={sel}>
                     <option value={0}>未绑定</option>
                     {groups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
                   </select></div>
-                <div><label className={lbl}>用户组</label>
+                <div><label className={lbl}>用户组(优先)</label>
                   <select value={userGroupId} onChange={(e) => setUserGroupId(Number(e.target.value))} className={sel}>
                     <option value={0}>未挂组</option>
                     {userGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
                   </select></div>
               </div>
+              <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                取值优先级:用户组绑定的模型组(非空时生效)&gt; 此处直属模型组(兜底)&gt; 都没有则无法调用。用户组已绑模型组时,下方直属模型组不生效。
+              </p>
               {selGroup && selGroup.model_group_ids.length > 0 && (
                 <p className="mt-2 text-xs leading-5 text-muted-foreground">
                   用户组「{selGroup.name}」已绑定 {selGroup.model_group_ids.length} 个模型组,将按绑定优先级接管「能用什么」;左侧直属模型组不再生效(仅作兜底)。
@@ -1274,11 +1277,27 @@ function PlanDialog({ dlg, onClose, onSaved }: { dlg: { edit: PlanRow | null } |
   const [downgradeGid, setDowngradeGid] = useState(0);
   const [userGroups, setUserGroups] = useState<UserGroupRow[]>([]);
   const [err, setErr] = useState("");
+  // tokens 单位选择:避免手输长串零。mult 为该单位对应的 token 倍数。
+  const QUOTA_UNITS = [
+    { label: "万", mult: 1e4 },
+    { label: "百万", mult: 1e6 },
+    { label: "千万", mult: 1e7 },
+    { label: "亿", mult: 1e8 },
+  ];
+  const [quotaUnit, setQuotaUnit] = useState(1e6);
+  const [daysPreset, setDaysPreset] = useState<string>("30");
   useEffect(() => {
     if (open) {
       setName(edit?.name ?? ""); setErr("");
-      setQuota(edit ? String(edit.token_quota) : "");
-      setDays(edit ? String(edit.validity_days) : "30");
+      const q = edit ? edit.token_quota : 0;
+      // 从已有额度反推最合适的单位(能整除的最大单位)。
+      const u = [...QUOTA_UNITS].reverse().find((x) => q > 0 && q % x.mult === 0);
+      setQuotaUnit(q > 0 ? (u ? u.mult : 1) : 1e6); // 新建默认「百万」,编辑按能整除的最大单位反推。
+      setQuota(q > 0 && u ? String(q / u.mult) : q > 0 ? String(q) : "");
+      const d = edit ? edit.validity_days : 30;
+      const preset = ["30", "90", "180", "365"].find((p) => Number(p) === d);
+      setDaysPreset(preset ?? "custom");
+      setDays(String(d));
       setPrice(edit && edit.price_cents > 0 ? (edit.price_cents / 100).toFixed(2) : "");
       setDesc(edit?.description ?? "");
       setEnabled(edit?.enabled ?? true);
@@ -1293,8 +1312,11 @@ function PlanDialog({ dlg, onClose, onSaved }: { dlg: { edit: PlanRow | null } |
   const submit = async () => {
     setErr("");
     if (!name.trim()) { setErr("请输入套餐名称"); return; }
-    const q = Number(quota), d = Number(days);
-    if (!Number.isInteger(q) || q <= 0) { setErr("token 额度需为正整数"); return; }
+    const qNum = Number(quota);
+    const q = Math.round(qNum * quotaUnit);
+    const d = Number(days);
+    if (!Number.isFinite(qNum) || qNum <= 0) { setErr("token 额度需为正数"); return; }
+    if (!Number.isSafeInteger(q) || q <= 0) { setErr("token 额度超出可表示范围"); return; }
     if (!Number.isInteger(d) || d <= 0) { setErr("有效期需为正整数(天)"); return; }
     const pc = price.trim() === "" ? 0 : Math.round(Number(price) * 100);
     if (!Number.isFinite(pc) || pc < 0) { setErr("售价格式不正确"); return; }
@@ -1326,9 +1348,31 @@ function PlanDialog({ dlg, onClose, onSaved }: { dlg: { edit: PlanRow | null } |
             <Input placeholder="如:体验版 / 标准版 / 旗舰版" value={name} maxLength={32} onChange={(e) => setName(e.target.value)} autoFocus /></div>
           <div className="grid grid-cols-3 gap-3">
             <div><label className="mb-1 block text-xs text-muted-foreground">含 tokens *</label>
-              <Input placeholder="如 1000000" value={quota} onChange={(e) => setQuota(e.target.value)} /></div>
-            <div><label className="mb-1 block text-xs text-muted-foreground">有效期(天) *</label>
-              <Input value={days} onChange={(e) => setDays(e.target.value)} /></div>
+              <div className="flex gap-1.5">
+                <Input placeholder="如 100" value={quota} onChange={(e) => setQuota(e.target.value)} inputMode="decimal" />
+                <select value={quotaUnit} onChange={(e) => setQuotaUnit(Number(e.target.value))}
+                  className="h-9 w-20 shrink-0 rounded-lg border border-input bg-card px-2 text-sm shadow-card focus:border-brand-400 focus:outline-none focus:ring-4 focus:ring-brand-500/15">
+                  {QUOTA_UNITS.map((u) => <option key={u.mult} value={u.mult}>{u.label}</option>)}
+                  <option value={1}>精确</option>
+                </select>
+              </div>
+              {Number(quota) > 0 && (
+                <p className="mt-1 text-[0.8rem] text-muted-foreground">= {(Number(quota) * quotaUnit).toLocaleString()} tokens</p>
+              )}</div>
+            <div><label className="mb-1 block text-xs text-muted-foreground">有效期 *</label>
+              <select value={daysPreset} onChange={(e) => {
+                const v = e.target.value; setDaysPreset(v);
+                if (v !== "custom") setDays(v);
+              }} className="h-9 w-full rounded-lg border border-input bg-card px-2.5 text-sm shadow-card focus:border-brand-400 focus:outline-none focus:ring-4 focus:ring-brand-500/15">
+                <option value="30">1 个月(30 天)</option>
+                <option value="90">3 个月(90 天)</option>
+                <option value="180">半年(180 天)</option>
+                <option value="365">一年(365 天)</option>
+                <option value="custom">自定义…</option>
+              </select>
+              {daysPreset === "custom" && (
+                <Input className="mt-1.5" placeholder="天数" value={days} onChange={(e) => setDays(e.target.value)} inputMode="numeric" />
+              )}</div>
             <div><label className="mb-1 block text-xs text-muted-foreground">售价(元,预留)</label>
               <Input placeholder="如 9.90" value={price} onChange={(e) => setPrice(e.target.value)} /></div>
           </div>
@@ -1353,14 +1397,14 @@ function PlanDialog({ dlg, onClose, onSaved }: { dlg: { edit: PlanRow | null } |
                 <option value={0}>不变更</option>
                 {userGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
               </select>
-              <p className="mt-1 text-[0.8rem] text-muted-foreground">购买/充值该套餐后,用户自动切换到该用户组(享受其模型组绑定与限额)。</p></div>
+              <p className="mt-1 text-[0.8rem] text-muted-foreground">购买/充值该套餐后,用户自动切换到该用户组(享受其模型组绑定与限额)。付费套餐选此项即「升级」。</p></div>
             <div><label className="mb-1 block text-xs text-muted-foreground">到期降级分组(可选)</label>
               <select value={downgradeGid} onChange={(e) => setDowngradeGid(Number(e.target.value))} disabled={upgradeGid === 0}
                 className="h-9 w-full rounded-lg border border-input bg-card px-2.5 text-sm shadow-card focus:border-brand-400 focus:outline-none focus:ring-4 focus:ring-brand-500/15 disabled:opacity-50">
                 <option value={0}>不变更</option>
                 {userGroups.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
               </select>
-              <p className="mt-1 text-[0.8rem] text-muted-foreground">套餐全部到期且用户仍处于升级组时,自动降回该用户组(每小时检查一次)。</p></div>
+              <p className="mt-1 text-[0.8rem] text-muted-foreground">该套餐全部到期后,用户自动降回所选用户组(通常选挂了标准套餐的默认组,每小时检查一次)。</p></div>
           </div>
           <div><label className="mb-1 block text-xs text-muted-foreground">说明</label>
             <Input placeholder="套餐说明(展示给用户)" value={desc} maxLength={100} onChange={(e) => setDesc(e.target.value)} /></div>
@@ -2328,7 +2372,7 @@ function ModelsPanel() {
                         })()}
                         <Button variant="ghost" size="sm" className="h-7 px-2" title="测试连通性" onClick={() => runTest(m.id)}><Activity className="h-3 w-3" /></Button>
                         <Button variant="ghost" size="sm" className="h-7 px-2" title="模型定价" onClick={() => setPriceTarget({ p, m })}><DollarSign className="h-3 w-3" /></Button>
-                        <Button variant="ghost" size="sm" className="h-7 px-2" title="编辑模型" onClick={() => setEditModel({ id: m.id, label: m.label, kind: p.kind, base_url: p.base_url, upstream_model: m.upstream_model, provider: p.name, input_price: m.input_price, output_price: m.output_price, context_length: m.context_length, tags: m.tags })}><Pencil className="h-3 w-3" /></Button>
+                        <Button variant="ghost" size="sm" className="h-7 px-2" title="编辑模型" onClick={() => setEditModel({ id: m.id, label: m.label, kind: p.kind, base_url: p.base_url, upstream_model: m.upstream_model, provider: p.name, input_price: m.input_price, output_price: m.output_price, context_length: m.context_length, tags: m.tags, description: m.description })}><Pencil className="h-3 w-3" /></Button>
                         <Button variant="ghost" size="sm" className="h-7 px-2 text-destructive" title="删除模型" onClick={() => delModel(p.name, m)}><Trash2 className="h-3 w-3" /></Button>
                       </div>
                     </div>
@@ -2692,6 +2736,7 @@ function EditModelDialog({ model, onClose, onSaved }: { model: ModelRow; onClose
   const [upstream, setUpstream] = useState(model.upstream_model);
   const [ctxLen, setCtxLen] = useState(model.context_length != null ? String(model.context_length) : "");
   const [tags, setTags] = useState(model.tags ?? "");
+  const [desc, setDesc] = useState(model.description ?? "");
   const [err, setErr] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
@@ -2706,6 +2751,7 @@ function EditModelDialog({ model, onClose, onSaved }: { model: ModelRow; onClose
         upstream_model: upstream.trim(), label: label.trim() || undefined,
         context_length: t ? Number(t) : null,
         tags: tags.trim().replace(/,+$/, "") || undefined,
+        description: desc.trim() || null,
       });
       onSaved();
     } catch (e: any) { setErr(e.message); }
@@ -2729,6 +2775,8 @@ function EditModelDialog({ model, onClose, onSaved }: { model: ModelRow; onClose
             <Input value={upstream} onChange={(e) => setUpstream(e.target.value)} /></div>
           <div><label className="mb-1 block text-xs text-muted-foreground">备注(门户模型广场展示名)</label>
             <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="留空则不显示备注" /></div>
+          <div><label className="mb-1 block text-xs text-muted-foreground">模型描述(模型广场卡片展示)</label>
+            <Input value={desc} onChange={(e) => setDesc(e.target.value)} maxLength={200} placeholder="一句话介绍模型特点,如:新一代生成式全模态模型,支持文本输入,可实时输入文本…" /></div>
           <div className="grid grid-cols-2 gap-3">
             <div><label className="mb-1 block text-xs text-muted-foreground">上下文长度 (tokens,可选)</label>
               <Input type="number" min="0" step="1" placeholder="如 128000" value={ctxLen} onChange={(e) => setCtxLen(e.target.value)} /></div>

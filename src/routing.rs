@@ -33,6 +33,8 @@ pub struct ModelDef {
     pub context_length: Option<i64>,
     /// 能力标签(逗号分隔;None=按名称自动推断)。
     pub tags: Option<String>,
+    /// 模型描述(模型广场卡片展示;None=空)。
+    pub description: Option<String>,
 }
 
 /// 组内一条路由目标。
@@ -69,6 +71,8 @@ pub struct ModelCard {
     pub input_price: f64,
     /// 最低输出单价 $/1M(NaN=存在未定价部署)。
     pub output_price: f64,
+    /// 模型描述(多部署取首个非空;None=未填写)。
+    pub description: Option<String>,
 }
 
 /// 按模型名自动推断能力标签(未配置 tags 时的兜底)。
@@ -249,6 +253,12 @@ impl Routing {
                     }
                 }
                 let context_length = defs.iter().filter_map(|d| d.context_length).max();
+                // 描述:取首个非空部署描述(同模型多部署通常描述一致)。
+                let description = defs
+                    .iter()
+                    .filter_map(|d| d.description.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+                    .next()
+                    .map(|s| s.to_string());
                 let multiplier = targets
                     .iter()
                     .map(|t| t.multiplier)
@@ -272,6 +282,7 @@ impl Routing {
                     upstreams: targets.len(),
                     input_price,
                     output_price,
+                    description,
                 }
             })
             .collect();
@@ -466,6 +477,10 @@ impl Routing {
                             if !m.tags.contains(t) {
                                 m.tags.push(t.clone());
                             }
+                        }
+                        // 描述取首个非空。
+                        if m.description.is_none() {
+                            m.description = c.description.clone();
                         }
                         // 价格 NaN = 存在未定价部署;任一合并来源 NaN 则结果 NaN。
                         m.input_price = if m.input_price.is_nan() || c.input_price.is_nan() {
@@ -856,7 +871,7 @@ mod tests {
     // ---- order_by_auto(智能自适应) ----
 
     fn mdl(upstream: &str, input_price: Option<f64>, output_price: Option<f64>) -> ModelDef {
-        ModelDef { provider: "p".into(), upstream_model: upstream.into(), label: None, input_price, output_price, context_length: None, tags: None }
+        ModelDef { provider: "p".into(), upstream_model: upstream.into(), label: None, input_price, output_price, context_length: None, tags: None, description: None }
     }
 
     fn lat_map(pairs: &[(&str, u64)]) -> dashmap::DashMap<String, u64> {

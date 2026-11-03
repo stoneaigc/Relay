@@ -36,8 +36,11 @@ body {
   margin: 0;
   background: var(--color-background);
   color: var(--color-foreground);
-  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 .mono {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;

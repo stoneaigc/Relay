@@ -116,6 +116,7 @@ export interface ModelRow {
   output_price: number | null;
   context_length: number | null;
   tags: string | null;
+  description?: string | null;
 }
 
 export interface ProviderRow {
@@ -141,6 +142,7 @@ export interface ProviderModelRow {
   output_price: number | null;
   context_length: number | null;
   tags: string | null;
+  description?: string | null;
 }
 
 export type ProviderHealthStatus = "ok" | "degraded" | "down" | "broken" | "idle";
@@ -345,7 +347,7 @@ export const api = {
   models: (): Promise<{ data: ModelRow[] }> => req("/admin/api/models"),
   addModel: (body: { label?: string; kind: string; base_url: string; api_key?: string; upstream_model: string; input_price?: number | null; output_price?: number | null; display_name?: string; headers?: string; max_concurrency?: number | null }) =>
     req("/admin/api/models", { method: "POST", body: JSON.stringify(body) }),
-  updateModel: (id: number, body: { kind: string; base_url: string; api_key?: string; upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null; context_length?: number | null; tags?: string }) =>
+  updateModel: (id: number, body: { kind: string; base_url: string; api_key?: string; upstream_model: string; label?: string; input_price?: number | null; output_price?: number | null; context_length?: number | null; tags?: string; description?: string | null }) =>
     req(`/admin/api/models/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   versionCheck: (): Promise<{ current: string; latest: string | null; has_update: boolean; release_url?: string; error?: string }> =>
     req("/admin/api/version/check"),

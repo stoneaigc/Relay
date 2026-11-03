@@ -336,6 +336,10 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {    let is_pg = backe
         let _ = q!("ALTER TABLE models ADD COLUMN IF NOT EXISTS tags TEXT")
             .execute(pool)
             .await;
+        // 模型广场描述(门户卡片展示)。
+        let _ = q!("ALTER TABLE models ADD COLUMN IF NOT EXISTS description TEXT")
+            .execute(pool)
+            .await;
         let _ = q!("ALTER TABLE model_groups ADD COLUMN IF NOT EXISTS is_active BIGINT NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
@@ -519,6 +523,7 @@ pub async fn init_schema(pool: &Db) -> anyhow::Result<()> {    let is_pg = backe
         // 模型广场元数据:上下文长度与能力标签(逗号分隔)。
         let _ = q!("ALTER TABLE models ADD COLUMN context_length INTEGER").execute(pool).await;
         let _ = q!("ALTER TABLE models ADD COLUMN tags TEXT").execute(pool).await;
+        let _ = q!("ALTER TABLE models ADD COLUMN description TEXT").execute(pool).await;
         let _ = q!("ALTER TABLE model_groups ADD COLUMN is_active INTEGER NOT NULL DEFAULT 0")
             .execute(pool)
             .await;
@@ -1110,7 +1115,7 @@ pub async fn update_provider(
 /// 列出指定 provider 下的所有模型。
 pub async fn list_models_by_provider(pool: &Db, provider_name: &str) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = q!(
-        "SELECT m.id, m.upstream_model, m.label, m.input_price, m.output_price, m.context_length, m.tags
+        "SELECT m.id, m.upstream_model, m.label, m.input_price, m.output_price, m.context_length, m.tags, m.description
          FROM models m WHERE m.provider = ? ORDER BY m.id"
     ).bind(provider_name).fetch_all(pool).await?;
     Ok(rows.iter().map(|r| serde_json::json!({
@@ -1121,6 +1126,7 @@ pub async fn list_models_by_provider(pool: &Db, provider_name: &str) -> anyhow::
         "output_price": r.get::<Option<f64>,_>("output_price"),
         "context_length": r.try_get::<Option<i64>,_>("context_length").unwrap_or(None),
         "tags": r.try_get::<Option<String>,_>("tags").unwrap_or(None),
+        "description": r.try_get::<Option<String>,_>("description").unwrap_or(None),
     })).collect())
 }
 
@@ -1181,6 +1187,7 @@ pub async fn update_model(
     output_price: Option<Option<f64>>,
     context_length: Option<Option<i64>>,
     tags: Option<Option<&str>>,
+    description: Option<Option<&str>>,
 ) -> anyhow::Result<()> {
     let prov: Option<String> = q!("SELECT provider FROM models WHERE id = ?")
         .bind(id).fetch_optional(pool).await?.map(|r| r.get("provider"));
@@ -1208,6 +1215,10 @@ pub async fn update_model(
         let cleaned = v.map(|s| s.trim().trim_end_matches(',')).filter(|s| !s.is_empty());
         q!("UPDATE models SET tags = ? WHERE id = ?").bind(cleaned).bind(id).execute(pool).await?;
     }
+    if let Some(v) = description {
+        let cleaned = v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        q!("UPDATE models SET description = ? WHERE id = ?").bind(cleaned).bind(id).execute(pool).await?;
+    }
     Ok(())
 }
 
@@ -1229,7 +1240,7 @@ pub async fn delete_model_cascade(pool: &Db, id: i64) -> anyhow::Result<bool> {
 
 pub async fn list_models(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
     let rows = q!(
-        "SELECT m.id, m.upstream_model, m.label, m.input_price, m.output_price, m.context_length, m.tags, p.name as provider_name, p.kind, p.base_url, p.api_key
+        "SELECT m.id, m.upstream_model, m.label, m.input_price, m.output_price, m.context_length, m.tags, m.description, p.name as provider_name, p.kind, p.base_url, p.api_key
          FROM models m LEFT JOIN providers p ON p.name = m.provider ORDER BY p.name, m.id")
         .fetch_all(pool).await?;
     Ok(rows.iter().map(|r| serde_json::json!({
@@ -1240,6 +1251,7 @@ pub async fn list_models(pool: &Db) -> anyhow::Result<Vec<serde_json::Value>> {
         "output_price": r.get::<Option<f64>,_>("output_price"),
         "context_length": r.try_get::<Option<i64>,_>("context_length").unwrap_or(None),
         "tags": r.try_get::<Option<String>,_>("tags").unwrap_or(None),
+        "description": r.try_get::<Option<String>,_>("description").unwrap_or(None),
         "provider": r.get::<Option<String>,_>("provider_name"),
         "kind": r.get::<Option<String>,_>("kind"),
         "base_url": r.get::<Option<String>,_>("base_url"),
@@ -1574,7 +1586,7 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
             headers,
         });
     }
-    for r in q!("SELECT id, provider, upstream_model, label, input_price, output_price, context_length, tags FROM models").fetch_all(pool).await? {
+    for r in q!("SELECT id, provider, upstream_model, label, input_price, output_price, context_length, tags, description FROM models").fetch_all(pool).await? {
         routing.models.insert(r.get::<i64, _>("id"), ModelDef {
             provider: r.get("provider"),
             upstream_model: r.get("upstream_model"),
@@ -1583,6 +1595,7 @@ pub async fn load_routing(pool: &Db) -> anyhow::Result<Routing> {
             output_price: r.try_get("output_price").unwrap_or(None),
             context_length: r.try_get("context_length").unwrap_or(None),
             tags: r.try_get("tags").unwrap_or(None),
+            description: r.try_get("description").unwrap_or(None),
         });
     }
     for r in q!("SELECT id, name, strategy, max_concurrency FROM model_groups").fetch_all(pool).await? {
@@ -3015,6 +3028,31 @@ pub async fn seed_default_groups_if_empty(pool: &Db) -> anyhow::Result<()> {
     if c == 0 {
         create_user_group(pool, "default", None, None, None, None, None).await?;
         tracing::info!("seeded default user group");
+    }
+    // 标准套餐(开箱即用):1 亿 tokens / 30 天,绑定 default 用户组 → 注册即自动发放。
+    // 仅在套餐表为空时播种,不覆盖管理员已建套餐。
+    let pc: i64 = q!("SELECT COUNT(*) AS c FROM plans").fetch_one(pool).await?.get("c");
+    if pc == 0 {
+        let plan = create_plan(
+            pool,
+            "标准套餐",
+            100_000_000,
+            30,
+            0,
+            "注册即送:1 亿 tokens,有效期 30 天。额度用尽可升级付费套餐,到期自动降回本套餐。",
+            "none",
+            0,
+            None,
+            None,
+        )
+        .await?;
+        if let Some(gid) = default_user_group_id(pool).await? {
+            let pid = plan["id"].as_str().unwrap_or_default();
+            if !pid.is_empty() {
+                set_group_default_plan(pool, gid, Some(pid)).await?;
+                tracing::info!("seeded default plan (标准套餐 1亿 tokens / 30 天) 并绑定 default 用户组,注册即发放");
+            }
+        }
     }
     Ok(())
 }
@@ -4727,7 +4765,7 @@ mod tests {
         assert_eq!(models[0]["output_price"], 10.0);
 
         // 三态更新:输入价改为 3.0,输出价清除定价
-        update_model(&db, id, "openai", "https://api.test.com/v1", None, "gpt-4o", None, Some(Some(3.0)), Some(None), None, None)
+        update_model(&db, id, "openai", "https://api.test.com/v1", None, "gpt-4o", None, Some(Some(3.0)), Some(None), None, None, None)
             .await.unwrap();
         let models = list_models_by_provider(&db, &provider).await.unwrap();
         assert_eq!(models[0]["input_price"], 3.0);

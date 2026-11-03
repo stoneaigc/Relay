@@ -778,6 +778,7 @@ pub async fn models(
                 "multiplier": c.multiplier,
                 "cache": c.cache,
                 "upstreams": c.upstreams,
+                "description": c.description,
                 "input_price": if c.input_price.is_finite() { json!(c.input_price) } else { Value::Null },
                 "output_price": if c.output_price.is_finite() { json!(c.output_price) } else { Value::Null },
             })

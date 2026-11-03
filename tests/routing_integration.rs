@@ -35,13 +35,13 @@ fn make_test_routing() -> Routing {
 
     let mut models = HashMap::new();
     // OpenAI models
-    models.insert(1, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None });
-    models.insert(2, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o-mini".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None });
+    models.insert(1, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None, description: None });
+    models.insert(2, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o-mini".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None, description: None });
     // DeepSeek models
-    models.insert(3, ModelDef { provider: "p-deepseek".into(), upstream_model: "deepseek-chat".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None });
-    models.insert(4, ModelDef { provider: "p-deepseek".into(), upstream_model: "deepseek-reasoner".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None });
+    models.insert(3, ModelDef { provider: "p-deepseek".into(), upstream_model: "deepseek-chat".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None, description: None });
+    models.insert(4, ModelDef { provider: "p-deepseek".into(), upstream_model: "deepseek-reasoner".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None, description: None });
     // Anthropic model
-    models.insert(5, ModelDef { provider: "p-anthropic".into(), upstream_model: "claude-sonnet-4-20250514".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None });
+    models.insert(5, ModelDef { provider: "p-anthropic".into(), upstream_model: "claude-sonnet-4-20250514".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None, description: None });
 
     let mut group_names = HashMap::new();
     group_names.insert(1, "Production".into());
@@ -130,7 +130,7 @@ fn priority_deduplicates_same_upstream() {
     // 给 chat 加一条重复的 OpenAI GPT-4o(不同 model_id 但相同上游)
     rt.groups.get_mut(&1).unwrap().get_mut("chat").unwrap()
         .push(Target { model_id: 100, weight: 10, priority: 0, multiplier: 1.0, cache_enabled: false });
-    rt.models.insert(100, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None });
+    rt.models.insert(100, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None, description: None });
     let rr = dashmap::DashMap::new();
     let candidates = resolve_with_counter(&rt, Strategy::WeightedRandom, "chat", &rr, None);
     // 去重后应该只有 3 个(OpenAI 只出现一次)
@@ -410,7 +410,7 @@ fn auto_dedup_still_applies() {
     // 加一条与 model_id=1 相同上游的新路由(不同 model_id),auto 下也应去重
     rt.groups.get_mut(&1).unwrap().get_mut("chat").unwrap()
         .push(Target { model_id: 101, weight: 1, priority: 0, multiplier: 1.0, cache_enabled: false });
-    rt.models.insert(101, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None });
+    rt.models.insert(101, ModelDef { provider: "p-openai".into(), upstream_model: "gpt-4o".into(), label: None, input_price: None, output_price: None, context_length: None, tags: None, description: None });
     let lat = dashmap::DashMap::new();
     let _err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();
     let err: dashmap::DashMap<String, f64> = dashmap::DashMap::new();

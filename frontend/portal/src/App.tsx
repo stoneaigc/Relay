@@ -4,7 +4,7 @@ import {
   KeyRound, Copy, RefreshCw, Plus, LogOut, Check,
   LayoutDashboard, Receipt, MessageSquare, Menu, X, SendHorizontal, Boxes,
   Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen,
-  Gauge, Zap, Timer, CalendarDays, KeySquare, Eye, EyeOff, ShieldCheck, Sparkles, Square, Trash2, ShoppingCart,
+  Gauge, Zap, Timer, CalendarDays, KeySquare, Eye, EyeOff, ShieldCheck, Sparkles, Square, Trash2, ShoppingCart, Search,
 } from "lucide-react";
 import { api, getToken, clearToken, healthz, SITE_PREFIX, KeyInfo, ModelCard, QuotaInfo, PlanCard, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType, makeCostFormatter } from "./api";
 import { copyText } from "./clipboard";
@@ -69,45 +69,53 @@ const isUnsupportedModel = (m: ModelCard) =>
 const isEmbeddingModel = (m: ModelCard) =>
   m.tags.some((t) => t.toLowerCase().includes("向量") || t.toLowerCase().includes("embedding"));
 
-/** 模型广场卡片:点击查看详情;悬浮复制图标直接复制模型名。 */
+/** 模型广场卡片(百炼风格):名称 + 描述 + 输入/输出单价 + 关键指标;点击查看详情,悬浮复制模型名。 */
 function ModelCardView({ m, onDetail }: { m: ModelCard; onDetail: (m: ModelCard) => void }) {
   const [copied, copy] = useCopy();
   const unsupported = isUnsupportedModel(m);
-  const ctx = m.context_length != null && m.context_length > 0
-    ? m.context_length >= 1_000_000 ? `${(m.context_length / 1_000_000).toFixed(m.context_length % 1_000_000 ? 1 : 0)}M` : `${Math.round(m.context_length / 1000)}K`
-    : null;
-  const price = (m.input_price != null && m.output_price != null)
-    ? `$${m.input_price.toFixed(2)} / $${m.output_price.toFixed(2)}`
-    : null;
+  const fmtTok = (v: number) =>
+    v >= 1_000_000 ? `${(v / 1_000_000).toFixed(v % 1_000_000 ? 1 : 0)}M` : `${Math.round(v / 1000)}K`;
+  const ctx = m.context_length != null && m.context_length > 0 ? fmtTok(m.context_length) : null;
+  // 描述:优先管理员填写的模型描述,回退展示名备注。
+  const desc = m.description || (m.labels.length > 0 ? m.labels.join(" · ") : "");
+  const priced = m.input_price != null && m.output_price != null;
+  // 实际计费单价 = 模型单价 × 路由倍率。
+  const effIn = m.input_price != null ? m.input_price * m.multiplier : null;
+  const effOut = m.output_price != null ? m.output_price * m.multiplier : null;
   return (
     <button type="button" onClick={() => onDetail(m)} title="点击查看模型详情"
       className={cn(
-        "group flex flex-col gap-2 rounded-xl border p-3.5 text-left transition-all",
-        copied
-          ? "border-primary/50 bg-primary/5"
-          : "border-border bg-card hover:border-primary/40 hover:shadow-sm"
+        "group flex flex-col gap-2.5 rounded-xl border p-4 text-left transition-all hover:border-primary/40 hover:shadow-md",
+        copied && "border-primary/50 bg-primary/5"
       )}>
-      <div className="flex items-center gap-2">
-        <span className="mono truncate text-sm font-medium" title={m.name}>{m.name}</span>
-        {copied
-          ? <span className="ml-auto inline-flex shrink-0 items-center gap-1 text-xs text-primary"><Check className="h-3.5 w-3.5" />已复制</span>
-          : <Copy className="ml-auto h-3.5 w-3.5 shrink-0 opacity-0 transition-opacity group-hover:opacity-40" onClick={(e) => { e.stopPropagation(); copy(m.name); }} />}
-      </div>
-      {(unsupported || m.labels.length > 0 || m.tags.length > 0) && (
-        <div className="flex flex-wrap gap-1">
-          {m.labels.map((l) => <Badge key={l}>{l}</Badge>)}
-          {m.tags.map((t) => <Badge key={t} variant="muted">{t}</Badge>)}
-          {unsupported && <Badge variant="default" className="border-destructive/30 bg-destructive/15 text-destructive">暂不转发</Badge>}
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate text-[0.95rem] font-semibold text-foreground" title={m.name}>{m.name}</div>
+          {(unsupported || m.labels.length > 0 || m.tags.length > 0) && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {m.labels.map((l) => <Badge key={l}>{l}</Badge>)}
+              {m.tags.slice(0, 3).map((t) => <Badge key={t} variant="muted">{t}</Badge>)}
+              {unsupported && <Badge variant="default" className="border-destructive/30 bg-destructive/15 text-destructive">暂不转发</Badge>}
+            </div>
+          )}
         </div>
-      )}
-      <div className="mt-auto grid grid-cols-2 gap-x-3 gap-y-1 border-t pt-2.5 text-xs text-muted-foreground">
-        <span className="flex items-center gap-1" title="上下文窗口">上下文<span className="mono text-foreground">{ctx ?? "—"}</span></span>
-        <span className="flex items-center gap-1" title="该模型路由的计费倍率,实际单价 = 模型单价 × 倍率">倍率<span className="mono text-foreground">×{m.multiplier}</span></span>
-        <span className="flex items-center gap-1" title="每 1M tokens 模型单价(未含倍率)">价格<span className="mono truncate text-foreground" title={price != null ? `${price} $/1M tokens(未含倍率)` : "未定价"}>{price ?? "未定价"}</span></span>
-        <span className="flex items-center gap-1" title="该模型聚合的上游部署数">上游<span className="mono text-foreground">{m.upstreams}</span></span>
-        <span className="col-span-2 flex items-center gap-1" title="该模型所在模型组的总并发上限,0 表示不限">模型组总并发<span className="mono text-foreground">{m.group_concurrency === 0 ? "不限" : m.group_concurrency}</span></span>
-        {m.cache && <span className="col-span-2 inline-flex items-center gap-1 text-success" title="支持提示词缓存,命中按折扣计费"><Star className="h-3 w-3" />支持上下文缓存</span>}
+        {copied
+          ? <span className="inline-flex shrink-0 items-center gap-1 text-xs text-primary"><Check className="h-3.5 w-3.5" />已复制</span>
+          : <Copy className="h-4 w-4 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-60" onClick={(e) => { e.stopPropagation(); copy(m.name); }} />}
       </div>
+      <p className="line-clamp-2 min-h-[2.4rem] text-[0.82rem] leading-relaxed text-muted-foreground" title={desc || undefined}>
+        {desc || "暂无描述"}
+      </p>
+      <div className="grid grid-cols-2 gap-x-3 text-xs text-muted-foreground">
+        <span className="flex items-center gap-1" title="每 1M tokens 输入单价(已含路由倍率)">输入<span className="mono truncate text-foreground">{priced ? `$${effIn!.toFixed(2)}/M` : "未定价"}</span></span>
+        <span className="flex items-center gap-1" title="每 1M tokens 输出单价(已含路由倍率)">输出<span className="mono truncate text-foreground">{priced ? `$${effOut!.toFixed(2)}/M` : "未定价"}</span></span>
+      </div>
+      <div className="mt-auto grid grid-cols-3 gap-x-3 border-t pt-2.5 text-xs text-muted-foreground">
+        <span className="flex items-center gap-1" title="上下文窗口">上下文<span className="mono text-foreground">{ctx ?? "—"}</span></span>
+        <span className="flex items-center gap-1" title="该模型聚合的上游部署数">上游<span className="mono text-foreground">{m.upstreams}</span></span>
+        <span className="flex items-center gap-1" title="该模型所在模型组的总并发上限,0 表示不限">并发<span className="mono text-foreground">{m.group_concurrency === 0 ? "不限" : m.group_concurrency}</span></span>
+      </div>
+      {m.cache && <span className="inline-flex items-center gap-1 text-xs text-success" title="支持提示词缓存,命中按折扣计费"><Star className="h-3 w-3" />支持上下文缓存</span>}
     </button>
   );
 }
@@ -147,6 +155,7 @@ function ModelDetailDialog({ m, onClose }: { m: ModelCard | null; onClose: () =>
         </DialogHeader>
         {m && (
           <div className="space-y-4">
+            {m.description && <p className="text-sm leading-relaxed text-muted-foreground">{m.description}</p>}
             {(unsupported || m.labels.length > 0 || m.tags.length > 0) && (
               <div className="flex flex-wrap gap-1">
                 {m.labels.map((l) => <Badge key={l}>{l}</Badge>)}
@@ -199,9 +208,10 @@ function ModelDetailDialog({ m, onClose }: { m: ModelCard | null; onClose: () =>
   );
 }
 
-/** 模型广场独立页:顶部概要与能力标签筛选,下方为模型卡片网格(点击查看详情)。 */
+/** 模型广场独立页:搜索 + 能力标签筛选 + 模型卡片网格(点击查看详情)。 */
 function ModelsView({ models }: { models: ModelCard[] }) {
   const [tag, setTag] = useState<string | null>(null);
+  const [q, setQ] = useState("");
   const [detail, setDetail] = useState<ModelCard | null>(null);
   const allTags: string[] = [];
   for (const m of models) {
@@ -209,7 +219,10 @@ function ModelsView({ models }: { models: ModelCard[] }) {
       if (!allTags.some((x) => x.toLowerCase() === t.toLowerCase())) allTags.push(t);
     }
   }
-  const shown = tag ? models.filter((m) => m.tags.some((t) => t.toLowerCase() === tag.toLowerCase())) : models;
+  const kw = q.trim().toLowerCase();
+  const shown = models
+    .filter((m) => !tag || m.tags.some((t) => t.toLowerCase() === tag.toLowerCase()))
+    .filter((m) => !kw || m.name.toLowerCase().includes(kw) || (m.description ?? "").toLowerCase().includes(kw) || m.labels.some((l) => l.toLowerCase().includes(kw)));
   const cacheCount = models.filter((m) => m.cache).length;
 
   return (
@@ -219,23 +232,27 @@ function ModelsView({ models }: { models: ModelCard[] }) {
           共 <span className="mono font-medium text-foreground">{models.length}</span> 个可用模型
           {cacheCount > 0 && <> · <span className="mono font-medium text-foreground">{cacheCount}</span> 个支持缓存</>}
         </span>
-        {allTags.length > 0 && (
-          <div className="ml-auto flex flex-wrap items-center gap-1.5">
-            <button onClick={() => setTag(null)}
-              className={cn("rounded-full border px-3 py-1 text-xs transition-colors",
-                tag === null ? "border-primary/40 bg-primary/15 text-primary" : "border-border text-muted-foreground hover:bg-accent")}>
-              全部
-            </button>
-            {allTags.map((t) => (
-              <button key={t} onClick={() => setTag(tag === t ? null : t)}
-                className={cn("rounded-full border px-3 py-1 text-xs transition-colors",
-                  tag === t ? "border-primary/40 bg-primary/15 text-primary" : "border-border text-muted-foreground hover:bg-accent")}>
-                {t}
-              </button>
-            ))}
-          </div>
-        )}
+        <div className="relative ml-auto">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input className="h-9 w-56 pl-8" placeholder="搜索模型名 / 描述" value={q} onChange={(e) => setQ(e.target.value)} />
+        </div>
       </div>
+      {allTags.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <button onClick={() => setTag(null)}
+            className={cn("rounded-full border px-3 py-1 text-xs transition-colors",
+              tag === null ? "border-primary/40 bg-primary/15 text-primary" : "border-border text-muted-foreground hover:bg-accent")}>
+            全部
+          </button>
+          {allTags.map((t) => (
+            <button key={t} onClick={() => setTag(tag === t ? null : t)}
+              className={cn("rounded-full border px-3 py-1 text-xs transition-colors",
+                tag === t ? "border-primary/40 bg-primary/15 text-primary" : "border-border text-muted-foreground hover:bg-accent")}>
+              {t}
+            </button>
+          ))}
+        </div>
+      )}
       {models.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
@@ -245,15 +262,15 @@ function ModelsView({ models }: { models: ModelCard[] }) {
       ) : shown.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-sm text-muted-foreground">
-            没有「{tag}」标签的模型。
+            {tag ? `没有「${tag}」标签的模型。` : `没有匹配「${q}」的模型。`}
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {shown.map((m) => <ModelCardView key={m.name} m={m} onDetail={setDetail} />)}
         </div>
       )}
-      <p className="text-xs text-muted-foreground">点击卡片查看模型详情与兼容的调用入口;悬浮复制图标可直接复制模型名。</p>
+      <p className="text-xs text-muted-foreground">点击卡片查看模型详情与兼容的调用入口;悬浮复制图标可直接复制模型名。单价已含路由倍率,实际计费以此为准。</p>
       <ModelDetailDialog m={detail} onClose={() => setDetail(null)} />
     </div>
   );
@@ -329,21 +346,21 @@ function PlanShop() {
         {plans.map((p) => (
           <div key={p.id} className="flex flex-col rounded-xl border bg-card p-4">
             <div className="flex items-start justify-between gap-2">
-              <div className="text-sm font-semibold">{p.name}</div>
+              <div className="text-[0.95rem] font-semibold">{p.name}</div>
               <div className="text-right">
-                <div className="text-lg font-bold tracking-tight">¥{(p.price_cents / 100).toFixed(p.price_cents % 100 ? 2 : 0)}</div>
+                <div className="text-xl font-bold tracking-tight">¥{(p.price_cents / 100).toFixed(p.price_cents % 100 ? 2 : 0)}</div>
               </div>
             </div>
-            <div className="mt-1 text-xs text-muted-foreground">
+            <div className="mt-1 text-[0.8rem] text-muted-foreground">
               {compactTokens(p.token_quota)} tokens{p.reset_period && p.reset_period !== "none" ? "/周期" : ""}
               {" · "}{p.reset_period === "daily" ? "每日重置" : p.reset_period === "weekly" ? "每周重置" : p.reset_period === "monthly" ? "每月重置" : `有效期 ${p.validity_days} 天`}
               {p.reset_period && p.reset_period !== "none" ? `(总有效期 ${p.validity_days} 天)` : ""}
             </div>
-            {p.description && <p className="mt-1.5 line-clamp-2 text-xs text-muted-foreground" title={p.description}>{p.description}</p>}
+            {p.description && <p className="mt-1.5 line-clamp-2 text-[0.8rem] text-muted-foreground" title={p.description}>{p.description}</p>}
             <button
               onClick={() => void buy(p)}
               disabled={busy === p.id}
-              className="mt-3 inline-flex h-8 items-center justify-center rounded-lg bg-primary px-3 text-xs font-medium text-primary-foreground transition hover:bg-primary/90 disabled:opacity-60"
+              className="mt-3 inline-flex h-9 items-center justify-center rounded-lg bg-primary px-3 text-sm font-medium text-primary-foreground transition hover:bg-primary/90 disabled:opacity-60"
             >
               {busy === p.id ? "下单中…" : "立即充值"}
             </button>
@@ -370,16 +387,16 @@ function PlanHero({ quota, summary }: { quota: QuotaInfo | null; summary: { gran
       <div className="pointer-events-none absolute -bottom-16 right-24 h-36 w-36 rounded-full bg-white/10" />
       <div className="relative flex flex-wrap items-start justify-between gap-4">
         <div>
-          <div className="flex items-center gap-1.5 text-xs font-medium text-white/80">
+          <div className="flex items-center gap-1.5 text-[0.8rem] font-medium text-white/80">
             <Sparkles className="h-3.5 w-3.5" /> 当前套餐
           </div>
           <div className="mt-1 text-2xl font-bold tracking-tight md:text-3xl">{quota?.plan?.name ?? "默认套餐"}</div>
-          <p className="mt-1.5 text-xs text-white/75">
+          <p className="mt-1.5 text-[0.8rem] text-white/80">
             并发 {lim(quota?.concurrency.limit)} · RPM {lim(quota?.rpm.limit)} · TPM {lim(quota?.tpm.limit)}
           </p>
         </div>
         <div className="text-right">
-          <div className="text-xs text-white/80">余额(tokens)</div>
+          <div className="text-[0.8rem] text-white/80">余额(tokens)</div>
           <div className="mono text-3xl font-bold tracking-tight md:text-4xl">{summary ? summary.balance.toLocaleString() : "…"}</div>
         </div>
       </div>
@@ -414,16 +431,16 @@ function QuotaCell({ icon: Icon, label, limit, used, fmt, hint }: {
   const danger = !unlimited && pct >= 90;
   const f = fmt ?? ((n: number) => n.toLocaleString());
   return (
-    <div className="rounded-xl border bg-card p-3.5">
-      <div className="flex items-center gap-1.5 text-xs text-muted-foreground"><Icon className="h-3.5 w-3.5" />{label}</div>
-      <div className="mono mt-1.5 truncate text-lg font-bold tracking-tight" title={`${f(used)} / ${unlimited ? "不限" : f(limit)}`}>
-        {f(used)}<span className="text-xs font-normal text-muted-foreground"> / {unlimited ? "不限" : f(limit)}</span>
+    <div className="rounded-xl border bg-card p-4">
+      <div className="flex items-center gap-1.5 text-[0.8rem] text-muted-foreground"><Icon className="h-4 w-4" />{label}</div>
+      <div className="mono mt-1.5 truncate text-xl font-bold tracking-tight" title={`${f(used)} / ${unlimited ? "不限" : f(limit)}`}>
+        {f(used)}<span className="text-[0.8rem] font-normal text-muted-foreground"> / {unlimited ? "不限" : f(limit)}</span>
       </div>
       <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-muted">
         <div className={cn("h-full rounded-full transition-all", danger ? "bg-destructive" : "bg-primary")}
           style={{ width: `${unlimited ? 0 : pct}%` }} />
       </div>
-      {hint && <div className="mt-1.5 text-[10px] text-muted-foreground/70" title="该限额的配置来源:用户显式设置 > 用户组 > 全局默认">来源:{hint}</div>}
+      {hint && <div className="mt-1.5 text-[11px] text-muted-foreground/70" title="该限额的配置来源:用户显式设置 > 用户组 > 全局默认">来源:{hint}</div>}
     </div>
   );
 }
