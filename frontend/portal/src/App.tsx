@@ -345,7 +345,7 @@ function PlanShop() {
       </div>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         {plans.map((p) => (
-          <div key={p.id} className="flex flex-col rounded-xl border bg-card p-4">
+          <div key={p.id} className="flex flex-col rounded-xl border bg-card p-4 shadow-card">
             <div className="flex items-start justify-between gap-2">
               <div className="text-[0.95rem] font-semibold">{p.name}</div>
               <div className="text-right">
@@ -432,7 +432,7 @@ function QuotaCell({ icon: Icon, label, limit, used, fmt, hint }: {
   const danger = !unlimited && pct >= 90;
   const f = fmt ?? ((n: number) => n.toLocaleString());
   return (
-    <div className="rounded-xl border bg-card p-4">
+    <div className="rounded-xl border bg-card p-4 shadow-card">
       <div className="flex items-center gap-1.5 text-[0.8rem] text-muted-foreground"><Icon className="h-4 w-4" />{label}</div>
       <div className="mono mt-1.5 truncate text-xl font-bold tracking-tight" title={`${f(used)} / ${unlimited ? "不限" : f(limit)}`}>
         {f(used)}<span className="text-[0.8rem] font-normal text-muted-foreground"> / {unlimited ? "不限" : f(limit)}</span>
