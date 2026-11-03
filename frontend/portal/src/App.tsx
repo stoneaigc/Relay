@@ -5,6 +5,7 @@ import {
   LayoutDashboard, Receipt, MessageSquare, Menu, X, SendHorizontal, Boxes,
   Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen,
   Gauge, Zap, Timer, CalendarDays, KeySquare, Eye, EyeOff, ShieldCheck, Sparkles, Square, Trash2, ShoppingCart, Search,
+  PanelLeftClose, PanelLeftOpen,
 } from "lucide-react";
 import { api, getToken, clearToken, healthz, SITE_PREFIX, KeyInfo, ModelCard, QuotaInfo, PlanCard, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType, makeCostFormatter } from "./api";
 import { copyText } from "./clipboard";
@@ -411,7 +412,7 @@ function PlanHero({ quota, summary }: { quota: QuotaInfo | null; summary: { gran
       {quota?.plan_buckets && quota.plan_buckets.length > 0 && (
         <div className="relative mt-3 flex flex-wrap gap-1.5">
           {quota.plan_buckets.map((b) => (
-            <span key={b.id} className={"rounded-full px-2.5 py-1 text-[11px] font-medium " + (b.expired ? "bg-white/10 text-white/50 line-through" : "bg-white/15 text-white")}
+            <span key={b.id} className={"rounded-full px-2.5 py-1 text-xs font-medium " + (b.expired ? "bg-white/10 text-white/50 line-through" : "bg-white/15 text-white")}
               title={b.expired ? "已过期" : `到期:${new Date(b.expires_at * 1000).toLocaleDateString()}`}>
               {b.plan_name} {b.remaining_tokens.toLocaleString()}
             </span>
@@ -440,7 +441,7 @@ function QuotaCell({ icon: Icon, label, limit, used, fmt, hint }: {
         <div className={cn("h-full rounded-full transition-all", danger ? "bg-destructive" : "bg-primary")}
           style={{ width: `${unlimited ? 0 : pct}%` }} />
       </div>
-      {hint && <div className="mt-1.5 text-[11px] text-muted-foreground/70" title="该限额的配置来源:用户显式设置 > 用户组 > 全局默认">来源:{hint}</div>}
+      {hint && <div className="mt-1.5 text-xs text-muted-foreground/70" title="该限额的配置来源:用户显式设置 > 用户组 > 全局默认">来源:{hint}</div>}
     </div>
   );
 }
@@ -626,11 +627,19 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     api.series(seriesDays).then((ser) => setSeries(ser.data)).catch(() => {});
   }, [seriesDays]);
 
-  const sidebar = (
+  // 桌面侧边栏收起态:与管理端同款交互(顶栏开关 + localStorage 记忆)。
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem("relay_portal_sidebar_collapsed") === "1");
+  const toggleCollapsed = () => setCollapsed((c) => {
+    localStorage.setItem("relay_portal_sidebar_collapsed", c ? "0" : "1");
+    return !c;
+  });
+
+  // 收起/展开两态渲染:收起后为 68px 图标竖条,导航文字经 title 提示。
+  const renderSidebar = (collapsed: boolean) => (
     <>
-      <div className="flex items-center justify-between px-4 py-4">
-        <div className="flex items-center gap-2 text-lg font-bold">
-          <svg viewBox="0 0 64 64" className="h-7 w-7 shrink-0">
+      <div className={cn("flex items-center justify-between pb-3 pt-4", collapsed ? "justify-center px-2" : "px-4")}>
+        <div className={cn("flex items-center gap-2.5", collapsed && "flex-col gap-0")}>
+          <svg viewBox="0 0 64 64" className="h-9 w-9 shrink-0 drop-shadow-[0_4px_10px_rgba(99,102,241,0.35)]">
             <defs><linearGradient id="pg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style={{stopColor:'#6366f1'}}/><stop offset="100%" style={{stopColor:'#8b5cf6'}}/></linearGradient></defs>
             <rect width="64" height="64" rx="14" fill="url(#pg)"/>
             <path d="M10 32 L24 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
@@ -640,52 +649,85 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
             <path d="M40 32 L54 32" stroke="white" strokeWidth="4" strokeLinecap="round"/>
             <path d="M46 25 L54 32 L46 39" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
           </svg>
-          <span>Relay</span>
+          {!collapsed && (
+            <div className="flex flex-col leading-none">
+              <span className="text-[17px] font-bold tracking-tight text-foreground">Relay</span>
+              <span className="mt-1 text-[0.75rem] font-medium tracking-[0.14em] text-subtle-foreground">USER PORTAL</span>
+            </div>
+          )}
         </div>
-        <button className="md:hidden" onClick={() => setMobileOpen(false)}><X className="h-5 w-5" /></button>
+        {!collapsed && (
+          <button className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted md:hidden" onClick={() => setMobileOpen(false)}><X className="h-5 w-5" /></button>
+        )}
       </div>
-      <nav className="flex-1 space-y-1 px-2">
+      <nav className="flex-1 space-y-0.5 overflow-y-auto px-2.5 pb-2 pt-1">
         {nav.map((n) => (
-          <NavLink key={n.path} to={n.path} end={n.path === "/"} onClick={() => setMobileOpen(false)}
-            className={({ isActive }) => cn("flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",
-              isActive ? "bg-accent font-medium text-foreground" : "text-muted-foreground hover:bg-accent")}>
-            <n.icon className="h-4 w-4 shrink-0" /> {n.label}
+          <NavLink key={n.path} to={n.path} end={n.path === "/"} onClick={() => setMobileOpen(false)} title={collapsed ? n.label : undefined}
+            className={({ isActive }) => cn(
+              "relative flex w-full items-center rounded-lg text-sm transition-colors duration-150",
+              collapsed ? "justify-center px-0 py-2.5" : "gap-3 px-3 py-2",
+              isActive
+                ? "bg-brand-50 font-semibold text-brand-700 before:absolute before:left-0 before:top-1/2 before:h-4 before:w-[3px] before:-translate-y-1/2 before:rounded-r-full before:bg-primary before:content-['']"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground")}>
+            {({ isActive }) => (
+              <>
+                <n.icon className={cn("shrink-0 h-4 w-4", isActive ? "text-brand-600" : "text-subtle-foreground")} />
+                {!collapsed && n.label}
+              </>
+            )}
           </NavLink>
         ))}
       </nav>
-      <div className="px-2 py-3">
-        <div className="px-3 pb-2 text-xs text-muted-foreground">{phone}</div>
+      <div className="space-y-0.5 border-t border-border px-2.5 py-3">
+        <div className={cn("pb-2 text-xs text-muted-foreground", collapsed ? "px-0 text-center" : "px-3")} title={collapsed ? phone : undefined}>
+          {collapsed ? <span className="mx-auto block h-1.5 w-1.5 rounded-full bg-border-strong" /> : phone}
+        </div>
         {isAdmin && (
-          <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground"
+          <Button variant="ghost" size="sm" title={collapsed ? "返回管理端" : undefined}
+            className={cn("text-muted-foreground", collapsed ? "w-full justify-center" : "w-full justify-start gap-3")}
             onClick={() => { window.location.href = SITE_PREFIX + "/admin/"; }}>
-            <ExternalLink className="h-4 w-4" />返回管理端
+            <ExternalLink className="h-4 w-4 shrink-0" />{!collapsed && "返回管理端"}
           </Button>
         )}
-        <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground" onClick={() => setPwOpen(true)}>
-          <ShieldCheck className="h-4 w-4" />修改密码
+        <Button variant="ghost" size="sm" title={collapsed ? "修改密码" : undefined}
+          className={cn("text-muted-foreground", collapsed ? "w-full justify-center" : "w-full justify-start gap-3")}
+          onClick={() => setPwOpen(true)}>
+          <ShieldCheck className="h-4 w-4 shrink-0" />{!collapsed && "修改密码"}
         </Button>
-        <Button variant="ghost" size="sm" className="w-full justify-start gap-3 text-muted-foreground" onClick={onLogout}>
-          <LogOut className="h-4 w-4" />退出登录
+        <Button variant="ghost" size="sm" title={collapsed ? "退出登录" : undefined}
+          className={cn("text-muted-foreground hover:text-destructive", collapsed ? "w-full justify-center" : "w-full justify-start gap-3")}
+          onClick={onLogout}>
+          <LogOut className="h-4 w-4 shrink-0" />{!collapsed && "退出登录"}
         </Button>
-        {version && <div className="px-3 pt-2 text-[10px] text-muted-foreground/60">Relay v{version}</div>}
+        {version && <div className={cn("pt-2 text-[0.75rem] tracking-wide text-subtle-foreground", collapsed ? "text-center" : "px-3")}>Relay v{version}</div>}
       </div>
     </>
   );
+  const sidebar = renderSidebar(collapsed);
 
   return (
-    <div className="flex h-screen gap-2 overflow-hidden bg-background p-2 md:gap-3 md:p-3">
-      <aside className="hidden w-56 shrink-0 flex-col overflow-hidden rounded-2xl border bg-card shadow-sm md:flex">{sidebar}</aside>
+    <div className="flex h-screen gap-2 overflow-hidden bg-background p-2 md:gap-3 md:py-3 md:pr-3 md:pl-0">
+      <aside className={cn(
+        "hidden shrink-0 flex-col overflow-hidden rounded-r-2xl border-y border-r border-border bg-card shadow-panel transition-[width] duration-300 md:flex",
+        collapsed ? "w-[68px]" : "w-56"
+      )}>
+        {collapsed ? renderSidebar(true) : sidebar}
+      </aside>
       {mobileOpen && (
         <div className="fixed inset-0 z-40 md:hidden">
-          <div className="absolute inset-0 bg-black/30" onClick={() => setMobileOpen(false)} />
-          <aside className="absolute inset-y-0 left-0 flex w-64 flex-col bg-card shadow-xl">{sidebar}</aside>
+          <div className="absolute inset-0 bg-black/30 animate-[relay-veil-in_0.3s_var(--ease-out-expo)_both]" onClick={() => setMobileOpen(false)} />
+          <aside className="absolute inset-y-0 left-0 flex w-64 flex-col overflow-hidden rounded-r-2xl border-r border-border bg-card shadow-drawer animate-[relay-sheet-in_0.34s_var(--ease-spring)_both]">{renderSidebar(false)}</aside>
         </div>
       )}
 
-      <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border bg-card shadow-sm">
-        <header className="flex h-14 shrink-0 items-center gap-3 border-b px-4 md:px-6">
-          <button className="md:hidden" onClick={() => setMobileOpen(true)}><Menu className="h-5 w-5" /></button>
-          <span className="text-sm font-medium">{title}</span>
+      <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-panel">
+        <header className="flex h-16 shrink-0 items-center gap-3 border-b border-border px-4 md:px-6">
+          <button className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted md:hidden" onClick={() => setMobileOpen(true)}><Menu className="h-5 w-5" /></button>
+          {/* 桌面侧边栏收起/展开开关:与管理端同款。 */}
+          <button className="hidden rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted md:block" title={collapsed ? "展开菜单" : "收起菜单"} onClick={toggleCollapsed}>
+            {collapsed ? <PanelLeftOpen className="h-5 w-5" /> : <PanelLeftClose className="h-5 w-5" />}
+          </button>
+          <h1 className="truncate text-[15px] font-semibold tracking-tight text-foreground">{title}</h1>
         </header>
 
         {loadErr && (
@@ -799,7 +841,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
                                 <TableCell className="mono whitespace-nowrap text-xs text-muted-foreground" title={r.created_at}>{time}</TableCell>
                                 <TableCell>
                                   <div className="mono text-xs">{r.model || "—"}</div>
-                                  {r.provider && <div className="text-[11px] text-muted-foreground">{r.provider}</div>}
+                                  {r.provider && <div className="text-xs text-muted-foreground">{r.provider}</div>}
                                 </TableCell>
                                 <TableCell className="mono text-right tabular-nums">{(r.input_tokens ?? 0).toLocaleString()}</TableCell>
                                 <TableCell className="mono text-right tabular-nums">{(r.output_tokens ?? 0).toLocaleString()}</TableCell>
@@ -1262,7 +1304,7 @@ function InterfaceCard({ baseUrl, keys, onReveal, onChanged }: {
               </div>
             ))}
           </div>
-          <p className="mt-1 text-[11px] text-muted-foreground">完整请求示例见「API 文档」。</p>
+          <p className="mt-1 text-xs text-muted-foreground">完整请求示例见「API 文档」。</p>
         </div>
         <div>
           <div className="mb-1 text-xs text-muted-foreground">API Key</div>

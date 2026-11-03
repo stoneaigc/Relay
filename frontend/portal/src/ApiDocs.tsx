@@ -162,10 +162,10 @@ function CodeBlock({ title, code }: { title: string; code: string }) {
   return (
     <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950">
       <div className="flex items-center justify-between border-b border-white/10 px-3 py-1.5">
-        <span className="font-mono text-[11px] uppercase tracking-wide text-zinc-400">{title}</span>
+        <span className="font-mono text-xs uppercase tracking-wide text-zinc-400">{title}</span>
         <CopyBtn code={code} />
       </div>
-      <pre className="overflow-x-auto p-4 font-mono text-[12.5px] leading-relaxed text-zinc-100">{code}</pre>
+      <pre className="overflow-x-auto p-4 font-mono text-[13px] leading-relaxed text-zinc-100">{code}</pre>
     </div>
   );
 }
@@ -192,7 +192,7 @@ function LangTabs({ tabs }: { tabs: { label: string; code: string }[] }) {
         </div>
         <CopyBtn code={cur.code} />
       </div>
-      <pre className="overflow-x-auto p-4 font-mono text-[12.5px] leading-relaxed text-zinc-100">{cur.code}</pre>
+      <pre className="overflow-x-auto p-4 font-mono text-[13px] leading-relaxed text-zinc-100">{cur.code}</pre>
     </div>
   );
 }
@@ -203,7 +203,7 @@ function K({ children }: { children: React.ReactNode }) {
 
 function MethodBadge({ m }: { m: string }) {
   return (
-    <Badge variant={m === "GET" ? "muted" : "default"} className="font-mono text-[11px]">
+    <Badge variant={m === "GET" ? "muted" : "default"} className="font-mono text-xs">
       {m}
     </Badge>
   );

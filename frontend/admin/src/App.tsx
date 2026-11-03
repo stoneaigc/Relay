@@ -241,7 +241,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
         </Button>
         {version && (
           collapsed
-            ? <div className="pt-1.5 text-center text-[0.65rem] tracking-wide text-subtle-foreground">v{version}</div>
+            ? <div className="pt-1.5 text-center text-[0.7rem] tracking-wide text-subtle-foreground">v{version}</div>
             : <div className="px-3 pt-2 text-[0.75rem] tracking-wide text-subtle-foreground">Relay v{version}</div>
         )}
       </div>
