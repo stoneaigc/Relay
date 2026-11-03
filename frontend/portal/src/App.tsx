@@ -637,7 +637,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   // 收起/展开两态渲染:收起后为 68px 图标竖条,导航文字经 title 提示。
   const renderSidebar = (collapsed: boolean) => (
     <>
-      <div className={cn("flex items-center justify-between pb-3 pt-4", collapsed ? "justify-center px-2" : "px-4")}>
+      <div className={cn("flex h-16 shrink-0 items-center justify-between", collapsed ? "justify-center px-2" : "px-4")}>
         <div className={cn("flex items-center gap-2.5", collapsed && "flex-col gap-0")}>
           <svg viewBox="0 0 64 64" className="h-9 w-9 shrink-0 drop-shadow-[0_4px_10px_rgba(99,102,241,0.35)]">
             <defs><linearGradient id="pg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style={{stopColor:'#6366f1'}}/><stop offset="100%" style={{stopColor:'#8b5cf6'}}/></linearGradient></defs>
@@ -706,9 +706,11 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const sidebar = renderSidebar(collapsed);
 
   return (
-    <div className="flex h-screen gap-2 overflow-hidden bg-background p-2 md:gap-3 md:py-3 md:pr-3 md:pl-0">
+    // 全幅分区布局(与管理端同源):侧边栏上下顶天立地、贴住视口左缘,右侧仅一条分隔线;
+    // 内容区紧贴侧栏、上下与右缘顶满,顶栏固定,只有下方内容随菜单切换。
+    <div className="flex h-screen overflow-hidden bg-background">
       <aside className={cn(
-        "hidden shrink-0 flex-col overflow-hidden rounded-r-2xl border-y border-r border-border bg-card shadow-panel transition-[width] duration-300 md:flex",
+        "hidden shrink-0 flex-col overflow-hidden border-r border-border bg-card transition-[width] duration-300 md:flex",
         collapsed ? "w-[68px]" : "w-60"
       )}>
         {collapsed ? renderSidebar(true) : sidebar}
@@ -720,8 +722,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         </div>
       )}
 
-      <main className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-panel">
-        <header className="flex h-16 shrink-0 items-center gap-3 border-b border-border px-4 md:px-6">
+      <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-muted/50">
+        <header className="flex h-16 shrink-0 items-center gap-3 border-b border-border bg-card px-4 md:px-6">
           <button className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted md:hidden" onClick={() => setMobileOpen(true)}><Menu className="h-5 w-5" /></button>
           {/* 桌面侧边栏收起/展开开关:与管理端同款。 */}
           <button className="hidden rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted md:block" title={collapsed ? "展开菜单" : "收起菜单"} onClick={toggleCollapsed}>
