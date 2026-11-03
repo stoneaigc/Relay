@@ -652,7 +652,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           {!collapsed && (
             <div className="flex flex-col leading-none">
               <span className="text-[17px] font-bold tracking-tight text-foreground">Relay</span>
-              <span className="mt-1 text-[0.75rem] font-medium tracking-[0.14em] text-subtle-foreground">USER PORTAL</span>
+              <span className="mt-1 text-[0.8rem] font-medium tracking-[0.14em] text-subtle-foreground">USER PORTAL</span>
             </div>
           )}
         </div>
@@ -664,14 +664,14 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         {nav.map((n) => (
           <NavLink key={n.path} to={n.path} end={n.path === "/"} onClick={() => setMobileOpen(false)} title={collapsed ? n.label : undefined}
             className={({ isActive }) => cn(
-              "relative flex w-full items-center rounded-lg text-sm transition-colors duration-150",
-              collapsed ? "justify-center px-0 py-2.5" : "gap-3 px-3 py-2",
+              "relative flex w-full items-center rounded-lg text-[0.95rem] transition-colors duration-150",
+              collapsed ? "justify-center px-0 py-2.5" : "gap-3 px-3 py-2.5",
               isActive
                 ? "bg-brand-50 font-semibold text-brand-700 before:absolute before:left-0 before:top-1/2 before:h-4 before:w-[3px] before:-translate-y-1/2 before:rounded-r-full before:bg-primary before:content-['']"
-                : "text-muted-foreground hover:bg-muted hover:text-foreground")}>
+                : "font-medium text-muted-foreground hover:bg-muted hover:text-foreground")}>
             {({ isActive }) => (
               <>
-                <n.icon className={cn("shrink-0 h-4 w-4", isActive ? "text-brand-600" : "text-subtle-foreground")} />
+                <n.icon className={cn("h-[18px] w-[18px] shrink-0", isActive ? "text-brand-600" : "text-subtle-foreground")} />
                 {!collapsed && n.label}
               </>
             )}
@@ -684,22 +684,22 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
         </div>
         {isAdmin && (
           <Button variant="ghost" size="sm" title={collapsed ? "返回管理端" : undefined}
-            className={cn("text-muted-foreground", collapsed ? "w-full justify-center" : "w-full justify-start gap-3")}
+            className={cn("text-[0.9rem] text-muted-foreground", collapsed ? "w-full justify-center" : "w-full justify-start gap-3")}
             onClick={() => { window.location.href = SITE_PREFIX + "/admin/"; }}>
-            <ExternalLink className="h-4 w-4 shrink-0" />{!collapsed && "返回管理端"}
+            <ExternalLink className="h-[18px] w-[18px] shrink-0" />{!collapsed && "返回管理端"}
           </Button>
         )}
         <Button variant="ghost" size="sm" title={collapsed ? "修改密码" : undefined}
-          className={cn("text-muted-foreground", collapsed ? "w-full justify-center" : "w-full justify-start gap-3")}
+          className={cn("text-[0.9rem] text-muted-foreground", collapsed ? "w-full justify-center" : "w-full justify-start gap-3")}
           onClick={() => setPwOpen(true)}>
-          <ShieldCheck className="h-4 w-4 shrink-0" />{!collapsed && "修改密码"}
+          <ShieldCheck className="h-[18px] w-[18px] shrink-0" />{!collapsed && "修改密码"}
         </Button>
         <Button variant="ghost" size="sm" title={collapsed ? "退出登录" : undefined}
-          className={cn("text-muted-foreground hover:text-destructive", collapsed ? "w-full justify-center" : "w-full justify-start gap-3")}
+          className={cn("text-[0.9rem] text-muted-foreground hover:text-destructive", collapsed ? "w-full justify-center" : "w-full justify-start gap-3")}
           onClick={onLogout}>
-          <LogOut className="h-4 w-4 shrink-0" />{!collapsed && "退出登录"}
+          <LogOut className="h-[18px] w-[18px] shrink-0" />{!collapsed && "退出登录"}
         </Button>
-        {version && <div className={cn("pt-2 text-[0.75rem] tracking-wide text-subtle-foreground", collapsed ? "text-center" : "px-3")}>Relay v{version}</div>}
+        {version && <div className={cn("pt-2 text-[0.8rem] tracking-wide text-subtle-foreground", collapsed ? "text-center" : "px-3")}>Relay v{version}</div>}
       </div>
     </>
   );
@@ -709,7 +709,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     <div className="flex h-screen gap-2 overflow-hidden bg-background p-2 md:gap-3 md:py-3 md:pr-3 md:pl-0">
       <aside className={cn(
         "hidden shrink-0 flex-col overflow-hidden rounded-r-2xl border-y border-r border-border bg-card shadow-panel transition-[width] duration-300 md:flex",
-        collapsed ? "w-[68px]" : "w-56"
+        collapsed ? "w-[68px]" : "w-60"
       )}>
         {collapsed ? renderSidebar(true) : sidebar}
       </aside>

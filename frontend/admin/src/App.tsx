@@ -198,19 +198,19 @@ function Console({ onLogout }: { onLogout: () => void }) {
                 // 收起态:分组标题换成分隔线,保留分组节奏。
                 <div className="mx-1.5 my-2 border-t border-border" />
               ) : (
-                <div className="px-3 pb-1.5 pt-1 text-[0.8rem] font-semibold tracking-wide text-subtle-foreground">{g.title}</div>
+                <div className="px-3 pb-2 pt-1.5 text-[0.85rem] font-semibold tracking-wide text-subtle-foreground">{g.title}</div>
               )
             ) : null}
             {g.items.map((n) => (
               <NavLink key={n.path} to={n.path} onClick={() => setMobileOpen(false)} title={collapsed ? n.label : undefined}
-                className={({ isActive }) => cn("relative flex w-full items-center rounded-lg text-sm transition-colors duration-150",
-                  collapsed ? "justify-center px-0 py-2.5" : "gap-3 px-3 py-2",
+                className={({ isActive }) => cn("relative flex w-full items-center rounded-lg text-[0.95rem] transition-colors duration-150",
+                  collapsed ? "justify-center px-0 py-2.5" : "gap-3 px-3 py-2.5",
                   isActive
                     ? "bg-brand-50 font-semibold text-brand-700 before:absolute before:left-0 before:top-1/2 before:h-4 before:w-[3px] before:-translate-y-1/2 before:rounded-r-full before:bg-primary before:content-['']"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground")}>
+                    : "font-medium text-muted-foreground hover:bg-muted hover:text-foreground")}>
                 {({ isActive }) => (
                   <>
-                    <n.icon className={cn("shrink-0", collapsed ? "h-[18px] w-[18px]" : "h-4 w-4", isActive ? "text-brand-600" : "text-subtle-foreground")} />
+                    <n.icon className={cn("shrink-0 h-[18px] w-[18px]", isActive ? "text-brand-600" : "text-subtle-foreground")} />
                     {!collapsed && n.label}
                   </>
                 )}
@@ -222,7 +222,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
       <div className={cn("space-y-0.5 border-t border-border py-3", collapsed ? "px-2" : "px-2.5")}>
         {/* 一键切换门户:首次自动创建同名门户账号,成功后带独立 portal 令牌直达。 */}
         <Button variant="ghost" size="sm" title={collapsed ? "进入用户门户" : undefined}
-          className={cn("w-full justify-start gap-3 text-muted-foreground", collapsed && "justify-center px-0")}
+          className={cn("w-full justify-start gap-3 text-[0.9rem] text-muted-foreground", collapsed && "justify-center px-0")}
           onClick={async () => {
             try {
               const r = await api.portalSso();
@@ -233,16 +233,16 @@ function Console({ onLogout }: { onLogout: () => void }) {
               }
             } catch (e: any) { toast.error(e.message || "进入用户门户失败"); }
           }}>
-          <ExternalLink className={cn("shrink-0", collapsed ? "h-[18px] w-[18px]" : "h-4 w-4")} />{!collapsed && "进入用户门户"}
+          <ExternalLink className="h-[18px] w-[18px] shrink-0" />{!collapsed && "进入用户门户"}
         </Button>
         <Button variant="ghost" size="sm" title={collapsed ? "退出登录" : undefined}
-          className={cn("w-full justify-start gap-3 text-muted-foreground hover:text-destructive", collapsed && "justify-center px-0")} onClick={onLogout}>
-          <LogOut className={cn("shrink-0", collapsed ? "h-[18px] w-[18px]" : "h-4 w-4")} />{!collapsed && "退出登录"}
+          className={cn("w-full justify-start gap-3 text-[0.9rem] text-muted-foreground hover:text-destructive", collapsed && "justify-center px-0")} onClick={onLogout}>
+          <LogOut className="h-[18px] w-[18px] shrink-0" />{!collapsed && "退出登录"}
         </Button>
         {version && (
           collapsed
-            ? <div className="pt-1.5 text-center text-[0.7rem] tracking-wide text-subtle-foreground">v{version}</div>
-            : <div className="px-3 pt-2 text-[0.75rem] tracking-wide text-subtle-foreground">Relay v{version}</div>
+            ? <div className="pt-1.5 text-center text-[0.75rem] tracking-wide text-subtle-foreground">v{version}</div>
+            : <div className="px-3 pt-2 text-[0.8rem] tracking-wide text-subtle-foreground">Relay v{version}</div>
         )}
       </div>
     </>
@@ -252,7 +252,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
   return (
     // 桌面态侧边栏贴合左缘(无左内边距,只保留右侧圆角);内容区维持浮动卡片风格。
     <div className="flex h-screen gap-2 overflow-hidden bg-background p-2 md:gap-3 md:py-3 md:pr-3 md:pl-0">
-      <aside className={cn("hidden shrink-0 flex-col overflow-hidden rounded-r-2xl border-y border-r border-border bg-card shadow-panel transition-[width] duration-200 ease-in-out md:flex", collapsed ? "w-[68px]" : "w-56")}>
+      <aside className={cn("hidden shrink-0 flex-col overflow-hidden rounded-r-2xl border-y border-r border-border bg-card shadow-panel transition-[width] duration-200 ease-in-out md:flex", collapsed ? "w-[68px]" : "w-60")}>
         {sidebar}
       </aside>
       {mobileOpen && (
