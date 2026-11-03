@@ -290,7 +290,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           <div className="min-h-0 flex-1 overflow-auto bg-muted/50">
             <div className="p-4 md:p-6">
               <Routes>
-                <Route path="/" element={<Navigate to="/overview" replace />} />
+                <Route path="/" element={<Navigate to="/metrics" replace />} />
                 <Route path="/overview" element={<OverviewPanel />} />
                 <Route path="/users" element={<UsersPanel onAuthErr={onLogout} />} />
                 <Route path="/user-groups" element={<UserGroupsPanel />} />

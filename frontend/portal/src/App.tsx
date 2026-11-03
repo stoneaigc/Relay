@@ -652,7 +652,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           {!collapsed && (
             <div className="flex flex-col leading-none">
               <span className="text-[17px] font-bold tracking-tight text-foreground">Relay</span>
-              <span className="mt-1 text-[0.8rem] font-medium tracking-[0.14em] text-subtle-foreground">USER PORTAL</span>
+              <span className="mt-1 text-[0.75rem] font-medium tracking-[0.14em] text-subtle-foreground">USER PORTAL</span>
             </div>
           )}
         </div>

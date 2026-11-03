@@ -80,13 +80,19 @@ body,
   height: 100%;
 }
 
+/* 全局字号基准:与 admin 完全一致(106.25% = 17px)。
+   两端共用同一套字号类(text-[0.95rem] 等),基准不同会差约 6%,
+   侧边栏/卡片文字肉眼即可察觉「字体不一样」——必须同源维护。 */
+html {
+  font-size: 106.25%;
+}
+
 body {
   margin: 0;
   background-color: var(--color-background);
   color: var(--color-foreground);
   font-family: var(--font-sans);
-  font-size: 15px;
-  line-height: 1.6;
+  line-height: 1.65;
   /* 冷调环境光:与 admin 同款的左上品牌微光 */
   background-image: radial-gradient(
       1100px 560px at 12% -12%,
