@@ -51,10 +51,9 @@
   --color-input: #dcddec;
   --color-ring: #a5b4fc;
 
-  /* —— 字型 —— */
-  --font-sans: "IBM Plex Sans Variable", -apple-system, BlinkMacSystemFont, "Segoe UI",
-    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  /* —— 字型(与 Portal 完全同栈,保证两端渲染一致;不引入未加载的 webfont) —— */
+  --font-sans: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
   /* —— 表面分层阴影(冷调,低扩散,营造工程师式的干净层次) —— */
   --shadow-card: 0 1px 2px rgba(28, 30, 48, 0.04), 0 1px 1px rgba(28, 30, 48, 0.03);
@@ -90,7 +89,6 @@ body {
   margin: 0;
   color: var(--color-foreground);
   font-family: var(--font-sans);
-  font-feature-settings: "cv05" 1, "ss01" 1;
   line-height: 1.65;
   /* 冷调环境光:左上角一抹品牌色微光,呼应登录页的品牌面板 */
   background-color: var(--color-background);
