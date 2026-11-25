@@ -187,6 +187,41 @@
   #b:disabled, .submit:disabled { opacity: .6; cursor: default; }
 
   .err { color: #dc2626; font-size: 12.5px; min-height: 18px; margin-top: 10px; text-align: center; }
+
+  /* ---------- 注册同意条款(复选框不占文本流,靠 padding 让出位置) ---------- */
+  .consent { position: relative; margin: 2px 0 14px; padding-left: 22px; font-size: 12.5px; line-height: 1.6; color: #6b7280; }
+  .consent input { position: absolute; left: 0; top: 3px; width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; }
+  .consent label { display: inline; cursor: pointer; }
+  .consent .terms-link { display: inline; border: 0; background: none; padding: 0; font: inherit; font-weight: 600;
+    color: var(--accent); cursor: pointer; }
+  .consent .terms-link:hover { text-decoration: underline; }
+  @media (prefers-color-scheme: dark) { .consent { color: #9aa3b8; } }
+
+  /* ---------- 条款弹层(纯 CSS,无外部依赖) ---------- */
+  .terms-veil { position: fixed; inset: 0; z-index: 50; display: none; align-items: center; justify-content: center;
+    padding: 24px; background: rgba(12,14,22,.46); backdrop-filter: blur(3px); }
+  .terms-veil[data-open="1"] { display: flex; }
+  .terms-box { width: 100%; max-width: 620px; max-height: min(78vh, 640px); display: flex; flex-direction: column;
+    border-radius: 16px; border: 1px solid #e4e6ef; background: #fff; box-shadow: 0 24px 60px rgba(30,35,60,.22); }
+  .terms-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 18px 22px 12px; border-bottom: 1px solid #eceef6; flex: none; }
+  .terms-head h3 { font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
+  .terms-close { border: 0; background: none; cursor: pointer; color: #8b90a3; font-size: 20px; line-height: 1;
+    padding: 2px 8px; border-radius: 8px; }
+  .terms-close:hover { color: #1a1d27; background: rgba(99,102,241,.08); }
+  .terms-body { overflow: auto; padding: 16px 22px 24px; font-size: 13px; line-height: 1.75; color: #4b5267; }
+  .terms-body h4 { margin: 16px 0 6px; font-size: 13px; font-weight: 650; color: #1a1d27; }
+  .terms-body h4:first-child { margin-top: 0; }
+  .terms-body ul { margin: 0; padding-left: 18px; }
+  .terms-body li { margin: 4px 0; }
+  .terms-body b { color: #1a1d27; }
+  @media (prefers-color-scheme: dark) {
+    .terms-box { background: #161923; border-color: #262a38; }
+    .terms-head { border-color: #262a38; }
+    .terms-body { color: #a7aec4; }
+    .terms-body h4, .terms-body b { color: #e8eaf2; }
+    .terms-close:hover { color: #e8eaf2; }
+  }
   /* 暗底上 #dc2626 对比度不足,换红-400 保可读 */
   @media (prefers-color-scheme: dark) { .err { color: #f87171; } }
 
@@ -301,6 +336,12 @@
         <button type="button" class="peek" id="r-peek" aria-label="显示或隐藏密码">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
         </button>
+      </div>
+      <div class="consent">
+        <input type="checkbox" id="r-agree">
+        <label for="r-agree">我已阅读并同意</label>
+        <button type="button" class="terms-link" id="open-terms">《使用条款与免责声明》</button>
+        <label for="r-agree">，理解本服务仅供学习交流、不保证可用性。</label>
       </div>
       <button type="submit" class="submit">注册并登录</button>
       <div class="err" id="r-err" role="alert" aria-live="polite"></div>
@@ -440,6 +481,7 @@ $("f-register").addEventListener("submit", async (ev) => {
   const body = { kind: "email", email: $("r-email").value.trim(), code: $("r-code").value.trim(), password };
   if (password.length < 8) { $("r-err").textContent = "密码至少 8 位"; return; }
   if (!body.code) { $("r-err").textContent = "请填写验证码"; return; }
+  if (!$("r-agree").checked) { $("r-err").textContent = "请先阅读并同意《使用条款与免责声明》"; return; }
   try {
     const res = await fetch("portal/api/auth/register", {
       method: "POST",
@@ -474,6 +516,18 @@ $("f-reset").addEventListener("submit", async (ev) => {
   }
 });
 
+// ---- 条款弹层:注册前可查看全文,ESC / 遮罩 / × 关闭 ----
+// 弹层 DOM 位于本 <script> 之后,须等解析完成再取元素,否则 $() 拿到 null。
+document.addEventListener("DOMContentLoaded", () => {
+  const veil = $("terms-veil");
+  const openTerms = () => { veil.dataset.open = "1"; $("terms-close").focus(); };
+  const closeTerms = () => { delete veil.dataset.open; $("open-terms").focus(); };
+  $("open-terms").addEventListener("click", openTerms);
+  $("terms-close").addEventListener("click", closeTerms);
+  veil.addEventListener("click", (ev) => { if (ev.target === veil) closeTerms(); });
+  document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && veil.dataset.open) closeTerms(); });
+});
+
 // ---- 免登录回流:已持有有效令牌时(?back=admin / ?back=portal)直接进入对应工作台 ----
 // 门户「返回管理端」等切换入口带上 back 参数;探测失败(过期/无效)则清除该令牌留在登录页。
 // 无 back 参数的正常访问不受影响:退出登录后手动打开 /login 不会被自动拉回。
@@ -494,5 +548,57 @@ $("f-reset").addEventListener("submit", async (ev) => {
   restore();
 })();
 </script>
+
+<!-- 使用条款与免责声明:与 README 的「项目说明」同口径,注册前须显式同意 -->
+<div class="terms-veil" id="terms-veil" role="dialog" aria-modal="true" aria-labelledby="terms-title">
+  <div class="terms-box">
+    <div class="terms-head">
+      <h3 id="terms-title">使用条款与免责声明</h3>
+      <button type="button" class="terms-close" id="terms-close" aria-label="关闭">×</button>
+    </div>
+    <div class="terms-body">
+      <h4>一、服务性质</h4>
+      <ul>
+        <li>本服务为一个<strong>个人学习与研究用途</strong>的模型 API 网关，按现状提供，<strong>不保证稳定性、可用性或数据持久性</strong>，不提供任何技术支持与服务等级承诺。</li>
+        <li>服务可能在无事先通知的情况下中断、重置数据或停止运行；请勿将本服务用于任何生产性、关键性或不可恢复的业务场景。</li>
+      </ul>
+
+      <h4>二、使用限制</h4>
+      <ul>
+        <li>您须在遵守各上游模型服务商使用条款以及所在地法律法规的前提下使用本服务，<strong>不得用于任何非法用途</strong>。</li>
+        <li>不得利用本服务生成、传播违法违规内容，不得侵犯他人合法权益，不得对服务进行攻击、探测、绕过限流或批量注册。</li>
+        <li><strong>不得转售、出租、二次分发</strong>通过本服务获取的模型额度或访问凭证。</li>
+        <li>根据《生成式人工智能服务管理暂行办法》，<strong>请勿向中国境内公众提供任何未经备案的生成式人工智能服务</strong>。</li>
+      </ul>
+
+      <h4>三、账号与额度</h4>
+      <ul>
+        <li>您须妥善保管账号与 API Key，通过您的凭证发起的一切调用均视为您本人的行为，由此产生的费用与责任由您承担。</li>
+        <li>体验额度、套餐额度均为服务方发放的虚拟计量单位，<strong>不具有货币属性，不可兑换、不可提现、不可转让</strong>。</li>
+        <li>如发现违规使用，服务方有权在不事先通知的情况下限制、冻结或注销账号。</li>
+      </ul>
+
+      <h4>四、数据与隐私</h4>
+      <ul>
+        <li>为完成调用与计费，本服务会记录账号信息（邮箱）、API Key 及其调用元数据（模型、token 用量、耗时、状态码、时间戳），并保留一段时间用于用量统计与对账。</li>
+        <li>对话内容会<strong>转发给您所调用的上游模型服务商</strong>，其处理行为适用该服务商自身的隐私政策，请勿提交敏感个人信息或商业秘密。</li>
+        <li>除法律法规要求或配合有权机关调查外，不会主动向第三方提供您的账号信息。</li>
+        <li>您可联系服务方查询、更正或删除您的账号与调用记录；删除账号后相关记录将不可恢复。</li>
+      </ul>
+
+      <h4>五、免责</h4>
+      <ul>
+        <li>本服务按「原样」提供，<strong>不对任何直接或间接损失承担责任</strong>，包括但不限于因服务中断、数据丢失、模型输出错误或第三方服务变更所致的损失。</li>
+        <li>模型输出由上游服务商生成，本服务不对其准确性、合法性、适用性作任何保证；您应自行判断并对使用结果负责。</li>
+      </ul>
+
+      <h4>六、条款变更</h4>
+      <ul>
+        <li>本条款可能随服务调整而更新，更新后在本页面公示即生效；继续使用视为接受变更后的条款。</li>
+        <li>若不同意本条款的任何内容，请停止注册与使用。</li>
+      </ul>
+    </div>
+  </div>
+</div>
 </body>
 </html>
