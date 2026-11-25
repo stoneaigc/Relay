@@ -1625,8 +1625,9 @@ function UserGroupDialog({ dlg, defaults, groups, onClose, onSaved }: { dlg: { e
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="pb-0">
-        <DialogHeader>
+      <DialogContent className="pt-0 pb-0">
+        {/* 长表单:标题吸顶,滚动到中部也知道自己在改哪个对象 */}
+        <DialogHeader className="sticky top-0 z-10 -mx-6 -mb-4 border-b border-border bg-card px-6 pb-3 pt-6">
           <DialogTitle>{edit ? "编辑用户组" : "创建用户组"}</DialogTitle>
           <DialogDescription>留空 = 继承全局默认,0 = 显式不限;改完组限额会自动重算组内用户的生效限额。</DialogDescription>
         </DialogHeader>
@@ -2938,14 +2939,25 @@ function GroupsPanel() {
   const [refreshing, setRefreshing] = useState(false);
   const [routeBusy, setRouteBusy] = useState(false);
 
+  // sel 的最新值快照:刷新/切组并发时用它判断响应是否已过期(渲染期同步,先于 effect)。
+  const selRef = useRef<number | null>(null);
+  selRef.current = sel;
+
   const loadGroups = async () => {
     const [g, m] = await Promise.all([api.groups(), api.models()]);
     setGroups(g.data); setModels(m.data);
     // 用函数式更新避免闭包捕获旧 sel:当前无选中(或选中已被删除)时自动落到首个组。
     setSel((cur) => (cur == null && g.data.length ? g.data[0].id : cur));
   };
-  const loadRoutes = async (gid: number) => { setRoutes((await api.routes(gid)).data); };
-  const loadTimeRules = async (gid: number) => { setTimeRules((await api.timeRules(gid)).data); };
+  // 慢响应兜底:请求回来时若用户已切到别的组,丢弃结果,避免标题与路由表错配。
+  const loadRoutes = async (gid: number) => {
+    const data = (await api.routes(gid)).data;
+    if (selRef.current === gid) setRoutes(data);
+  };
+  const loadTimeRules = async (gid: number) => {
+    const data = (await api.timeRules(gid)).data;
+    if (selRef.current === gid) setTimeRules(data);
+  };
   useEffect(() => { loadGroups(); api.providers(1, 200).then((r) => setProvMap(Object.fromEntries(r.data.map((p) => [p.name, providerDisplayName(p)])))).catch(() => { /* 静默 */ }); }, []);
   useEffect(() => { if (sel != null) { loadRoutes(sel); loadTimeRules(sel); } setChecked(new Set()); setRoutePage(1); }, [sel]);
 
@@ -2954,14 +2966,17 @@ function GroupsPanel() {
     setRefreshing(true);
     try {
       await loadGroups();
-      if (sel != null) await Promise.all([loadRoutes(sel), loadTimeRules(sel)]);
+      // loadGroups 可能刚把 sel 落到首个组(闭包里的 sel 还是 null),取渲染后的最新值。
+      const gid = selRef.current;
+      if (gid != null) await Promise.all([loadRoutes(gid), loadTimeRules(gid)]);
     } finally { setRefreshing(false); }
   };
   // 仅刷新右侧当前组的路由与时段规则。
   const reloadRoutes = async () => {
-    if (sel == null) return;
+    const gid = selRef.current;
+    if (gid == null) return;
     setRouteBusy(true);
-    try { await Promise.all([loadRoutes(sel), loadTimeRules(sel)]); } finally { setRouteBusy(false); }
+    try { await Promise.all([loadRoutes(gid), loadTimeRules(gid)]); } finally { setRouteBusy(false); }
   };
 
   const createGroup = async (name: string, maxConcurrency: number) => { const r = await api.addGroup(name, maxConcurrency); await loadGroups(); setSel(r.id); };
@@ -3041,7 +3056,7 @@ function GroupsPanel() {
 
   return (
     <div className="grid h-full min-h-0 gap-5 md:grid-cols-[260px_1fr]">
-      <Card className="flex h-full min-h-0 flex-col">
+      <Card className="flex h-full min-h-0 min-w-0 flex-col">
         <CardHeader>
           <div className="flex items-center justify-between gap-2">
             <CardTitle className="text-base">模型组</CardTitle>
@@ -3084,13 +3099,13 @@ function GroupsPanel() {
         </CardContent>
       </Card>
 
-      <Card className="flex h-full min-h-0 flex-col">
+      <Card className="flex h-full min-h-0 min-w-0 flex-col">
         <CardHeader>
-          <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
             <CardTitle className="text-base">组内路由 {sel != null && `· ${groups.find((g) => g.id === sel)?.name ?? ""}`}</CardTitle>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               {sel != null && (
-                <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-1.5">
                   <span className="text-xs text-muted-foreground" title="模型组总并发,0 = 不限;点击重命名/编辑可修改">组并发 {curGroup?.max_concurrency || "不限"}</span>
                   <span className="text-xs text-muted-foreground">负载策略</span>
                   <select value={curStrategy} onChange={(e) => setStrategy(sel, e.target.value)} className="h-8 rounded-lg border border-input bg-card px-2 text-xs focus:outline-none focus:ring-2 focus:ring-ring">
@@ -3592,8 +3607,8 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       {/* 单选/批量两模式共用同一宽度,避免模式切换时弹窗宽度跳变 */}
-      <DialogContent className="max-w-3xl pb-0">
-        <DialogHeader>
+      <DialogContent className="max-w-3xl pt-0 pb-0">
+        <DialogHeader className="sticky top-0 z-10 -mx-6 -mb-4 border-b border-border bg-card px-6 pb-3 pt-6">
           <DialogTitle>{edit ? "编辑路由" : "添加路由"}</DialogTitle>
           <DialogDescription>对外模型名 → 实际模型;可多选模型批量添加。</DialogDescription>
         </DialogHeader>
@@ -3791,8 +3806,8 @@ function TimeRuleDialog({ dlg, groupId, onClose, onSaved }: {
   const inp = "h-9 w-full rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-md pb-0">
-        <DialogHeader>
+      <DialogContent className="max-w-md pt-0 pb-0">
+        <DialogHeader className="sticky top-0 z-10 -mx-6 -mb-4 border-b border-border bg-card px-6 pb-3 pt-6">
           <DialogTitle>{edit ? "编辑时段规则" : "添加时段规则"}</DialogTitle>
           <DialogDescription>命中该时间段时,计费倍率 = 模型倍率 × 这里填的倍率。下面的权重覆盖是高级选项,不填就只影响计费。</DialogDescription>
         </DialogHeader>
