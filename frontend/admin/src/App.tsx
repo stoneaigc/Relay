@@ -92,8 +92,15 @@ function NotFoundPanel() {
   );
 }
 
-// 侧边栏分组:监控组置顶(接口指标为其首项)——实时监控是管理员最高频入口;其余按运营 / 模型与上游 / 系统归组。
+// 侧边栏按「先看后配」排序:概览 → 监控 → 接入配置 → 运营 → 系统。
+// 接入配置固定为 上游与模型 → 模型组 → 用户组 → 用户管理 的链路顺序,新人自上而下走一遍即可完成接入。
 const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: any }[] }[] = [
+  {
+    title: "",
+    items: [
+      { path: "/overview", label: "概览", icon: LayoutDashboard },
+    ],
+  },
   {
     title: "监控",
     items: [
@@ -103,40 +110,29 @@ const NAV_GROUPS: { title: string; items: { path: string; label: string; icon: a
     ],
   },
   {
-    title: "计费",
+    title: "接入配置",
     items: [
-      { path: "/plans", label: "套餐管理", icon: DollarSign },
-    ],
-  },
-  {
-    title: "",
-    items: [
-      { path: "/overview", label: "概览", icon: LayoutDashboard },
+      { path: "/models", label: "上游与模型", icon: Boxes },
+      { path: "/groups", label: "模型组", icon: Layers },
+      { path: "/user-groups", label: "用户组", icon: UsersRound },
+      { path: "/users", label: "用户管理", icon: UsersIcon },
     ],
   },
   {
     title: "运营",
     items: [
-      { path: "/users", label: "用户管理", icon: UsersIcon },
-      { path: "/user-groups", label: "用户组", icon: UsersRound },
+      { path: "/plans", label: "套餐管理", icon: DollarSign },
       { path: "/keys", label: "API 密钥", icon: KeyRound },
       { path: "/rewards", label: "奖励审核", icon: Gift },
       { path: "/reward-tasks", label: "奖励设置", icon: Star },
     ],
   },
   {
-    title: "模型与上游",
-    items: [
-      { path: "/models", label: "上游模型", icon: Boxes },
-      { path: "/groups", label: "模型组", icon: Layers },
-    ],
-  },
-  {
     title: "系统",
     items: [
-      { path: "/docs", label: "API 文档", icon: BookOpen },
       { path: "/cache", label: "语义缓存", icon: Database },
       { path: "/audit", label: "操作审计", icon: ShieldCheck },
+      { path: "/docs", label: "API 文档", icon: BookOpen },
       { path: "/settings", label: "设置", icon: Settings },
     ],
   },
@@ -190,21 +186,21 @@ function Console({ onLogout }: { onLogout: () => void }) {
           <button className="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted md:hidden" onClick={() => setMobileOpen(false)}><X className="h-5 w-5" /></button>
         )}
       </div>
-      <nav className={cn("flex-1 space-y-0.5 overflow-y-auto pb-2 pt-1", collapsed ? "px-2" : "px-2.5")}>
+      <nav className={cn("flex-1 space-y-0.5 overflow-y-auto pb-1 pt-1", collapsed ? "px-2" : "px-2.5")}>
         {NAV_GROUPS.map((g, gi) => (
-          <div key={gi} className={cn(gi > 0 && (collapsed ? "mt-3" : "mt-4"))}>
+          <div key={gi} className={cn(gi > 0 && (collapsed ? "mt-2" : "mt-2.5"))}>
             {g.title ? (
               collapsed ? (
                 // 收起态:分组标题换成分隔线,保留分组节奏。
                 <div className="mx-1.5 my-2 border-t border-border" />
               ) : (
-                <div className="px-3 pb-2 pt-1.5 text-[0.85rem] font-semibold tracking-wide text-subtle-foreground">{g.title}</div>
+                <div className="px-3 pb-1 pt-1 text-[0.85rem] font-semibold tracking-wide text-subtle-foreground">{g.title}</div>
               )
             ) : null}
             {g.items.map((n) => (
               <NavLink key={n.path} to={n.path} onClick={() => setMobileOpen(false)} title={collapsed ? n.label : undefined}
                 className={({ isActive }) => cn("relative flex w-full items-center rounded-lg text-[0.95rem] transition-colors duration-150",
-                  collapsed ? "justify-center px-0 py-2.5" : "gap-3 px-3 py-2.5",
+                  collapsed ? "justify-center px-0 py-2" : "gap-3 px-3 py-2",
                   isActive
                     ? "bg-brand-50 font-semibold text-brand-700 before:absolute before:left-0 before:top-1/2 before:h-4 before:w-[3px] before:-translate-y-1/2 before:rounded-r-full before:bg-primary before:content-['']"
                     : "font-medium text-muted-foreground hover:bg-muted hover:text-foreground")}>
@@ -6229,13 +6225,13 @@ function UpstreamsPanel() {
 
       {/* 定位说明 */}
       <p className="text-sm text-muted-foreground">
-        基于真实流量的熔断 / 并发 / 失败实时监控,问题发生时在此呈现;也可在「上游模型」页主动发起连通性测试。
+        基于真实流量的熔断 / 并发 / 失败实时监控,问题发生时在此呈现;也可在「上游与模型」页主动发起连通性测试。
       </p>
 
       {/* 定位说明 + 演示数据入口 */}
       {!demo && !loading && (data?.total ?? 0) === 0 && (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-dashed border-border bg-muted/30 px-4 py-3 text-sm">
-          <span className="text-muted-foreground">基于真实流量的熔断 / 并发 / 失败实时监控;也可在「上游模型」页主动发起连通性测试。</span>
+          <span className="text-muted-foreground">基于真实流量的熔断 / 并发 / 失败实时监控;也可在「上游与模型」页主动发起连通性测试。</span>
           <Button size="sm" variant="outline" onClick={() => {
             demoRef.current = true;
             setDemo(true);

@@ -5,7 +5,7 @@ import {
   LayoutDashboard, Receipt, MessageSquare, Menu, X, SendHorizontal, Boxes,
   Gift, Star, Code2, Clock, CheckCircle2, XCircle, ExternalLink, ImagePlus, Lightbulb, BookOpen,
   Gauge, Zap, Timer, CalendarDays, KeySquare, Eye, EyeOff, ShieldCheck, Sparkles, Square, Trash2, ShoppingCart, Search,
-  PanelLeftClose, PanelLeftOpen,
+  PanelLeftClose, PanelLeftOpen, ChevronRight,
 } from "lucide-react";
 import { api, getToken, clearToken, healthz, SITE_PREFIX, KeyInfo, ModelCard, QuotaInfo, PlanCard, chatStream, ChatMsg, RewardInfo, RewardClaim, RewardTask, EvidenceType, makeCostFormatter } from "./api";
 import { copyText } from "./clipboard";
@@ -1010,6 +1010,39 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   );
 }
 
+/**
+ * 思考过程独立成块:与回答分开呈现(不塞进回答气泡内),Claude Code 式折叠面板。
+ * 流式思考阶段默认展开;首段正文到达后自动收起,用户可随时手动展开回看。
+ */
+function ThinkingBlock({ text, streaming }: { text: string; streaming: boolean }) {
+  const [open, setOpen] = useState(streaming);
+  const prevStreaming = useRef(streaming);
+  useEffect(() => {
+    if (prevStreaming.current && !streaming) setOpen(false);
+    prevStreaming.current = streaming;
+  }, [streaming]);
+  return (
+    // 收起态只是一行元信息(▸ 思考过程 · 已完成),展开时才落下左侧竖线把思考正文收进「注释区」,
+    // 这样既不会与浅灰页面底融为一体,也不会出现一小截断开的边线。
+    <div className={cn("min-w-0", open && "border-l-2 border-border pl-3")}>
+      <button type="button" onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className={cn("flex w-full items-center gap-1.5 py-1 text-left", !open && "rounded-md")}>
+        <ChevronRight className={cn("h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-150", open && "rotate-90")} />
+        <span className="text-[0.8rem] font-medium text-muted-foreground">思考过程</span>
+        <span className="text-[0.75rem] text-muted-foreground/70">· {streaming ? "进行中" : "已完成"}</span>
+        {!open && <span className="text-[0.75rem] text-muted-foreground/60">· 点击展开</span>}
+      </button>
+      {open && (
+        <div className="whitespace-pre-wrap pl-5 pr-1 text-[0.82rem] leading-[1.75] text-muted-foreground">
+          {text}
+          {streaming && <span className="ml-0.5 inline-block h-3 w-[3px] animate-pulse rounded-sm bg-muted-foreground/50 align-middle" />}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ChatView({ models, onSent }: { models: string[]; onSent: () => void }) {
   const [model, setModel] = useState("");
   // 会话持久化到 sessionStorage:门户内切页(组件卸载)或刷新后回到对话仍保留上下文。
@@ -1106,18 +1139,25 @@ function ChatView({ models, onSent }: { models: string[]; onSent: () => void }) 
             </div>
           ) : msgs.map((m, i) => (
             <div key={i} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
-              <div className={cn("max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed",
-                m.role === "user" ? "bg-primary text-primary-foreground" : "border bg-card")}>
-                {m.reasoning && (
-                  <details open={!m.content} className="mb-2 rounded-lg bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
-                    <summary className="cursor-pointer select-none font-medium">💭 思考过程{m.content && "(已完成,点击展开)"}</summary>
-                    <div className="mt-1.5 whitespace-pre-wrap leading-relaxed">{m.reasoning}</div>
-                  </details>
-                )}
-                <div className="whitespace-pre-wrap">
-                  {m.content || (!m.reasoning && <span className="opacity-50">…</span>)}
+              {m.role === "user" ? (
+                <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl bg-primary px-4 py-2.5 text-sm leading-relaxed text-primary-foreground">
+                  {m.content}
                 </div>
-              </div>
+              ) : (
+                // 助手消息:思考过程与回答各自成块,上下分列,不混在同一容器里。
+                <div className="flex w-full max-w-[85%] flex-col gap-2">
+                  {m.reasoning && (
+                    <ThinkingBlock text={m.reasoning} streaming={busy && i === msgs.length - 1 && !m.content} />
+                  )}
+                  {(m.content || !m.reasoning) && (
+                    <div className="rounded-2xl border border-border bg-card px-4 py-3 text-sm leading-relaxed shadow-card">
+                      <div className="whitespace-pre-wrap">
+                        {m.content || <span className="opacity-50">…</span>}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           ))}
         </div>
