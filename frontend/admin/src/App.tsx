@@ -1433,6 +1433,8 @@ function UserGroupsPanel() {
   // 客户端分页(用户组数量有限,无服务端分页端点)
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  // 手动刷新态:组列表、全局默认限额、模型组名、套餐名一次拉齐。
+  const [refreshing, setRefreshing] = useState(false);
 
   const load = async () => {
     setErr("");
@@ -1445,6 +1447,11 @@ function UserGroupsPanel() {
     }
   };
   useEffect(() => { load(); }, []);
+  // 手动刷新:在别处改了模型组/套餐后无需切换菜单即可对齐名称与限额。
+  const reload = async () => {
+    setRefreshing(true);
+    try { await load(); } finally { setRefreshing(false); }
+  };
 
   const del = (g: UserGroupRow) => setConfirm({
     title: `删除用户组「${g.name}」?`,
@@ -1463,7 +1470,12 @@ function UserGroupsPanel() {
               <CardTitle className="text-base">用户组(限额模板)</CardTitle>
               <CardDescription>控制并发 / 速率 / 预算;绑定模型组后决定可调用的模型。</CardDescription>
             </div>
-            <Button size="sm" onClick={() => setDlg({ edit: null })}><Plus className="h-4 w-4" />创建用户组</Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={reload} disabled={refreshing} title="重新拉取用户组列表、全局默认限额与模型组/套餐名称">
+                <RefreshCw className={cn("h-4 w-4", refreshing && "animate-spin")} />刷新
+              </Button>
+              <Button size="sm" onClick={() => setDlg({ edit: null })}><Plus className="h-4 w-4" />创建用户组</Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent>
@@ -1613,7 +1625,7 @@ function UserGroupDialog({ dlg, defaults, groups, onClose, onSaved }: { dlg: { e
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
+      <DialogContent className="pb-0">
         <DialogHeader>
           <DialogTitle>{edit ? "编辑用户组" : "创建用户组"}</DialogTitle>
           <DialogDescription>留空 = 继承全局默认,0 = 显式不限;改完组限额会自动重算组内用户的生效限额。</DialogDescription>
@@ -1655,6 +1667,9 @@ function UserGroupDialog({ dlg, defaults, groups, onClose, onSaved }: { dlg: { e
                 <Plus className="h-4 w-4" />添加
               </Button>
             </div>
+            {groups.length === 0 && (
+              <p className="mt-2 text-xs text-destructive">还没有模型组,请先到「模型组」页创建,再回来绑定。</p>
+            )}
             <p className="mt-2 text-xs leading-5 text-muted-foreground">
               请求先命中高优先级组;同名对外模型在组内按<b>该组自己的负载策略</b>分流,全部失败才跨组容灾到下一组。
             </p>
@@ -1703,9 +1718,10 @@ function UserGroupDialog({ dlg, defaults, groups, onClose, onSaved }: { dlg: { e
             <div><label className="mb-1 block text-xs text-muted-foreground">月预算 tokens</label>
               <Input placeholder="继承全局" value={monthly} onChange={(e) => setMonthly(e.target.value)} /></div>
           </div>
-          {err && <p className="text-sm text-destructive">{err}</p>}
         </div>
-        <div className="flex justify-end gap-2">
+        {/* 底部操作区吸底:模型组绑定 + 套餐 + 5 项限额叠起来常超一屏,「保存」必须常驻可见。 */}
+        <div className="sticky bottom-0 -mx-6 flex shrink-0 items-center justify-end gap-2 border-t border-border bg-card px-6 py-3.5">
+          {err && <p className="mr-auto text-sm text-destructive">{err}</p>}
           <Button variant="ghost" onClick={onClose}>取消</Button>
           <Button onClick={submit} disabled={!name.trim()}>
             {edit ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}{edit ? "保存" : "创建"}
@@ -2918,6 +2934,9 @@ function GroupsPanel() {
   // 路由表客户端分页(勾选跨页保留)
   const [routePage, setRoutePage] = useState(1);
   const routePageSize = 20;
+  // 手动刷新态:左列表(组+模型+当前组路由)与右侧路由区各自转圈。
+  const [refreshing, setRefreshing] = useState(false);
+  const [routeBusy, setRouteBusy] = useState(false);
 
   const loadGroups = async () => {
     const [g, m] = await Promise.all([api.groups(), api.models()]);
@@ -2929,6 +2948,21 @@ function GroupsPanel() {
   const loadTimeRules = async (gid: number) => { setTimeRules((await api.timeRules(gid)).data); };
   useEffect(() => { loadGroups(); api.providers(1, 200).then((r) => setProvMap(Object.fromEntries(r.data.map((p) => [p.name, providerDisplayName(p)])))).catch(() => { /* 静默 */ }); }, []);
   useEffect(() => { if (sel != null) { loadRoutes(sel); loadTimeRules(sel); } setChecked(new Set()); setRoutePage(1); }, [sel]);
+
+  // 手动刷新:模型组清单 + 模型清单 + 当前组路由/时段一次拉齐,不必切换菜单。
+  const reloadAll = async () => {
+    setRefreshing(true);
+    try {
+      await loadGroups();
+      if (sel != null) await Promise.all([loadRoutes(sel), loadTimeRules(sel)]);
+    } finally { setRefreshing(false); }
+  };
+  // 仅刷新右侧当前组的路由与时段规则。
+  const reloadRoutes = async () => {
+    if (sel == null) return;
+    setRouteBusy(true);
+    try { await Promise.all([loadRoutes(sel), loadTimeRules(sel)]); } finally { setRouteBusy(false); }
+  };
 
   const createGroup = async (name: string, maxConcurrency: number) => { const r = await api.addGroup(name, maxConcurrency); await loadGroups(); setSel(r.id); };
   const setActive = async (g: GroupRow) => { if (!g.is_active) { await api.activateGroup(g.id); loadGroups(); } };
@@ -3012,6 +3046,9 @@ function GroupsPanel() {
           <div className="flex items-center justify-between gap-2">
             <CardTitle className="text-base">模型组</CardTitle>
             <div className="flex items-center gap-0.5">
+              <button className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40" title="刷新模型组与模型清单(含当前组路由)" aria-label="刷新模型组" onClick={reloadAll} disabled={refreshing}>
+                <RefreshCw className={cn("h-4 w-4", refreshing && "animate-spin")} />
+              </button>
               <button className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" title="导出全部模型组(JSON)" onClick={exportAll}><Download className="h-4 w-4" /></button>
               <button className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" title="导入模型组(JSON)" onClick={() => setImportOpen(true)}><Upload className="h-4 w-4" /></button>
             </div>
@@ -3065,6 +3102,9 @@ function GroupsPanel() {
               )}
               {sel != null && (
                 <>
+                  <Button size="sm" variant="outline" title="重新拉取本组路由与时段规则" onClick={reloadRoutes} disabled={routeBusy}>
+                    <RefreshCw className={cn("h-4 w-4", routeBusy && "animate-spin")} />
+                  </Button>
                   <Button size="sm" variant="outline" title="导出该组(JSON)" onClick={() => exportGroup(sel)}><Download className="h-4 w-4" /></Button>
                   <Button size="sm" onClick={() => setRouteDlg({ edit: null })}><Plus className="h-4 w-4" />添加路由</Button>
                 </>
@@ -3552,7 +3592,7 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       {/* 单选/批量两模式共用同一宽度,避免模式切换时弹窗宽度跳变 */}
-      <DialogContent className="max-w-3xl">
+      <DialogContent className="max-w-3xl pb-0">
         <DialogHeader>
           <DialogTitle>{edit ? "编辑路由" : "添加路由"}</DialogTitle>
           <DialogDescription>对外模型名 → 实际模型;可多选模型批量添加。</DialogDescription>
@@ -3657,9 +3697,10 @@ function AddRouteDialog({ dlg, groupId, models, onClose, onSaved }: {
               )}
             </>
           )}
-          {err && <p className="text-sm text-destructive">{err}</p>}
         </div>
-        <div className="flex justify-end gap-2">
+        {/* 底部操作区吸底:模型清单 + 批量配置可能很长,提交按钮始终可见。 */}
+        <div className="sticky bottom-0 -mx-6 flex shrink-0 items-center justify-end gap-2 border-t border-border bg-card px-6 py-3.5">
+          {err && <p className="mr-auto text-sm text-destructive">{err}</p>}
           <Button variant="ghost" onClick={onClose}>取消</Button>
           <Button onClick={submit} disabled={submitting || (!edit && !batchMode && modelId === "") || (batchMode && selectedModels.size === 0)}>
             <Plus className="h-4 w-4" />{submitting ? "提交中..." : edit ? "保存" : batchMode ? `批量添加 (${selectedModels.size})` : "添加"}
@@ -3750,7 +3791,7 @@ function TimeRuleDialog({ dlg, groupId, onClose, onSaved }: {
   const inp = "h-9 w-full rounded-lg border border-input bg-card px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-w-md pb-0">
         <DialogHeader>
           <DialogTitle>{edit ? "编辑时段规则" : "添加时段规则"}</DialogTitle>
           <DialogDescription>命中该时间段时,计费倍率 = 模型倍率 × 这里填的倍率。下面的权重覆盖是高级选项,不填就只影响计费。</DialogDescription>
@@ -3793,9 +3834,9 @@ function TimeRuleDialog({ dlg, groupId, onClose, onSaved }: {
               外层填<b>模型名</b>,内层填<b>上游 ID</b>(「模型」页可见);没写到的模型维持原权重;留空 = 本时段只改计费。
             </p>
           </div>
-          {err && <p className="text-sm text-destructive">{err}</p>}
         </div>
-        <div className="flex justify-end gap-2">
+        <div className="sticky bottom-0 -mx-6 flex shrink-0 items-center justify-end gap-2 border-t border-border bg-card px-6 py-3.5">
+          {err && <p className="mr-auto text-sm text-destructive">{err}</p>}
           <Button variant="ghost" onClick={onClose}>取消</Button>
           <Button onClick={submit} disabled={!name.trim()}><Plus className="h-4 w-4" />{edit ? "保存" : "添加"}</Button>
         </div>
