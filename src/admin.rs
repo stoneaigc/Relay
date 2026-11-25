@@ -1780,8 +1780,9 @@ pub async fn add_models_batch(
     if !matches!(body.kind.as_str(), "openai" | "anthropic") {
         return Err(ApiError::BadRequest("kind must be openai|anthropic".into()));
     }
-    if body.base_url.trim().is_empty() || body.models.is_empty() {
-        return Err(ApiError::BadRequest("base_url and at least one model required".into()));
+    // models 允许为空:先建供应商(空壳)再分批增量加模型,避免前端被迫塞一条占位模型。
+    if body.base_url.trim().is_empty() {
+        return Err(ApiError::BadRequest("base_url required".into()));
     }
     if !valid_base_url(&body.base_url) {
         return Err(ApiError::BadRequest("base_url must be a valid http(s) URL".into()));

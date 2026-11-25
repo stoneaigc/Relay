@@ -2023,6 +2023,8 @@ function ModelsPanel() {
   const [health, setHealth] = useState<Record<string, ProviderHealthItem>>({});
   // 对外模型映射:组路由(public_name) ↔ 上游模型(model_id),双向透明
   const [routeMap, setRouteMap] = useState<Record<number, { group: string; public_name: string }[]>>({});
+  // 手动刷新态:一次拉齐供应商列表 + 健康徽标 + 已展开行的模型清单。
+  const [refreshing, setRefreshing] = useState(false);
 
   const loadRouteMap = async () => {
     try {
@@ -2067,6 +2069,17 @@ function ModelsPanel() {
     const t = setInterval(loadHealth, 30000);
     return () => clearInterval(t);
   }, []);
+
+  // 手动刷新:新增/删除供应商后无需切换菜单即可看到最新列表。
+  const reloadProviders = async () => {
+    setRefreshing(true);
+    try {
+      await loadProviders();
+      await loadHealth();
+      await Promise.all([...expanded].map((n) => refreshProviderModels(n).catch(() => {})));
+    } catch { /* 错误由各自加载函数就地提示 */ }
+    setRefreshing(false);
+  };
 
   const refreshProviderModels = async (name: string) => {
     const models = (await api.providerModels(name)).data;
@@ -2225,6 +2238,9 @@ function ModelsPanel() {
           <div className="flex items-center justify-between gap-3">
             <CardTitle className="text-base">上游供应商({pageMeta.total})</CardTitle>
             <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={reloadProviders} disabled={refreshing} title="重新拉取供应商、健康状态与已展开的模型清单">
+                <RefreshCw className={cn("h-4 w-4", refreshing && "animate-spin")} />刷新
+              </Button>
               {/* 常显:配合卡片头部复选框做供应商级批量删除,未勾选时置灰。 */}
               <Button variant="destructive" size="sm" disabled={provSelected.size === 0} onClick={delSelectedProviders}>
                 <Trash2 className="h-4 w-4" />删除所选({provSelected.size})
@@ -2388,7 +2404,16 @@ function ModelsPanel() {
         </CardContent>
       </Card>
       <AddProviderDialog open={addDlg} onClose={() => setAddDlg(false)} onSaved={loadProviders} />
-      {editProvider && <EditProviderDialog provider={editProvider} onClose={() => setEditProvider(null)} onSaved={() => { setEditProvider(null); loadProviders(); }} />}
+      {editProvider && <EditProviderDialog provider={editProvider}
+        onClose={() => setEditProvider(null)}
+        onChanged={loadProviders}
+        onSaved={() => {
+          const name = editProvider.name;
+          setEditProvider(null);
+          loadProviders();
+          // 关闭时同步展开行内的模型清单,否则外层仍显示添加前的模型数。
+          if (expanded.has(name)) refreshProviderModels(name);
+        }} />}
       {editModel && <EditModelDialog model={editModel} onClose={() => setEditModel(null)} onSaved={() => {
         // 保存成功后必须同步刷新展开中的模型列表,否则界面停留在旧数据,看起来像"修改不生效"。
         const prov = editModel.provider;
@@ -2439,7 +2464,7 @@ function ModelPickList({ models, selected, setSelected, existing }: {
 }
 
 // ---- 编辑供应商对话框 ----
-function EditProviderDialog({ provider, onClose, onSaved }: { provider: ProviderRow; onClose: () => void; onSaved: () => void }) {
+function EditProviderDialog({ provider, onClose, onSaved, onChanged }: { provider: ProviderRow; onClose: () => void; onSaved: () => void; onChanged?: () => void }) {
   const [dn, setDn] = useState(provider.display_name || "");
   const [baseUrl, setBaseUrl] = useState(provider.base_url);
   const [apiKey, setApiKey] = useState("");
@@ -2491,14 +2516,15 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
       setPickSelected(new Set());
       const cur = await api.providerModels(provider.name);
       setExisting(new Set(cur.data.map((m) => m.upstream_model)));
-      onSaved();
+      // 只通知外层刷新列表,不关闭弹窗——才能连续多轮「获取→勾选→添加」。
+      onChanged?.();
     } catch (e: any) { setPickMsg(e.message); }
     setAdding(false);
   };
 
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
+      <DialogContent className="pb-0">
         <DialogHeader><DialogTitle>编辑供应商</DialogTitle><DialogDescription>{provider.name}</DialogDescription></DialogHeader>
         <div className="space-y-3">
           <div><label className="mb-1 block text-xs text-muted-foreground">名称 (留空按域名显示)</label>
@@ -2537,8 +2563,8 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
             {pickMsg && fetchedModels.length === 0 && <p className="text-xs text-destructive">{pickMsg}</p>}
           </div>
         </div>
-        {/* 底部操作区:表单遵循「自上而下填写、保存在最末」的惯例。 */}
-        <div className="flex items-center justify-end gap-2 border-t border-border pt-3.5">
+        {/* 底部操作区:吸底常驻(负边距抵消 DialogContent 的 p-6),模型列表再长也看得到「保存」。 */}
+        <div className="sticky bottom-0 -mx-6 flex shrink-0 items-center justify-end gap-2 border-t border-border bg-card px-6 py-3.5">
           {err && <p className="mr-auto text-sm text-destructive">{err}</p>}
           <Button variant="ghost" onClick={onClose}>取消</Button>
           <Button onClick={submit} disabled={submitting}>{submitting ? "保存中..." : "保存"}</Button>
@@ -2648,12 +2674,9 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
       if (limit != null && (!Number.isInteger(limit) || limit < 0)) {
         setErr("并发需为非负整数,留空继承全局,0 = 不限"); setSubmitting(false); return;
       }
-      if (selectedModels.size > 0) {
-        const items = [...selectedModels].map((m) => ({ upstream_model: m, label: m, input_price: ip, output_price: op }));
-        await api.addModelsBatch({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, display_name: provName.trim() || undefined, headers: headers.trim() || undefined, max_concurrency: limit, models: items });
-      } else {
-        await api.addModel({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, upstream_model: "custom-model", input_price: ip, output_price: op, display_name: provName.trim() || undefined, headers: headers.trim() || undefined, max_concurrency: limit });
-      }
+      // 统一走 batch 接口:未勾选模型时 models 为空,只创建供应商(不再写 custom-model 占位条目)。
+      const items = [...selectedModels].map((m) => ({ upstream_model: m, label: m, input_price: ip, output_price: op }));
+      await api.addModelsBatch({ kind, base_url: baseUrl.trim(), api_key: apiKey.trim() || undefined, display_name: provName.trim() || undefined, headers: headers.trim() || undefined, max_concurrency: limit, models: items });
       onSaved(); onClose();
     } catch (e: any) { setErr(e.message); }
     setSubmitting(false);
@@ -2664,7 +2687,7 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       {/* 探测结果出现前后保持同一宽度,避免选供应商时弹窗跳变 */}
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-w-2xl pb-0">
         <DialogHeader>
           <DialogTitle>添加上游</DialogTitle>
           <DialogDescription>选择供应商后可探测模型列表并批量添加</DialogDescription>
@@ -2722,10 +2745,18 @@ function AddProviderDialog({ open, onClose, onSaved }: { open: boolean; onClose:
           {fetchedModels.length > 0 && <ModelPickList models={fetchedModels} selected={selectedModels} setSelected={setSelectedModels} />}
           {err && <p className="text-sm text-destructive">{err}</p>}
         </div>
-        <div className="flex justify-end gap-2">
+        {/* 底部操作区吸底:模板网格 + 模型列表很长时也始终可见。 */}
+        <div className="sticky bottom-0 -mx-6 flex shrink-0 items-center justify-end gap-2 border-t border-border bg-card px-6 py-3.5">
+          <span className="mr-auto text-[0.8rem] text-muted-foreground">
+            {!baseUrl.trim()
+              ? "请先填写 Base URL（或点上方厂商模板自动填入）"
+              : selectedModels.size > 0
+                ? `将创建供应商并添加 ${selectedModels.size} 个模型`
+                : "未勾选模型时仅创建供应商，模型可稍后在「编辑」里补充"}
+          </span>
           <Button variant="ghost" onClick={onClose}>取消</Button>
-          <Button onClick={submit} disabled={submitting || (fetchedModels.length > 0 && selectedModels.size === 0)}>
-            {submitting ? "提交中..." : selectedModels.size > 0 ? `添加 (${selectedModels.size} 个模型)` : "添加"}
+          <Button onClick={submit} disabled={submitting || !baseUrl.trim()}>
+            {submitting ? "提交中..." : selectedModels.size > 0 ? `创建并添加 ${selectedModels.size} 个模型` : "仅创建供应商"}
           </Button>
         </div>
       </DialogContent>
