@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { Users as UsersIcon, UsersRound, KeyRound, Copy, Boxes, Layers, BarChart3, LayoutDashboard, LogOut, Plus, Power, Menu, X, Trash2, Pencil, TrendingUp, Activity, Star, Gift, Check, ExternalLink, Settings, Send, Zap, RefreshCw, Clock, ShieldAlert, ShieldCheck, Cpu, Search, RotateCcw, AlertTriangle, Link2, GitBranch, DollarSign, Database, Sparkles, Download, Upload, BookOpen, SlidersHorizontal, Undo2, Ban, ChevronRight, ArrowUp, ArrowDown, Inbox, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { api, getToken, clearToken, healthz, SITE_PREFIX, UserRow, UserGroupRow, ModelRow, ProviderRow, ProviderModelRow, ProviderHealthItem, GroupRow, RouteRow, RewardClaimRow, RewardTaskRow, RewardTaskBody, EvidenceType, EmailSettingsResp, UpstreamRow, UpstreamsResp, FailureRow, AuditFailuresResp, PlanBody, ResetPeriod, MetricsSeriesPoint, MetricsDashboardResp, MetricsUpstreamRow, RequestLogRow, RequestAttempt, TimeRuleRow, TimeRulePayload, CacheStatsResp, CacheTrendPoint, CacheHitRow, EmbeddingSettingsResp, UsageBreakdownResp, UsageBreakdownRow, ImportGroupPayload, ImportPreviewResp, AuditLogRow, OverviewResp, OverviewSeriesPoint, AdminKeyRow, AdminApiKeyRow, PlanRow, PlanQuotaRow, UsageTrendPoint } from "./api";
 import { Button } from "@/components/ui/button";
@@ -2511,15 +2511,15 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
             <Input value={headers} onChange={(e) => setHeaders(e.target.value)} placeholder='留空保持不变;{} = 清除;如 {"x-opencode-session":"..."}' /></div>
           <div><label className="mb-1 block text-xs text-muted-foreground">供应商并发上限</label>
             <Input type="number" min="0" step="1" value={maxConcurrency} onChange={(e) => setMaxConcurrency(e.target.value)} placeholder="留空继承全局,0 = 不限" /></div>
-          {err && <p className="text-sm text-destructive">{err}</p>}
-          <div className="flex justify-end gap-2">
-            <Button variant="ghost" onClick={onClose}>取消</Button>
-            <Button onClick={submit} disabled={submitting}>{submitting ? "保存中..." : "保存"}</Button>
-          </div>
+          {/* 上游模型清单:顺序上放在「保存」之前——先填连接参数,再拉取/挑选模型,最后统一提交。
+              注意本区为即时操作(拉取与添加走独立接口),不随下方保存按钮提交。 */}
           <div className="border-t pt-3">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-sm font-medium">上游模型</span>
-              <Button type="button" variant="outline" size="sm" onClick={doFetchModels} disabled={fetching || !baseUrl.trim()}>
+            <div className="mb-2 flex items-start justify-between gap-2">
+              <div>
+                <span className="text-sm font-medium">上游模型</span>
+                <p className="mt-0.5 text-[0.8rem] text-muted-foreground">拉取与添加即时生效,不随下方保存提交。</p>
+              </div>
+              <Button type="button" variant="outline" size="sm" onClick={doFetchModels} disabled={fetching || !baseUrl.trim()} className="shrink-0">
                 <Search className="h-3.5 w-3.5 mr-1" />{fetching ? "获取中..." : fetchedModels.length > 0 ? "重新获取" : "获取模型列表"}
               </Button>
             </div>
@@ -2536,6 +2536,12 @@ function EditProviderDialog({ provider, onClose, onSaved }: { provider: Provider
             )}
             {pickMsg && fetchedModels.length === 0 && <p className="text-xs text-destructive">{pickMsg}</p>}
           </div>
+        </div>
+        {/* 底部操作区:表单遵循「自上而下填写、保存在最末」的惯例。 */}
+        <div className="flex items-center justify-end gap-2 border-t border-border pt-3.5">
+          {err && <p className="mr-auto text-sm text-destructive">{err}</p>}
+          <Button variant="ghost" onClick={onClose}>取消</Button>
+          <Button onClick={submit} disabled={submitting}>{submitting ? "保存中..." : "保存"}</Button>
         </div>
       </DialogContent>
     </Dialog>
@@ -4663,7 +4669,7 @@ function CachePanel() {
           </div>
           <Button size="sm" variant="outline"
             className="shrink-0 border-indigo-500/40 text-indigo-600 hover:bg-indigo-500/10 hover:text-indigo-600"
-            onClick={() => navigate("/settings")}>
+            onClick={() => navigate("/settings?tab=engine")}>
             配置 embedding 供应商<ExternalLink className="h-3.5 w-3.5" />
           </Button>
         </div>
@@ -4816,7 +4822,14 @@ function SettingsPanel() {
   const [billNote, setBillNote] = useState("");
   const [billErr, setBillErr] = useState("");
   // 设置页 Tab 分组:卡片较多,按心智模型归组展示。
-  const [settingsTab, setSettingsTab] = useState<SettingsTabKey>("base");
+  // 支持 ?tab=engine 直达指定分页:缓存统计页的「配置 embedding 供应商」按钮需要
+  // 落在「转发与缓存」分页上,否则用户还得自己再点一次 Tab。
+  const [settingsParams] = useSearchParams();
+  const initialTab = (): SettingsTabKey => {
+    const t = settingsParams.get("tab");
+    return t === "comm" || t === "engine" || t === "admin" ? t : "base";
+  };
+  const [settingsTab, setSettingsTab] = useState<SettingsTabKey>(initialTab);
   // 门户设置
   const [portalRewards, setPortalRewards] = useState(false);
   const [portalPhone, setPortalPhone] = useState(true);
@@ -5433,7 +5446,10 @@ function SettingsPanel() {
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-xs text-muted-foreground">
-            确定性请求(temperature≤0.001 或带 seed)在 TTL 内命中缓存直接回放,并按下方「命中计费折扣率」扣费(tokens 照实入账);响应头 X-Relay-Cache 标记 HIT (exact)/HIT (semantic)/MISS,请求头 x-relay-cache-control: no-cache 可跳过缓存。命中还要求路由级开关已启用(路由页「缓存」徽标)。
+            分两层生效：<span className="text-foreground">L1 精确哈希</span>（请求体与参数完全相同才命中，无需任何外部依赖）＋<span className="text-foreground">L2 语义相似</span>（意思相近也命中，依赖下方「语义向量」引擎，未配置时自动只用 L1）。
+          </p>
+          <p className="text-xs text-muted-foreground">
+            命中后在 TTL 内直接回放并按下方「命中计费折扣率」扣费（tokens 照实入账）。生效需同时满足：全局开关开启 + 该路由已勾选缓存（路由页「缓存」徽标）+ 请求确定性（temperature≤0.001 或带 seed）+ 消息条数未超阈值。响应头 X-Relay-Cache 标记 HIT (exact)/HIT (semantic)/MISS，请求头 x-relay-cache-control: no-cache 可跳过缓存。
           </p>
           <div className="flex items-center justify-between gap-4 rounded-xl border bg-muted/30 px-4 py-3">
             <div className="space-y-0.5">
@@ -5485,15 +5501,19 @@ function SettingsPanel() {
           {/* 语义向量(embedding):语义缓存的向量化引擎,与缓存配置同块管理。 */}
           <div className="space-y-4 border-t pt-5" data-testid="embedding-section">
             <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <p className="text-sm font-semibold">语义向量(embedding)</p>
+                <Badge variant="muted">语义缓存 L2 引擎 · 可选</Badge>
                 <Badge variant={embEnabled && embHasKey ? "success" : "muted"}>
                   {embEnabled ? (embHasKey ? "✓ 已启用" : "⚠ 缺少 API Key") : "未启用"}
                 </Badge>
               </div>
             </div>
             <p className="text-xs text-muted-foreground">
-              配置 OpenAI 兼容的 /embeddings 接口后,语义缓存从「精确哈希命中」升级为「语义相似命中」:意思相近的请求(相似度达到上方阈值)也免费回放。请求文本会发送至该供应商做向量化(仅用于本地相似度计算);任何失败都会自动降级为精确命中,不影响转发。
+              不是与语义缓存并列的第二套功能，而是它的可选增强件：配置 OpenAI 兼容的 /embeddings 接口后，语义缓存从「精确哈希命中（L1）」升级为「语义相似命中（L2）」——意思相近的请求（相似度达到上方阈值）也免费回放；关闭或调用失败时自动退回 L1，缓存照常工作。
+            </p>
+            <p className="text-xs text-muted-foreground">
+              两个附带影响需知悉：① 请求文本会发送至该供应商做向量化（仅用于本地相似度计算）；② 地址与模型填写齐全后，网关同时对外开放 <span className="mono text-foreground">/v1/embeddings</span> 端点，供用户直接调用向量化能力（与上方开关无关）。
             </p>
             <div className="flex items-center justify-between gap-4 rounded-xl border bg-muted/30 px-4 py-3">
               <div className="space-y-0.5">
